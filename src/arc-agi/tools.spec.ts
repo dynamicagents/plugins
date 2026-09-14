@@ -1050,4 +1050,33 @@ describe("a cancelled arc_act", () => {
     const next = await callTool(build(c).tools.arc_act, one(1));
     expect(next).not.toMatch(/may have been interrupted/);
   });
+
+  it("stops the batch at its call's time limit, which the execution never sees", async () => {
+    const call = new AbortController();
+    // The limit lands while the first step is in flight: that step is answered and
+    // recorded, and the second is never sent. Only the call's signal fires — the
+    // execution goes on, so a batch reading that alone would keep playing.
+    const hits = stubFetch({
+      "/api/cmd/ACTION1": () => {
+        call.abort(new DOMException("tool call timed out", "TimeoutError"));
+        return FRAME();
+      },
+      "/api/cmd/ACTION2": () => FRAME()
+    });
+    const { ctx: c } = ctx();
+    const execution = new AbortController();
+    const { tools } = build({ ...c, signal: execution.signal });
+
+    const out = await callTool(
+      tools.arc_act,
+      { steps: [{ action: 1 }, { action: 2 }] },
+      { abortSignal: call.signal }
+    );
+
+    expect(hits).toEqual(["/api/cmd/ACTION1"]);
+    expect(out).toContain("this call reached its time limit");
+    expect(execution.signal.aborted).toBe(false);
+    const next = await callTool(build(c).tools.arc_act, one(1));
+    expect(next).not.toMatch(/may have been interrupted/);
+  });
 });

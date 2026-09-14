@@ -75,9 +75,6 @@ export function buildArcGameTools(
   // cannot do — `Env` is the ambient interface `wrangler types` generates into a
   // *consumer's* app and does not exist here. Config-at-instantiation is also
   // the only thing that works on Workers at all, where `env` has no module scope.
-  // The execution's signal goes in the same way, so a cancel reaches a request or
-  // a backoff without every call having to carry it.
-  const client = makeArcClient(apiKey, { signal: ctx.signal });
   const runtime = runtimeAs<ArcRuntime>(ctx.runtime);
 
   // All settled before the model runs — it cannot pick a different game, and it
@@ -231,7 +228,20 @@ export function buildArcGameTools(
           .optional()
           .describe("brief reasoning for this move or sequence")
       }),
-      execute: async ({ steps, note }) => {
+      execute: async ({ steps, note }, { abortSignal }) => {
+        // The call's own signal, not the execution's: it fires at this call's time
+        // limit as well as on a cancel, and past that limit core has stopped
+        // waiting — a batch still sending would spend moves on the card that the
+        // model is told never finished, and it may send them again. A caller
+        // with no loop hands `execute` no signal, and then a cancel is all there
+        // is to stop at.
+        const signal = abortSignal ?? ctx.signal;
+        const client = makeArcClient(apiKey, { signal });
+        const stoppedBy = (): string =>
+          (signal?.reason as { name?: string } | undefined)?.name ===
+          "TimeoutError"
+            ? "this call reached its time limit"
+            : "this call was cancelled";
         // Acting immediately is right — the results below carry the board — but
         // this chunk's orientation goes out first, so the model is never acting
         // on a board it can no longer see.
@@ -309,18 +319,16 @@ export function buildArcGameTools(
           session.pendingAction = { action, x, y };
           await save(session);
 
-          // A cancel is checked here, with the intent already on disk, because this
+          // The signal is checked here, with the intent already on disk, because this
           // is the last moment before the request: a check ahead of the write would
           // miss a cancel that lands during it. A request on an aborted signal is
           // never sent, so the intent is taken back rather than left for the next
           // chunk to warn about a move that never left. The batch ends the ordinary
           // way, with every step already sent recorded.
-          if (ctx.signal?.aborted) {
+          if (signal?.aborted) {
             session.pendingAction = null;
             await save(session);
-            trace.push(
-              remaining(steps.length, index, "this call was cancelled")
-            );
+            trace.push(remaining(steps.length, index, stoppedBy()));
             break;
           }
 

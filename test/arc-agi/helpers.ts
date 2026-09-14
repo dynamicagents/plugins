@@ -112,8 +112,12 @@ export function memStore(
   };
 }
 
-/** Invoke a tool's `execute` with a throwaway options object. */
-export function callTool(tool: unknown, input: unknown): Promise<string> {
+/** Invoke a tool's `execute`, with a throwaway options object unless given one. */
+export function callTool(
+  tool: unknown,
+  input: unknown,
+  options: { abortSignal?: AbortSignal } = {}
+): Promise<string> {
   const t = tool as { execute: (i: unknown, o: unknown) => Promise<string> };
-  return t.execute(input, {});
+  return t.execute(input, options);
 }
