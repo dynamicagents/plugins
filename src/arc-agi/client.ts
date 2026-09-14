@@ -78,8 +78,9 @@ export interface ArcClientOptions {
   maxAttempts?: number;
   /**
    * Stops every request this client makes, and every wait between them. Taken at
-   * construction, because a client built for one tool surface stops on that
-   * surface's signal — core's `ToolFamilyContext.signal` for a subagent's.
+   * construction, so a client lives no longer than the signal it stops on: a tool
+   * builds one per call, from that call's signal — see
+   * {@link file://./tools.ts buildArcGameTools}.
    */
   signal?: AbortSignal;
 }
