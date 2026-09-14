@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   buildRepoTools,
+  repo,
+  repoToolApproval,
   type RepoConfig,
   type RepoExec,
   type RepoGit,
@@ -1553,5 +1555,131 @@ describe("concurrent git", () => {
       ])
     ).resolves.toHaveLength(2);
     expect(calls).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * The calls a person approves before they run.
+ *
+ * What matters about a rule is what it makes the person read: an approval worded
+ * vaguely is one a person clicks without knowing what they allowed.
+ */
+describe("what a person approves before it runs", () => {
+  /** The rules for a checkout whose origin git reports as `results` say. */
+  const rulesFor = (results: Stubbed = {}) =>
+    repoToolApproval({
+      exec: recorder(results).exec,
+      git: gitRecorder().git,
+      token: () => TOKEN
+    } as RepoConfig);
+
+  const rules = rulesFor({
+    "remote get-url origin": { stdout: "https://github.com/acme/web" }
+  });
+
+  const verdictOf = async (
+    set: ReturnType<typeof repoToolApproval>,
+    name: string,
+    input: unknown
+  ) => {
+    const rule = set[name];
+    return typeof rule === "function"
+      ? await rule(input, { toolCallId: "call-1", messages: [] })
+      : rule;
+  };
+
+  const pullRequest = {
+    dir: "/workspace/web",
+    head: "coder/fix-login",
+    base: "main",
+    title: "Fix the login redirect",
+    body: "What changed and why."
+  };
+
+  it("holds a pull request, naming where it goes and what it is called", async () => {
+    const held = await verdictOf(rules, "repo_open_pr", pullRequest);
+
+    expect(held).toMatchObject({ type: "user-approval" });
+    for (const part of [
+      "github.com/acme/web",
+      "coder/fix-login",
+      "main",
+      "Fix the login redirect"
+    ])
+      expect(JSON.stringify(held)).toContain(part);
+  });
+
+  it("names the repository the origin points at, not the directory's name", async () => {
+    // The tool opens the pull request on the origin, and `.git/config` can point
+    // anywhere the host allows; a prompt reading the path would name the wrong
+    // repository.
+    const held = (await verdictOf(
+      rulesFor({
+        "remote get-url origin": { stdout: "https://github.com/acme/api" }
+      }),
+      "repo_open_pr",
+      pullRequest
+    )) as { reason: string };
+
+    expect(held.reason).toContain("github.com/acme/api");
+    expect(held.reason).not.toContain("web");
+  });
+
+  it("still asks, naming the checkout's path, when its origin cannot be read", async () => {
+    const held = (await verdictOf(
+      rulesFor({ "remote get-url origin": { success: false } }),
+      "repo_open_pr",
+      pullRequest
+    )) as { type: string; reason: string };
+
+    expect(held.type).toBe("user-approval");
+    expect(held.reason).toContain("/workspace/web");
+    expect(held.reason).toContain("could not be read");
+  });
+
+  it("keeps every model-supplied field short enough to read before approving", async () => {
+    const long = "x".repeat(20_000);
+    const held = (await verdictOf(rules, "repo_open_pr", {
+      dir: long,
+      head: long,
+      base: long,
+      title: long,
+      body: long
+    })) as { reason: string };
+
+    expect(held.reason.length).toBeLessThan(1_000);
+  });
+
+  it("gates only opening a pull request, a tool the plugin offers", () => {
+    // At runtime a rule for a name no tool has is dropped with a log line; a
+    // rename that did that is caught here instead.
+    const offered = Object.keys(tools(recorder().exec));
+
+    expect(Object.keys(rules)).toEqual(["repo_open_pr"]);
+    expect(offered).toContain("repo_open_pr");
+  });
+
+  it("lets every other tool run without asking", () => {
+    for (const name of [
+      "repo_clone",
+      "repo_status",
+      "repo_diff",
+      "repo_commit",
+      "repo_push",
+      "repo_issue_view",
+      "repo_pr_view",
+      "repo_pr_comment"
+    ])
+      expect(rules[name]).toBeUndefined();
+  });
+
+  it("installs the rules with the plugin", () => {
+    const plugin = repo({
+      exec: recorder().exec,
+      git: gitRecorder().git,
+      token: () => TOKEN
+    } as RepoConfig);
+
+    expect(plugin.mainAgentToolApproval).toBeDefined();
   });
 });

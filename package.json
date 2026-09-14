@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/plugins",
-  "version": "0.10.3",
+  "version": "0.11.0",
   "description": "Optional, composable capabilities for a Dynamic Agent: ARC-AGI-3, browser rendering, a Linux container, git and pull requests, workspace, episodic recall, and pre-turn triage. One subpath per plugin, so a bundle grows only with what it imports.",
   "keywords": [
     "ai-agents",
@@ -85,12 +85,12 @@
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
     "prepack": "npm run build && npm run verify:exports",
     "prepublishOnly": "npm run check && npm test && npm run verify:exports",
-    "prepare": "husky"
+    "prepare": "husky || true && npm run build"
   },
   "peerDependencies": {
     "@cloudflare/computer": "^0.2.1",
     "@cloudflare/shell": "^0.4.3",
-    "@dynamicagents/core": ">=0.9.0 <0.11.0",
+    "@dynamicagents/core": ">=0.11.0 <0.12.0",
     "agents": ">=0.21.0 <0.23.0",
     "ai": "^7.0.77",
     "drizzle-orm": ">=0.45.2",
@@ -109,7 +109,7 @@
     "@cloudflare/computer": "^0.2.1",
     "@cloudflare/shell": "0.4.3",
     "@cloudflare/vitest-plugin": "^1.1.5",
-    "@dynamicagents/core": "^0.9.0",
+    "@dynamicagents/core": "^0.11.0",
     "@types/node": "^26.5.0",
     "agents": ">=0.21.0 <0.23.0",
     "ai": "^7.0.93",
