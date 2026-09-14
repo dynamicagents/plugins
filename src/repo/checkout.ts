@@ -39,7 +39,7 @@ export interface GitAnswer {
   unreachable?: true;
 }
 
-/** The two runners `refreshCheckout` borrows from `buildRepoTools`. */
+/** The two runners `refreshCheckout` borrows from `repoSurface`. */
 export interface GitRunners {
   plain: (
     args: string,

@@ -368,7 +368,7 @@ export function truncateOutput(text: string, max: number): string {
  * `exec` does not only *return* failures, it throws them: `@cloudflare/computer`
  * throws `EEXEC_LOST` when a container is replaced mid-command, and any call to a
  * Durable Object can fail outright. Both are caught at the seam
- * ({@link buildRepoTools}'s `run`) and turned into a failed result, so every tool
+ * ({@link repoSurface}'s `run`) and turned into a failed result, so every tool
  * answers in its own `!success` branch — "could not read the status of /w/r: …"
  * is a better sentence than any wrapper one level up could write, and a seventh
  * tool calling `plain` gets it without being told.
@@ -420,7 +420,7 @@ function unreachableNote(err: unknown): string {
  * `repo_push` race: the commit fails, the push succeeds against the previous
  * state, and the round reports work that never landed.
  *
- * Held here rather than in {@link buildRepoTools}'s closure, because that closure
+ * Held here rather than in {@link repoSurface}'s closure, because that closure
  * is too short-lived to be the boundary. Core rebuilds `mainAgentTools` every
  * turn and gives each subagent execution its own tool family, so a per-call queue
  * leaves a subagent racing its parent over one checkout — the same collision, one
@@ -462,6 +462,18 @@ export function buildRepoTools(
   /** Forwarded to every `exec`; see {@link RepoExec}'s `runtime` option. */
   runtime?: unknown
 ): ToolSet {
+  return repoSurface(config, runtime).tools;
+}
+
+/**
+ * The repo tools, and the approval rule for the one a person approves — one
+ * closure, so the rule reads the checkout through the same `origin` the tool it
+ * gates runs against. See {@link repoToolApproval}.
+ */
+function repoSurface(
+  config: RepoConfig,
+  runtime?: unknown
+): { tools: ToolSet; approval: MainAgentToolApproval } {
   const workdir = config.workdir ?? DEFAULT_WORKDIR;
   const apiBase = config.apiBase ?? DEFAULT_API_BASE;
   const author = config.author ?? DEFAULT_AUTHOR;
@@ -810,7 +822,7 @@ export function buildRepoTools(
     return { remote: { host: location.host, url: location.url } };
   };
 
-  return {
+  const tools: ToolSet = {
     repo_clone: tool({
       description:
         "Clone a git repository into the workspace. Returns the checkout path and the branch you landed on. If the repository is already checked out from an earlier task, it is fetched and reset to the remote instead — unless it has uncommitted changes, which are left alone for you to inspect.",
@@ -1498,38 +1510,24 @@ export function buildRepoTools(
       }
     })
   };
-}
 
-/** The longest comment a person is shown in full before approving it. */
-const APPROVAL_COMMENT_CHARS = 400;
+  /**
+   * Where a pull request is opened, as the person approving it reads it: the
+   * host, owner and repository of the checkout's origin — what the tool resolves
+   * when it runs. Never the directory's name, which says nothing about where
+   * `.git/config` points. A checkout with no readable origin on an allowed host is
+   * named by its path, and the tool refuses it when it runs.
+   */
+  const destination = async (dir: string): Promise<string> => {
+    const { remote } = await origin(dir);
+    const parsed = remote ? parseRepo(remote.url, allowedHosts) : undefined;
+    return remote && parsed
+      ? `${remote.host}/${parsed.owner}/${parsed.repo}`
+      : `the checkout at ${approvalField(dir)}, whose origin could not be read`;
+  };
 
-/** A checkout's directory as a person knows it: the repository's own name. */
-function checkoutName(dir: string): string {
-  return dir.split("/").filter(Boolean).at(-1) ?? dir;
-}
-
-/**
- * The repo tools a person approves before they run: the ones that publish to the
- * forge, where a mistake is seen by other people and the agent cannot take it
- * back. Everything else the tools do stays in the checkout — a commit included,
- * which nothing outside it sees until a push.
- *
- * Each reason is what the person reads beside Approve and Reject, so it says what
- * the call will do in their terms: which branch goes where, which pull request,
- * and what a comment says. The input has already passed the tool's own schema.
- * What a rule is, and whose calls it covers, is core's to say — see
- * `AgentPlugin.mainAgentToolApproval`.
- */
-export function repoToolApproval(): MainAgentToolApproval {
-  return {
-    repo_push: (input) => {
-      const { dir, branch } = input as { dir: string; branch: string };
-      return {
-        type: "user-approval",
-        reason: `Push the branch \`${branch}\` of ${checkoutName(dir)} to its remote.`
-      };
-    },
-    repo_open_pr: (input) => {
+  const approval: MainAgentToolApproval = {
+    repo_open_pr: async (input) => {
       const { dir, head, base, title } = input as {
         dir: string;
         head: string;
@@ -1538,21 +1536,42 @@ export function repoToolApproval(): MainAgentToolApproval {
       };
       return {
         type: "user-approval",
-        reason: `Open a pull request on ${checkoutName(dir)} from \`${head}\` into \`${base}\`: ${title}`
-      };
-    },
-    repo_pr_comment: (input) => {
-      const { dir, number, body } = input as {
-        dir: string;
-        number: number;
-        body: string;
-      };
-      return {
-        type: "user-approval",
-        reason: `Comment on #${number} in ${checkoutName(dir)}:\n\n${truncateOutput(body, APPROVAL_COMMENT_CHARS)}`
+        reason: `Open a pull request on ${await destination(dir)} from \`${approvalField(head)}\` into \`${approvalField(base)}\`: ${approvalField(title)}`
       };
     }
   };
+
+  return { tools, approval };
+}
+
+/**
+ * The longest branch, title or path a person is shown in full before approving.
+ * Every model-supplied field in a reason is cut to it, so no one input can bury
+ * the rest of what they are deciding.
+ */
+const APPROVAL_FIELD_CHARS = 200;
+
+/** One model-supplied field of an approval reason, cut to {@link APPROVAL_FIELD_CHARS}. */
+function approvalField(text: string): string {
+  return text.length <= APPROVAL_FIELD_CHARS
+    ? text
+    : `${text.slice(0, APPROVAL_FIELD_CHARS - 1)}…`;
+}
+
+/**
+ * The repo tools a person approves before they run: opening a pull request, and
+ * nothing else. Pushing a work branch and commenting run without asking.
+ *
+ * The reason is what the person reads beside Approve and Reject, so it says what
+ * the call will do in their terms: which repository, from which branch into
+ * which, and under what title. The repository is the checkout's origin, read
+ * through the same lookup the tool runs, so a directory named after one
+ * repository cannot present a pull request on another. The input has already
+ * passed the tool's own schema. What a rule is, and whose calls it covers, is
+ * core's to say — see `AgentPlugin.mainAgentToolApproval`.
+ */
+export function repoToolApproval(config: RepoConfig): MainAgentToolApproval {
+  return repoSurface(config).approval;
 }
 
 export function repo(config: RepoConfig): AgentPlugin {
@@ -1560,7 +1579,7 @@ export function repo(config: RepoConfig): AgentPlugin {
     key: "repo",
 
     mainAgentTools: () => buildRepoTools(config),
-    mainAgentToolApproval: () => repoToolApproval(),
+    mainAgentToolApproval: () => repoToolApproval(config),
 
     // The runtime state goes through to `exec` untouched, so a delegated
     // subtask's git commands run in the same container its parent cloned into.

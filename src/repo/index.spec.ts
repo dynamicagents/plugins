@@ -1561,89 +1561,114 @@ describe("concurrent git", () => {
 /**
  * The calls a person approves before they run.
  *
- * What matters about each rule is what it makes the person read: an approval
- * worded vaguely is one a person clicks without knowing what they allowed.
+ * What matters about a rule is what it makes the person read: an approval worded
+ * vaguely is one a person clicks without knowing what they allowed.
  */
 describe("what a person approves before it runs", () => {
-  const rules = repoToolApproval();
+  /** The rules for a checkout whose origin git reports as `results` say. */
+  const rulesFor = (results: Stubbed = {}) =>
+    repoToolApproval({
+      exec: recorder(results).exec,
+      git: gitRecorder().git,
+      token: () => TOKEN
+    } as RepoConfig);
 
-  const verdict = async (name: string, input: unknown) => {
-    const rule = rules[name];
+  const rules = rulesFor({
+    "remote get-url origin": { stdout: "https://github.com/acme/web" }
+  });
+
+  const verdictOf = async (
+    set: ReturnType<typeof repoToolApproval>,
+    name: string,
+    input: unknown
+  ) => {
+    const rule = set[name];
     return typeof rule === "function"
       ? await rule(input, { toolCallId: "call-1", messages: [] })
       : rule;
   };
 
-  it("holds a push, naming the branch and the checkout", async () => {
-    expect(
-      await verdict("repo_push", {
-        dir: "/workspace/web",
-        branch: "coder/fix-login"
-      })
-    ).toEqual({
-      type: "user-approval",
-      reason: expect.stringMatching(/coder\/fix-login.*web/)
-    });
-  });
+  const pullRequest = {
+    dir: "/workspace/web",
+    head: "coder/fix-login",
+    base: "main",
+    title: "Fix the login redirect",
+    body: "What changed and why."
+  };
 
   it("holds a pull request, naming where it goes and what it is called", async () => {
-    const held = await verdict("repo_open_pr", {
-      dir: "/workspace/web",
-      head: "coder/fix-login",
-      base: "main",
-      title: "Fix the login redirect",
-      body: "What changed and why."
-    });
+    const held = await verdictOf(rules, "repo_open_pr", pullRequest);
 
     expect(held).toMatchObject({ type: "user-approval" });
-    for (const part of ["coder/fix-login", "main", "Fix the login redirect"])
+    for (const part of [
+      "github.com/acme/web",
+      "coder/fix-login",
+      "main",
+      "Fix the login redirect"
+    ])
       expect(JSON.stringify(held)).toContain(part);
   });
 
-  it("holds a comment, showing what it will say", async () => {
-    const held = await verdict("repo_pr_comment", {
-      dir: "/workspace/web",
-      number: 42,
-      body: "Pushed the fix; the tests pass."
-    });
+  it("names the repository the origin points at, not the directory's name", async () => {
+    // The tool opens the pull request on the origin, and `.git/config` can point
+    // anywhere the host allows; a prompt reading the path would name the wrong
+    // repository.
+    const held = (await verdictOf(
+      rulesFor({
+        "remote get-url origin": { stdout: "https://github.com/acme/api" }
+      }),
+      "repo_open_pr",
+      pullRequest
+    )) as { reason: string };
 
-    expect(JSON.stringify(held)).toContain("#42");
-    expect(JSON.stringify(held)).toContain("Pushed the fix; the tests pass.");
+    expect(held.reason).toContain("github.com/acme/api");
+    expect(held.reason).not.toContain("web");
   });
 
-  it("keeps a long comment short enough to read before approving", async () => {
-    const held = (await verdict("repo_pr_comment", {
-      dir: "/workspace/web",
-      number: 42,
-      body: "x".repeat(20_000)
+  it("still asks, naming the checkout's path, when its origin cannot be read", async () => {
+    const held = (await verdictOf(
+      rulesFor({ "remote get-url origin": { success: false } }),
+      "repo_open_pr",
+      pullRequest
+    )) as { type: string; reason: string };
+
+    expect(held.type).toBe("user-approval");
+    expect(held.reason).toContain("/workspace/web");
+    expect(held.reason).toContain("could not be read");
+  });
+
+  it("keeps every model-supplied field short enough to read before approving", async () => {
+    const long = "x".repeat(20_000);
+    const held = (await verdictOf(rules, "repo_open_pr", {
+      dir: long,
+      head: long,
+      base: long,
+      title: long,
+      body: long
     })) as { reason: string };
 
     expect(held.reason.length).toBeLessThan(1_000);
   });
 
-  it("gates only tools the plugin offers, so a rename cannot leave one unasked", () => {
+  it("gates only opening a pull request, a tool the plugin offers", () => {
     // At runtime a rule for a name no tool has is dropped with a log line; a
     // rename that did that is caught here instead.
     const offered = Object.keys(tools(recorder().exec));
 
-    expect(Object.keys(rules).sort()).toEqual([
-      "repo_open_pr",
-      "repo_pr_comment",
-      "repo_push"
-    ]);
-    expect(Object.keys(rules).every((name) => offered.includes(name))).toBe(
-      true
-    );
+    expect(Object.keys(rules)).toEqual(["repo_open_pr"]);
+    expect(offered).toContain("repo_open_pr");
   });
 
-  it("lets what stays in the checkout run without asking", () => {
+  it("lets every other tool run without asking", () => {
     for (const name of [
       "repo_clone",
       "repo_status",
       "repo_diff",
       "repo_commit",
+      "repo_push",
       "repo_issue_view",
-      "repo_pr_view"
+      "repo_pr_view",
+      "repo_pr_comment"
     ])
       expect(rules[name]).toBeUndefined();
   });
