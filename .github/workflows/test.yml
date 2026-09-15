@@ -1,18 +1,15 @@
 name: Test
 
-# `next` is where development lands; `main` is the released line, and a merge
-# from `next` into it is what a release is. Both need the suite: without `next`
-# here a PR into it would be unchecked, and Release keys off the run Test
-# completes on `main`.
+# A PR runs the suite before it merges, and Release keys off the run Test
+# completes on `main`. Why a merge to `main` ships nothing until it carries a
+# bump is one fact with one home — AGENTS.md, under Publishing.
 on:
   push:
     branches:
       - main
-      - next
   pull_request:
     branches:
       - main
-      - next
 
 # Superseded PR runs are cancelled; main is not, because Release keys off the
 # run that Test completes there.
@@ -34,10 +31,10 @@ jobs:
           # One source of truth with local dev; `engines` requires >=24.
           node-version-file: .nvmrc
 
-      # From the committed lockfile, never from a sibling checkout. Whether that
-      # lockfile resolves core to the registry or to a git ref is the branch's
-      # business, and AGENTS.md's to explain. A local install is an inner-loop
-      # convenience, and a package that only builds against one must never ship.
+      # From the committed lockfile, never from a sibling checkout. When that
+      # lockfile may resolve core to a git ref instead of the registry is
+      # AGENTS.md's to explain. A local install is an inner-loop convenience, and a
+      # package that only builds against one must never ship.
       - run: npm ci
 
       # `npm test` alone would pass on code that neither typechecks nor formats:
