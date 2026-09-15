@@ -55,11 +55,20 @@ describe("walkSkips", () => {
     expect([...walkSkips("/workspace/repo")]).toEqual([".git", "node_modules"]);
   });
 
-  it("stops skipping the one the caller asked for by name", () => {
+  it("stops skipping the dependency tree when the caller names it", () => {
     expect([...walkSkips("/workspace/repo/node_modules/zod")]).toEqual([
       ".git"
     ]);
-    expect([...walkSkips("/workspace/repo/.git")]).toEqual(["node_modules"]);
+  });
+
+  /**
+   * `.git` has no opt-in, and the two halves of that agree: a walk rooted inside
+   * it is refused by `guardPath` before it starts, and a walk that merely passes
+   * through it still drops those results. Naming it cannot turn the policy off.
+   */
+  it("keeps skipping .git even when it is named", () => {
+    expect([...walkSkips("/workspace/repo/.git")]).toContain(".git");
+    expect(guardPath("/workspace/repo/.git", "sb_grep")).toBeDefined();
   });
 
   it("searches a named directory rather than reporting it skipped", () => {
@@ -69,7 +78,7 @@ describe("walkSkips", () => {
     );
   });
 
-  it("names what it skipped, for the sentence that reports an empty page", () => {
+  it("names what it skipped, for the sentence that reports a crowded page", () => {
     expect(skipNames(walkSkips("/workspace/repo"))).toBe(
       "`.git` and `node_modules`"
     );

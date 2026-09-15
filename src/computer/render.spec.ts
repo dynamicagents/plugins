@@ -314,9 +314,10 @@ describe("a sync that has not landed", () => {
     expect(out).toContain("built");
     expect(out).toContain("--- exit 0 ---");
     expect(out).toContain("has not reached the workspace");
-    // The recovery is to look again, never to run the command twice: the host
-    // drives the outstanding pull, and a re-run would repeat the side effects.
-    expect(out).toContain("read again");
+    // Never a re-run: the pull lands when the host drives one, and running the
+    // command again would repeat whatever it already did.
+    expect(out).toContain("Do not re-run");
+    expect(out).toContain("Read again");
   });
 
   it("stays quiet when the sync completed, or when there is none to report", () => {

@@ -43,11 +43,10 @@ import type { WorkspaceAdvisory } from "./advisory.js";
  * container: a replacement is handed the tree back rather than rebuilding it,
  * and the file tools read inside it like anywhere else.
  *
- * What that costs is attention rather than correctness. A real tree is 22,470
- * files and sorts before `src`, so a recursive listing or a search that walked
- * into it would spend its whole page there. Walks step over it and over `.git`
- * for that reason, and naming either as the path searches it — see `paths.ts`,
- * which owns that rule.
+ * What that costs is attention rather than correctness: a real tree is 22,470
+ * files and sorts before `src`, so a walk that showed it would spend its whole
+ * page there. `paths.ts` owns what walks drop and what a path may be, including
+ * the one opt-in.
  *
  * Requires the Workers **Paid** plan (containers) and a Durable Object binding
  * whose class owns the workspace — see the README for the wrangler block.
@@ -911,7 +910,7 @@ export function buildComputerTools(
       description:
         "List files in a workspace directory, or find files by name. Without `pattern` it lists one level: directories with a trailing slash, files with their size — check that before reading a large one, since sb_read truncates. " +
         "`pattern` is a glob matched against paths relative to `path`, and searches the whole subtree: `*` stays within one path segment, `**/` crosses directories, `?` matches one character. So `*.ts` finds top-level TypeScript files and `**/*.ts` finds them at any depth. " +
-        "A cut listing reports the `offset` that continues it. Subtree listings skip `.git` and `node_modules`; name one as `path` to list inside it.",
+        "A cut listing reports the `offset` that continues it. Subtree listings leave out `.git` and `node_modules` — point `path` at node_modules to list inside it.",
       inputSchema: z.object({
         path: z.string().describe("Absolute directory path"),
         recursive: z
@@ -1024,7 +1023,7 @@ export function buildComputerTools(
         "The query is matched literally — set `regex` to interpret it as a regular expression. " +
         "Pass `include` to limit which files are searched, e.g. '**/*.ts' — without it every file under `path` is read, which is slower and rarely what you meant. " +
         "A cut result reports the `offset` that continues it. Use `context` to see the lines around a match. " +
-        "`.git` and `node_modules` are skipped; pass a `path` inside one to search it.",
+        "Results from `.git` and `node_modules` are left out — pass a `path` inside node_modules to search it.",
       inputSchema: z.object({
         query: z.string().describe("Text to find, e.g. 'buildComputerTools'"),
         path: z
@@ -1278,7 +1277,7 @@ export function computer(config: ComputerConfig): AgentPlugin {
       // is why they are stated together rather than left for the model to work
       // out from a confusing result.
       "The checkout is durable: it survives between tasks and is still there after the container restarts, so it may already contain work from an earlier task — check before assuming it is empty.",
-      "`node_modules` is durable too, so an install survives a container restart — but searches and recursive listings step over it, since a dependency tree is tens of thousands of files and would fill a page on its own. Name a path inside it to read or search there.",
+      "`node_modules` is durable too, so an install survives a container restart. Reading a file in it works like anywhere else, but searches and recursive listings leave it out, since a dependency tree is tens of thousands of files and would fill a page on its own — point `path` at it to search inside it.",
       // Stated up front rather than left to a refusal, so the model does not spend
       // a turn discovering it. The destination matters as much as the rule: a
       // prohibition with nowhere to go gets worked around.

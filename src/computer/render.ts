@@ -243,9 +243,13 @@ export function renderResult(
  * container. Without this the file looks unchanged and the obvious conclusion is
  * that the command did not work, which is the one conclusion that is wrong.
  *
- * Recovery is deliberately not the model's: the host drives the outstanding pull
- * and a later command's own bracket carries what is left, so the advice is to
- * look again rather than to run anything.
+ * Recovery is deliberately not the model's, and is not automatic either: the
+ * runtime schedules no retry of its own, so an outstanding pull lands when the
+ * host drives one or when a later command's own bracket carries it. What the
+ * model is told therefore stops short of "it will be there in a moment" — it is
+ * told the read may be stale, that re-running the command is the wrong fix
+ * because it would repeat the side effects, and to say so in its result if the
+ * workspace still disagrees with what it wrote.
  */
 export function syncPendingNote(
   sync: { status: "complete" | "pending" } | undefined
@@ -253,8 +257,10 @@ export function syncPendingNote(
   if (sync?.status !== "pending") return undefined;
   return (
     "(The command finished, but what it wrote has not reached the workspace " +
-    "yet. The file tools may still show the previous contents; it catches up " +
-    "on its own, so read again rather than re-running the command.)"
+    "yet, so the file tools may still show the previous contents. Do not re-run " +
+    "the command to force it — that repeats whatever it already did. Read again " +
+    "in a moment, and if the workspace still disagrees with what the command " +
+    "wrote, say so in your result rather than working around it.)"
   );
 }
 

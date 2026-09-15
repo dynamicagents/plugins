@@ -31,30 +31,46 @@ export function isGitInternal(path: string): boolean {
 }
 
 /**
- * Directories a recursive walk steps over.
+ * Skipped by every walk, whatever it was pointed at.
  *
- * Both are *present and readable* — the workspace holds the dependency tree the
- * same way it holds the source — and both are large enough to fill a page on
- * their own. At a repository root `.git` is walked first, since `.` sorts before
- * alphanumerics, and a dependency tree runs to tens of thousands of files; either
- * way the model pays a page to learn nothing.
- *
- * Skipping is therefore about what a walk is *for*, and it is not containment: a
- * path inside one of these reads normally, and naming one as the root of a walk
- * searches it. {@link walkSkips} is what makes that second part true.
+ * `.git` only, and it is the same answer {@link guardPath} gives: a walk cannot
+ * be rooted there either, because every file tool guards its path first. Listed
+ * separately from the directory below precisely so the two are not confused —
+ * one is policy the model cannot opt out of, the other is a default it can.
  */
-const WALK_SKIPPED = [".git", "node_modules"] as const;
+const ALWAYS_SKIPPED = [".git"] as const;
+
+/**
+ * Skipped by a walk unless the caller names it.
+ *
+ * The dependency tree is *present and readable* — the workspace holds it the
+ * same way it holds the source — so this is about what a walk is for rather than
+ * about access. A real tree runs to tens of thousands of files and sorts before
+ * `src`, so a walk that descended into it would spend its page there.
+ *
+ * Naming it as the root is the opt-in, and it has to exist: a search pointed at
+ * a dependency that then skipped that dependency would match nothing and report
+ * everything skipped, which is the kind of answer that sends a model looking for
+ * a bug that is not there.
+ */
+const SKIPPED_UNLESS_NAMED = ["node_modules"] as const;
 
 /**
  * What a walk rooted at `root` steps over.
  *
- * A root already inside one of these is the caller asking for it by name, so it
- * is not skipped — otherwise `sb_grep` with a path inside a dependency would
- * search nothing and say everything was skipped, which is the kind of answer
- * that sends a model looking for the wrong bug.
+ * Filtering happens on the results rather than in the traversal, because the
+ * workspace filesystem takes no exclusion — `find` offers a limit and an offset,
+ * `grep` a positive `include` glob, and neither can be told to stay out of a
+ * directory. So a walk still *pays* for what it skips, and a page landing
+ * entirely inside one reports itself as crowded rather than as empty; the cheap
+ * answer to that is a narrower `path`, `pattern` or `include`, which is what
+ * those messages offer.
  */
 export function walkSkips(root: string): readonly string[] {
-  return WALK_SKIPPED.filter((segment) => !hasSegment(root, segment));
+  return [
+    ...ALWAYS_SKIPPED,
+    ...SKIPPED_UNLESS_NAMED.filter((segment) => !hasSegment(root, segment))
+  ];
 }
 
 /** Whether a walk carrying `skips` steps over `path`. */

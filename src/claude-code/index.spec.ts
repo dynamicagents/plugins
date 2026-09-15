@@ -193,7 +193,10 @@ describe("a session whose container was replaced", () => {
     if (!outcome.done) throw new Error("unreachable");
     expect(outcome.exitCode).toBe(-1);
     expect(outcome.stderr).toContain("container");
-    expect(outcome.stderr).toContain("safe");
+    // What it must not do is promise a rerun is safe: a session that got far
+    // enough to commit or push did that before its container went.
+    expect(outcome.stderr).toContain("Check the workspace");
+    expect(outcome.stderr).not.toMatch(/is safe/);
   });
 
   /**
