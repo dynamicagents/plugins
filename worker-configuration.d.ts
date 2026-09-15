@@ -1,5 +1,5 @@
 /* eslint-disable */
-// Runtime types generated with workerd@1.20260907.1 2026-08-04 
+// Runtime types generated with workerd@1.20260911.1 2026-08-04 
 // Begin runtime types
 /*! *****************************************************************************
 Copyright (c) Cloudflare. All rights reserved.
@@ -11613,6 +11613,14 @@ interface RequestInitCfProperties extends Record<string, unknown> {
      * (e.g. { '200-299': 86400, '404': 1, '500-599': 0 })
      */
     cacheTtlByStatus?: Record<string, number>;
+    /**
+     * Controls whether Cloudflare uses range requests when fetching the response
+     * from the origin.
+     *
+     * - `"on"`: enable origin range requests for this request.
+     * - `"off"`: disable origin range requests for this request.
+     */
+    originRangeRequests?: "on" | "off";
     /** Controls how responses with a `Vary` header are cached for this request. */
     vary?: RequestInitCfPropertiesVary;
     /**
