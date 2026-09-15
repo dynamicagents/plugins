@@ -1,8 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { TEST_MODELS } from "@dynamicagents/core/testing";
 import { createAgentRuntime } from "@dynamicagents/core";
-import type { SessionLike } from "@dynamicagents/core/agent";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionLike, SessionMessage } from "@dynamicagents/core/agent";
 import {
   archiveMessages,
   recall,

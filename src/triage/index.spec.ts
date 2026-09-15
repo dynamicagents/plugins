@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { TEST_MODELS } from "@dynamicagents/core/testing";
 import type { LanguageModel } from "ai";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "@dynamicagents/core/agent";
 import { createAgentRuntime } from "@dynamicagents/core";
 import { mockModel } from "@dynamicagents/core/testing";
 import {

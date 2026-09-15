@@ -2,10 +2,10 @@ import { embedMany, tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
 import { createWorkersAI } from "workers-ai-provider";
-import type { SessionMessage } from "agents/experimental/memory/session";
 import { definePlugin } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
 import { parseTurn, sessionText } from "@dynamicagents/core/agent";
+import type { SessionMessage } from "@dynamicagents/core/agent";
 
 /**
  * `@dynamicagents/plugins/recall` — episodic memory over Cloudflare Vectorize.
