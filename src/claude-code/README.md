@@ -52,7 +52,9 @@ outbound request and hands it to `claudeCodeEgress` on the **Worker** side, whic
 4. **rotates** to the next credential when Anthropic says the current one's
    bucket is spent (see below).
 
-A `postinstall` that dumps the environment learns the placeholder and nothing else.
+A `postinstall` that dumps its environment learns the placeholder and nothing
+else. It runs as root, so `/proc/1/environ` is still readable — the placeholder is
+what protects the credential, not the process boundary.
 
 ### Egress is unrestricted by default
 
@@ -269,21 +271,35 @@ RUN printf '%s\n' \
       'if [ -r "$CA" ]; then' \
       '  install -m 644 "$CA" /usr/local/share/ca-certificates/cf-containers-ca.crt' \
       '  update-ca-certificates > /dev/null' \
-      '  NODE_EXTRA_CA_CERTS="$CA"; export NODE_EXTRA_CA_CERTS' \
       'fi' \
       'exec /usr/local/bin/computerd "$@"' \
     > /usr/local/bin/entrypoint.sh \
   && chmod +x /usr/local/bin/entrypoint.sh
 
+# Node ignores the system store, and a command inherits nothing from the
+# daemon's own environment — see below.
+ENV COMPUTER_VAR_NODE_OPTIONS=--use-openssl-ca
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ```
 
 > **`update-ca-certificates` on its own is not enough.** Node carries its own
-> bundled root store and ignores the system one, and the two clients that
-> matter here are both Node: `npm ci` and Claude Code itself.
-> `NODE_EXTRA_CA_CERTS` is the line that actually unblocks them. The trust-store
-> update covers everything else a session shells out to — `curl`, `git` over
-> https, `pip`.
+> bundled root store and ignores the system one, and the two clients that matter
+> here are both Node: `npm ci` and Claude Code itself. The `ENV` line above is
+> what actually unblocks them; the trust-store update covers everything else a
+> session shells out to — `curl`, `git` over https, `pip`.
+>
+> **It must carry the `COMPUTER_VAR_` prefix.** A command spawned by the
+> workspace inherits `PATH`, `HOME`, `TMPDIR`, `TZ`, `LANG`, `TERM` and the
+> `LC_*` family from the daemon, and nothing else — that is what keeps the
+> daemon's own secret out of a repository's `postinstall`. Anything else a
+> command needs is passed per exec, or named `COMPUTER_VAR_<NAME>` in the image
+> and delivered as `<NAME>`. An `ENV NODE_OPTIONS=…` or an `export` in the
+> entrypoint reaches the daemon and stops there, which fails as a TLS error in
+> every session with nothing pointing at the environment.
+>
+> The same applies to every other variable an image sets for the commands it
+> runs — `CI`, `HUSKY`, `NO_COLOR` — none of which reach a command unprefixed.
 
 No `|| true` on that line, deliberately. It is a required step, not a
 nicety — swallowing its failure leaves `curl`, `git` and `pip` unable to
@@ -352,6 +368,15 @@ model and a model-authored workspace name would let it name somebody else's.
 from the stub's byte stream, so the drain works across a Durable Object boundary
 and the container→workspace filesystem sync still fires when the stream reaches
 `done`.
+
+**Fires, not succeeds — and the host owns what happens then.** That pull can fail
+while the session itself finished: a transport that dropped, a container replaced
+underneath it. The runtime reports that on the execution result, which the drain
+does not see, and nothing retries it on its own. A host that cares about a
+session's edits reaching the checkout — anything that then commits or pushes from
+the workspace side — should drive `workspace.pull()` to completion before it
+reads, and certainly before it stops the container. A session that wrote an
+install's dependency tree makes that pull a large one.
 
 ## The permission mode, and why it bypasses
 

@@ -358,6 +358,18 @@ function isExecBusy(err: unknown): boolean {
 }
 
 /**
+ * Whether a thrown value means the session this cursor names is gone for good.
+ *
+ * `EEXEC_LOST` is the runtime saying the container that held the execution was
+ * replaced. The session died with it, and no attachment will ever find it — so
+ * unlike `EEXEC_BUSY`, which is a live session reached the wrong way, there is
+ * nothing to recover and retrying only spends chunks discovering that again.
+ */
+export function isExecLost(err: unknown): boolean {
+  return (err as { code?: unknown } | null | undefined)?.code === "EEXEC_LOST";
+}
+
+/**
  * Start a session, detached.
  *
  * **Falls back to attaching when the id is already live**, which is not a
@@ -367,6 +379,12 @@ function isExecBusy(err: unknown): boolean {
  * still running (`EEXEC_BUSY`). Without this the retry throws, every later retry
  * throws the same way, and a perfectly healthy session in the container becomes
  * unreachable.
+ *
+ * **The sync stays on the default, and `defer` is not an option here.** A
+ * deferred exec skips the post-command pull entirely and settles the outcome
+ * from the cursor instead — and its `cancel` reads the stream to the end first,
+ * so ending a window would block until the session exits rather than yielding
+ * the chunk. Both halves are exactly what this drain is built not to do.
  */
 export async function startRun(
   runtime: SessionRuntime,
@@ -501,8 +519,16 @@ export async function drainRun(
        * simply not there.
        *
        * Reading on is also how the sync gets *awaited*: the wrapper resolves its
-       * pull before it closes the stream, so observing `done` means the sync has
-       * already finished.
+       * pull before it closes the stream, so observing `done` means the pull was
+       * attempted. Attempted, not guaranteed — a pull that fails leaves the
+       * stream closing normally and reports itself on the result the host does
+       * not see here, and nothing retries it on its own. The host drives any
+       * outstanding pull; see this plugin's README.
+       *
+       * It is also unbounded, deliberately: the pull carries whatever the
+       * session wrote, an install's dependency tree included, so this last read
+       * can outlast the window that was left. Cutting it short to keep the
+       * window would trade a late chunk for edits that never land.
        */
       if (exitCode !== undefined) {
         const next = await reader.read();

@@ -209,6 +209,7 @@ export function renderResult(
     stdout: string;
     stderr: string;
     status?: WorkspaceRuntimeStatus;
+    sync?: { status: "complete" | "pending" };
   },
   maxChars: number
 ): string {
@@ -223,7 +224,44 @@ export function renderResult(
   const state =
     result.status && result.status !== "completed" ? ` (${result.status})` : "";
   const verdict = `--- exit ${result.exitCode}${state} ---`;
-  return body ? `${body}\n${verdict}` : `(no output)\n${verdict}`;
+  const pending = syncPendingNote(result.sync);
+  const transcript = body ? `${body}\n${verdict}` : `(no output)\n${verdict}`;
+  return pending ? `${transcript}\n${pending}` : transcript;
+}
+
+/**
+ * The command ran; its changes have not landed in the workspace yet.
+ *
+ * Every command is bracketed by a sync, and the pull afterwards is what moves
+ * what it wrote from the container into the Durable Object. That pull can fail
+ * while the command itself succeeds — a transport that dropped, a container
+ * replaced underneath — and the runtime reports it in `sync` rather than in the
+ * exit code, because the command genuinely did run.
+ *
+ * Worth a sentence to the model because the *next* thing it does is usually read
+ * what it just wrote, and the file tools read the workspace rather than the
+ * container. Without this the file looks unchanged and the obvious conclusion is
+ * that the command did not work, which is the one conclusion that is wrong.
+ *
+ * Recovery is deliberately not the model's, and is not automatic either: the
+ * runtime schedules no retry of its own, so an outstanding pull lands when the
+ * host drives one or when a later command's own bracket carries it. What the
+ * model is told therefore stops short of "it will be there in a moment" — it is
+ * told the read may be stale, that re-running the command is the wrong fix
+ * because it would repeat the side effects, and to say so in its result if the
+ * workspace still disagrees with what it wrote.
+ */
+export function syncPendingNote(
+  sync: { status: "complete" | "pending" } | undefined
+): string | undefined {
+  if (sync?.status !== "pending") return undefined;
+  return (
+    "(The command finished, but what it wrote has not reached the workspace " +
+    "yet, so the file tools may still show the previous contents. Do not re-run " +
+    "the command to force it — that repeats whatever it already did. Read again " +
+    "in a moment, and if the workspace still disagrees with what the command " +
+    "wrote, say so in your result rather than working around it.)"
+  );
 }
 
 /**

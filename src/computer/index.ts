@@ -5,7 +5,7 @@ import { definePlugin, withAbort } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
 import { getWorkspace, shellQuote } from "@cloudflare/computer";
 import type { WorkspaceClient, WorkspaceStub } from "@cloudflare/computer";
-import { guardPath } from "./paths.js";
+import { guardPath, isSkipped, skipNames, walkSkips } from "./paths.js";
 import {
   cancelledNote,
   humanBytes,
@@ -36,18 +36,17 @@ import type { WorkspaceAdvisory } from "./advisory.js";
  * filesystem plugin — an agent holding two gives the model no way to know which
  * one a path refers to.
  *
- * ## `node_modules` is **not** in the workspace
+ * ## The dependency tree is in the workspace too
  *
- * The one thing to internalise before reading further. `computerd` excludes it
- * from the sync, and the exclusion is right: pushing a real one (429 MB, 22,470
- * files) into the object exceeds the Durable Object's 128 MB isolate memory
- * limit, leaving the tree silently short — and the reconciliation that follows
- * propagates the shortfall back into the container.
+ * The one thing to internalise before reading further. `computerd` syncs
+ * `node_modules` along with everything else, so an install survives its
+ * container: a replacement is handed the tree back rather than rebuilding it,
+ * and the file tools read inside it like anywhere else.
  *
- * So dependencies live in the container and die with it, while source and `.git`
- * are durable. Two consequences run through everything below: an install has to
- * be re-run on a cold container, and `sb_read` cannot see a path under
- * `node_modules` even though a shell in the same container can.
+ * What that costs is attention rather than correctness: a real tree is 22,470
+ * files and sorts before `src`, so a walk that showed it would spend its whole
+ * page there. `paths.ts` owns what walks drop and what a path may be, including
+ * the one opt-in.
  *
  * Requires the Workers **Paid** plan (containers) and a Durable Object binding
  * whose class owns the workspace — see the README for the wrangler block.
@@ -81,12 +80,13 @@ export {
  * `verify:exports` treats `./computer` as one realm, and everything below stays
  * inside `dist/computer/`.
  */
-export { isContainerOnly, isGitInternal } from "./paths.js";
+export { isGitInternal, walkSkips } from "./paths.js";
 export {
   cancelledNote,
   packBlocks,
   renderGrepMatches,
   renderResult,
+  syncPendingNote,
   truncateOutput
 } from "./render.js";
 export {
@@ -178,9 +178,9 @@ const DEFAULT_MAX_OUTPUT_CHARS = 16_000;
  * A bound on the *listing*, not on the rendered text — `maxOutputChars` still
  * applies on top, and the order matters. Bounding only the text means `readdir`
  * returns every entry and the isolate holds all of them before the ceiling
- * discards the tail; a real `node_modules` is 22,470 files, and a misbehaving
- * build is exactly when someone lists one. `readdir` takes a `limit`, so the
- * bound is applied where the entries are read.
+ * discards the tail; a dependency tree is 22,470 files, and a misbehaving build
+ * is exactly when someone lists one. `readdir` takes a `limit`, so the bound is
+ * applied where the entries are read.
  */
 const DEFAULT_MAX_ENTRIES = 1000;
 
@@ -189,9 +189,10 @@ const DEFAULT_MAX_ENTRIES = 1000;
  *
  * Bounded at the source like {@link DEFAULT_MAX_ENTRIES}, and for a sharper reason
  * than a listing: without a `limit`, `fs.grep` reads *every* file under the path
- * looking for more. `.git` is in the workspace, so an unbounded search of
- * `/workspace` streams every loose object through the isolate before answering.
- * The limit is what stops that walk early.
+ * looking for more. `.git` and the dependency tree are both in the workspace, so
+ * an unbounded search of `/workspace` streams every loose object and every
+ * vendored file through the isolate before answering. The limit is what stops
+ * that walk early, and the skip list is what keeps the matches worth reading.
  */
 const DEFAULT_MAX_MATCHES = 200;
 
@@ -236,7 +237,7 @@ export interface WorkspaceHost extends Rpc.DurableObjectBranded {
    * `node_modules`, or against a workspace whose writes are being dropped.
    *
    * `deriveAdvisories` builds the array from what the host already knows, so
-   * implementing this is gathering three values rather than writing policy.
+   * implementing this is gathering what the host has rather than writing policy.
    */
   advisories(): Promise<readonly WorkspaceAdvisory[]>;
 }
@@ -789,7 +790,7 @@ export function buildComputerTools(
         "Read a file from the workspace. Returns the file's text, or a note if it does not exist. " +
         "A large file comes back with its middle removed and a marker giving the `offset` that reaches the missing part. " +
         "Pass `offset` (and optionally `length`) to read a specific byte window instead — the result states the window it returned and how many bytes follow, so you can page through a file. Byte offsets, not lines: to see the lines around a match, use sb_grep with `context`. " +
-        "Files under node_modules are not in the workspace — read those with sb_exec.",
+        "Files under node_modules read like any other — the dependency tree is part of the workspace.",
       inputSchema: z.object({
         path: z
           .string()
@@ -909,7 +910,7 @@ export function buildComputerTools(
       description:
         "List files in a workspace directory, or find files by name. Without `pattern` it lists one level: directories with a trailing slash, files with their size — check that before reading a large one, since sb_read truncates. " +
         "`pattern` is a glob matched against paths relative to `path`, and searches the whole subtree: `*` stays within one path segment, `**/` crosses directories, `?` matches one character. So `*.ts` finds top-level TypeScript files and `**/*.ts` finds them at any depth. " +
-        "A cut listing reports the `offset` that continues it. node_modules is not in the workspace — list it with sb_exec.",
+        "A cut listing reports the `offset` that continues it. Subtree listings leave out `.git` and `node_modules` — point `path` at node_modules to list inside it.",
       inputSchema: z.object({
         path: z.string().describe("Absolute directory path"),
         recursive: z
@@ -945,19 +946,22 @@ export function buildComputerTools(
             //
             // Filtered rather than trusted, and this is the arm where it matters
             // most: at a repo root `.git` is walked *first* and holds thousands
-            // of objects, so an unfiltered page is a page of `.git` and nothing
-            // else. Four rounds because a `find` retry re-walks dirents, which is
-            // cheap SQLite reads rather than file bytes.
+            // of objects, and `node_modules` runs to tens of thousands, so an
+            // unfiltered page is a page of neither's contents. Four rounds
+            // because a `find` retry re-walks dirents, which is cheap SQLite
+            // reads rather than file bytes.
+            const skips = walkSkips(path);
             const page = await collectVisible(
               (at, limit) => fs.find(path, pattern, { limit, offset: at }),
               (e) => e.path,
+              (p) => isSkipped(skips, p),
               DEFAULT_MAX_ENTRIES,
               from,
               4
             );
             if (page.items.length === 0)
               return page.crowded
-                ? `(everything under ${path} from offset ${from} is inside .git — try a \`pattern\`, or a \`path\` inside the working tree)`
+                ? `(everything under ${path} from offset ${from} is inside ${skipNames(skips)} — try a \`pattern\`, or a \`path\` inside the working tree)`
                 : pattern
                   ? `(nothing under ${path} matches ${pattern})`
                   : `(${path} is empty)`;
@@ -970,9 +974,9 @@ export function buildComputerTools(
           }
           // One over the ceiling: enough to know the listing was cut without a
           // second round trip to find out, and the extra entry is not shown.
-          // Unfiltered on purpose — `.git/` shows here exactly as `node_modules`
-          // does, because one line naming a directory that is really there is
-          // honest, and it is access rather than existence that is refused.
+          // Unfiltered on purpose — one line naming a directory that is really
+          // there is honest, and costs a line rather than a page. It is the
+          // *subtree* walk above that cannot afford to descend into them.
           const entries = await fs.readdir(path, {
             limit: DEFAULT_MAX_ENTRIES + 1,
             offset: from
@@ -1019,7 +1023,7 @@ export function buildComputerTools(
         "The query is matched literally — set `regex` to interpret it as a regular expression. " +
         "Pass `include` to limit which files are searched, e.g. '**/*.ts' — without it every file under `path` is read, which is slower and rarely what you meant. " +
         "A cut result reports the `offset` that continues it. Use `context` to see the lines around a match. " +
-        "node_modules is not in the workspace — search it with sb_exec.",
+        "Results from `.git` and `node_modules` are left out — pass a `path` inside node_modules to search it.",
       inputSchema: z.object({
         query: z.string().describe("Text to find, e.g. 'buildComputerTools'"),
         path: z
@@ -1068,7 +1072,9 @@ export function buildComputerTools(
           // Two rounds, not four: a `grep` retry re-reads and re-scans every file
           // it already looked at, where the `find` retry in `sb_ls` only re-walks
           // dirents. `.git` is also far less likely to flood a page here — its
-          // bulk is compressed objects, which a text query does not match.
+          // bulk is compressed objects, which a text query does not match —
+          // where `node_modules` is source and matches like any other.
+          const skips = walkSkips(target);
           const page = await collectVisible(
             (at, limit) =>
               fs.grep(query, target, {
@@ -1080,13 +1086,14 @@ export function buildComputerTools(
                 offset: at
               }),
             (m) => m.path,
+            (p) => isSkipped(skips, p),
             DEFAULT_MAX_MATCHES,
             from,
             2
           );
           if (page.items.length === 0)
             return page.crowded
-              ? `every match for ${JSON.stringify(query)} from offset ${from} is inside .git, which is not searched. Add \`include\` (e.g. '**/*.ts') to search the working tree instead.`
+              ? `every match for ${JSON.stringify(query)} from offset ${from} is inside ${skipNames(skips)}, which ${skips.length > 1 ? "are" : "is"} not searched. Add \`include\` (e.g. '**/*.ts') to search the working tree instead, or pass a \`path\` inside one to search it.`
               : `no matches for ${JSON.stringify(query)} in ${target}${
                   include ? ` (${include})` : ""
                 }${from > 0 ? ` past offset ${from}` : ""}`;
@@ -1264,13 +1271,13 @@ export function computer(config: ComputerConfig): AgentPlugin {
       // The reason to prefer them is the one thing the model cannot infer from a
       // tool description: these read the durable workspace directly, so they are
       // the only tools that still answer while the container is unavailable.
-      "Search with `sb_grep` and `sb_ls` rather than running `grep` or `find` through `sb_exec`. They read the workspace directly, so they keep working while the container is restarting or dependencies are still installing, and they come back with line numbers and a bounded result instead of a wall of text.",
+      "Search with `sb_grep` and `sb_ls` rather than running `grep` or `find` through `sb_exec`. They read the workspace directly, so they keep working while the container is restarting or an install is still running, and they come back with line numbers and a bounded result instead of a wall of text.",
       "Command output is truncated from the middle when large, so run targeted commands and read specific files rather than printing everything.",
       // Both halves of this matter and they pull in opposite directions, which
       // is why they are stated together rather than left for the model to work
       // out from a confusing result.
       "The checkout is durable: it survives between tasks and is still there after the container restarts, so it may already contain work from an earlier task — check before assuming it is empty.",
-      "`node_modules` is the exception. It lives only in the container, so it is rebuilt whenever the container restarts, and the file tools cannot see inside it — use `sb_exec` to read a dependency's source.",
+      "`node_modules` is durable too, so an install survives a container restart. Reading a file in it works like anywhere else, but searches and recursive listings leave it out, since a dependency tree is tens of thousands of files and would fill a page on its own — point `path` at it to search inside it.",
       // Stated up front rather than left to a refusal, so the model does not spend
       // a turn discovering it. The destination matters as much as the rule: a
       // prohibition with nowhere to go gets worked around.

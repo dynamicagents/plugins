@@ -20,10 +20,10 @@ import { renderAdvisory, shapeOf, type WorkspaceAdvisory } from "./advisory.js";
  * Unexplained, the model receives `Execution "…" was lost when its container
  * runtime was replaced`, reads it as a crash, and goes looking at its command.
  *
- * What it needs is three facts: nothing ran to completion, the checkout survived
- * because the filesystem is the Durable Object's rather than the container's, and
- * `node_modules` did not because it never was. So re-run, and expect the install
- * to be rebuilding underneath.
+ * What it needs is two facts: nothing ran to completion, and the workspace
+ * survived because the filesystem is the Durable Object's rather than the
+ * container's. So re-run it. The replacement container is handed the tree back,
+ * dependencies included, which is why this note no longer warns about an install.
  *
  * Matched on `code` rather than the message — the property the package sets
  * deliberately, and the one that survives a reworded string.
@@ -34,9 +34,9 @@ export function execLostNote(err: unknown): string | undefined {
   return (
     "the container was replaced while this command was running, so it was lost — " +
     "nothing ran to completion and no output survived. This is infrastructure, " +
-    "not your command: re-run it. The checkout is durable and is exactly as you " +
-    "left it, but `node_modules` lived in the old container and is being rebuilt, " +
-    "so anything that needs dependencies may have to wait for that install."
+    "not your command: re-run it. The workspace is durable and is exactly as you " +
+    "left it, dependencies included, though the first command in a replacement " +
+    "container waits while the tree is handed back to it."
   );
 }
 

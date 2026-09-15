@@ -140,3 +140,76 @@ describe("the session's egress", () => {
     expect(typeof session.egress(memoryStore()).fetch).toBe("function");
   });
 });
+
+/**
+ * The container holding a session can be replaced under it — a deploy, an
+ * eviction, a relaunch the runtime decided on — and the attachment is the first
+ * thing to find out.
+ *
+ * The caller is a chunk loop holding a cursor it will keep presenting, so a
+ * throw here is retried against the same dead id until the chunk allowance runs
+ * out, ending the run on a stack trace that names neither the session nor the
+ * cause. Reported as a terminal outcome, it ends at the first attempt with
+ * something the subtask can act on.
+ */
+describe("a session whose container was replaced", () => {
+  const lost = () =>
+    Object.assign(
+      new Error(
+        'Execution "e1" was lost when its container runtime was replaced.'
+      ),
+      { name: "WorkspaceExecutionLostError", code: "EEXEC_LOST" }
+    );
+
+  const runtime = (err: unknown) =>
+    ({
+      exec: async () => {
+        throw new Error("not called");
+      },
+      getExec: async () => {
+        throw err;
+      },
+      killExec: async () => {}
+    }) as unknown as Parameters<
+      ReturnType<typeof claudeCodeSession>["resume"]
+    >[0];
+
+  const cursor = {
+    execId: "claude-code-run:3",
+    seq: 4,
+    carry: "",
+    emitted: 2
+  };
+
+  it("ends the run instead of throwing at the caller", async () => {
+    const session = claudeCodeSession(config());
+
+    const outcome = await session.resume(runtime(lost()), cursor);
+
+    expect(outcome.done).toBe(true);
+    // The cursor comes back untouched: the caller records where it got to, and
+    // nothing about this outcome invites another attempt at the same id.
+    expect(outcome.cursor).toEqual(cursor);
+    if (!outcome.done) throw new Error("unreachable");
+    expect(outcome.exitCode).toBe(-1);
+    expect(outcome.stderr).toContain("container");
+    // What it must not do is promise a rerun is safe: a session that got far
+    // enough to commit or push did that before its container went.
+    expect(outcome.stderr).toContain("Check the workspace");
+    expect(outcome.stderr).not.toMatch(/is safe/);
+  });
+
+  /**
+   * Only that one code. Every other failure to attach — a transport that
+   * dropped, a runtime that is simply unreachable — is transient, and a retry is
+   * the right answer to it. Swallowing those would turn a recoverable chunk into
+   * a subtask that reports itself finished having done nothing.
+   */
+  it("still throws anything that is not a lost execution", async () => {
+    const session = claudeCodeSession(config());
+
+    await expect(
+      session.resume(runtime(new Error("container unreachable")), cursor)
+    ).rejects.toThrow(/unreachable/);
+  });
+});

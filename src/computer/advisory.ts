@@ -24,8 +24,8 @@ import { humanMs } from "./render.js";
  *   at all to `echo hi > file.txt` — the command whose write is being lost.
  * - "The tree is fine now", after a subagent installed by hand, had no way to be
  *   said except by fabricating a `done` with an invented exit code — and the
- *   probe it rested on, a bare `test -d node_modules`, is satisfied by the
- *   wreckage of the very install it was overriding.
+ *   probe it rested on, the presence of a `node_modules` directory, is satisfied
+ *   by the wreckage of the very install it was overriding.
  *
  * So an advisory is **derived at read time** and describes the workspace, not a
  * job. Its absence is the good case, which is what removes the need to invent
@@ -241,11 +241,11 @@ export interface AdvisoryInput {
   /**
    * Whether a `node_modules` directory exists — **existence only, not health**.
    *
-   * Named for what it can actually observe. A host probes this with the
-   * equivalent of `test -d`, and that answers a narrower question than
-   * "are the dependencies fine": a `npm ci` that died partway leaves the
-   * directory behind holding an incomplete tree, so a `true` here is entirely
-   * consistent with the install having failed for real.
+   * Named for what it can actually observe. A host answers it by looking for the
+   * directory in the workspace, and that is a narrower question than "are the
+   * dependencies fine": an `npm ci` that died partway leaves the directory
+   * behind holding an incomplete tree, so a `true` here is entirely consistent
+   * with the install having failed for real.
    *
    * So it never suppresses a proven failure. It travels onto the advisory as
    * {@link WorkspaceAdvisory} `treePresent` and the reader is told which way the
@@ -313,8 +313,8 @@ export function deriveAdvisories(
       break;
 
     // Nothing to say. `idle` means no install has been armed yet, which the
-    // host's cold-container check resolves on its own, and `done` is the
-    // ordinary case — a caller told its dependencies are fine has been told
+    // host resolves on its own when it finds no tree in the workspace, and
+    // `done` is the ordinary case — a caller told its dependencies are fine has been told
     // nothing, at the cost of prefix tokens on every run.
     case "idle":
     case "done":

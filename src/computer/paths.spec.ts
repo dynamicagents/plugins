@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { guardPath, isContainerOnly, isGitInternal } from "./paths.js";
+import {
+  guardPath,
+  isGitInternal,
+  isSkipped,
+  skipNames,
+  walkSkips
+} from "./paths.js";
 
 /**
  * The guard, on its own terms.
@@ -11,19 +17,6 @@ import { guardPath, isContainerOnly, isGitInternal } from "./paths.js";
  */
 
 describe("segments, not substrings", () => {
-  it("matches node_modules as a whole segment, not as a substring", () => {
-    expect(isContainerOnly("/workspace/repo/node_modules/zod/index.js")).toBe(
-      true
-    );
-    expect(isContainerOnly("/workspace/repo/node_modules")).toBe(true);
-    expect(isContainerOnly("/workspace/repo/src/node_modules_old/a.ts")).toBe(
-      false
-    );
-    expect(isContainerOnly("/workspace/repo/src/my_node_modules.ts")).toBe(
-      false
-    );
-  });
-
   it("matches .git as a whole segment, sparing the dotfiles that merely start with it", () => {
     expect(isGitInternal("/workspace/repo/.git/config")).toBe(true);
     expect(isGitInternal("/workspace/repo/.git")).toBe(true);
@@ -35,6 +28,62 @@ describe("segments, not substrings", () => {
     );
     expect(isGitInternal("/workspace/repo/src/git/index.ts")).toBe(false);
   });
+
+  it("skips node_modules as a whole segment, not as a substring", () => {
+    const skips = walkSkips("/workspace/repo");
+    expect(isSkipped(skips, "/workspace/repo/node_modules/zod/index.js")).toBe(
+      true
+    );
+    expect(isSkipped(skips, "/workspace/repo/node_modules")).toBe(true);
+    expect(isSkipped(skips, "/workspace/repo/src/node_modules_old/a.ts")).toBe(
+      false
+    );
+    expect(isSkipped(skips, "/workspace/repo/src/my_node_modules.ts")).toBe(
+      false
+    );
+  });
+});
+
+/**
+ * A walk skips the big directories *unless the caller named one*, which is the
+ * half that keeps the skip from becoming a wall: a search rooted inside a
+ * dependency that skipped that dependency would match nothing and report that
+ * everything was skipped, sending the model after a bug that is not there.
+ */
+describe("walkSkips", () => {
+  it("skips both by default", () => {
+    expect([...walkSkips("/workspace/repo")]).toEqual([".git", "node_modules"]);
+  });
+
+  it("stops skipping the dependency tree when the caller names it", () => {
+    expect([...walkSkips("/workspace/repo/node_modules/zod")]).toEqual([
+      ".git"
+    ]);
+  });
+
+  /**
+   * `.git` has no opt-in, and the two halves of that agree: a walk rooted inside
+   * it is refused by `guardPath` before it starts, and a walk that merely passes
+   * through it still drops those results. Naming it cannot turn the policy off.
+   */
+  it("keeps skipping .git even when it is named", () => {
+    expect([...walkSkips("/workspace/repo/.git")]).toContain(".git");
+    expect(guardPath("/workspace/repo/.git", "sb_grep")).toBeDefined();
+  });
+
+  it("searches a named directory rather than reporting it skipped", () => {
+    const skips = walkSkips("/workspace/repo/node_modules/zod");
+    expect(isSkipped(skips, "/workspace/repo/node_modules/zod/index.js")).toBe(
+      false
+    );
+  });
+
+  it("names what it skipped, for the sentence that reports a crowded page", () => {
+    expect(skipNames(walkSkips("/workspace/repo"))).toBe(
+      "`.git` and `node_modules`"
+    );
+    expect(skipNames(walkSkips("/workspace/repo/node_modules"))).toBe("`.git`");
+  });
 });
 
 describe("guardPath", () => {
@@ -43,23 +92,23 @@ describe("guardPath", () => {
   });
 
   /**
-   * The two refusals are not interchangeable and the difference is the whole
-   * reason there are two lists. `node_modules` is absent — so the note explains a
-   * file the model can plainly see and names the tool that reaches it. `.git` is
-   * present and refused — so the note names where repository work belongs and,
-   * emphatically, does *not* offer `sb_exec`, which would hand back the exact
-   * capability the refusal withholds in the one place the model is looking for a
-   * way around it.
+   * The dependency tree is part of the workspace, so a read of one is an
+   * ordinary read. Refusing it would be the plugin describing a filesystem that
+   * is no longer there, and the model would route around the refusal into
+   * `sb_exec` for a file the file tools can serve.
    */
-  it("explains an absent path by naming the shell that can see it", () => {
-    const note = guardPath(
-      "/workspace/repo/node_modules/zod/index.js",
-      "sb_read"
-    )!;
-    expect(note).toContain("only in the container");
-    expect(note).toContain("sb_exec");
+  it("clears a path inside the dependency tree", () => {
+    expect(
+      guardPath("/workspace/repo/node_modules/zod/index.js", "sb_read")
+    ).toBeUndefined();
   });
 
+  /**
+   * `.git` is present and refused, so the note names where repository work
+   * belongs and, emphatically, does *not* offer `sb_exec` — which would hand
+   * back the exact capability the refusal withholds, in the one place the model
+   * is looking for a way around it.
+   */
   it("redirects a .git path to the repo tools, and never to sb_exec", () => {
     const note = guardPath("/workspace/repo/.git/config", "sb_write")!;
     expect(note).toContain("repo_status");
@@ -72,8 +121,5 @@ describe("guardPath", () => {
    */
   it("names the tool that was called", () => {
     expect(guardPath("/workspace/repo/.git", "sb_grep")).toContain("sb_grep");
-    expect(guardPath("/workspace/repo/node_modules", "sb_ls")).toContain(
-      "sb_ls"
-    );
   });
 });
