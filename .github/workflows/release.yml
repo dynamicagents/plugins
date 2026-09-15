@@ -109,18 +109,20 @@ jobs:
       # What ships is built against a published core — AGENTS.md says why. A git
       # ref onto core's `main` may sit on `main` here while a change needs
       # unreleased core, and the release PR removes it; a bump that lands with one
-      # still in place stops here, before anything is published. A range never
-      # contains `:`, `/` or `#`, and every git, GitHub and file spec does. Each
-      # field is read on its own: core is named in more than one, and its peer
-      # range would hide the git ref beside it in a merged object.
+      # still in place stops here, before anything is published. A range or a tag
+      # never contains `:`, `/` or `#`, and every git, GitHub, file and URL spec
+      # does; an `npm:` alias is the one registry spec with a colon, so it passes.
+      # Each field is read on its own: core is named in more than one, and its
+      # peer range would hide the git ref beside it in a merged object.
       - name: Built against published versions only
         if: steps.gate.outputs.publish == 'true'
         run: |
           node -e '
             const pkg = require("./package.json");
-            const refs = ["dependencies", "devDependencies", "peerDependencies"].flatMap((field) =>
+            const fields = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+            const refs = fields.flatMap((field) =>
               Object.entries(pkg[field] ?? {})
-                .filter(([, spec]) => /[:/#]/.test(spec))
+                .filter(([, spec]) => !spec.startsWith("npm:") && /[:/#]/.test(spec))
                 .map(([name, spec]) => `${field}: ${name} is "${spec}"`));
             for (const ref of refs)
               console.error(`${ref} — a release builds against published versions only`);
