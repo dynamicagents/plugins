@@ -325,8 +325,8 @@ async function firstPresent(
  *
  * Content, not mtime: a `git fetch && reset --hard` onto a new commit rewrites
  * these files whether or not their dependencies changed, and re-installing on
- * every commit would throw away the thing that makes a warm container worth
- * having.
+ * every commit would throw away a tree that is already correct — and, since the
+ * tree is durable, one the next container is handed as well.
  *
  * ## Both files, not just the lockfile
  *
@@ -359,8 +359,8 @@ async function firstPresent(
  * {@link INSTALL_CONFIG_FILES} is hashed too, for the same reason `package.json`
  * is: a lockfile says which versions, and `.npmrc` says how they are laid out.
  * Flipping pnpm's `node-linker` to `hoisted` produces a different
- * `node_modules` from a byte-identical lockfile, and a warm container would
- * otherwise skip the reinstall that change requires.
+ * `node_modules` from a byte-identical lockfile, and a matching fingerprint
+ * would otherwise skip the reinstall that change requires.
  *
  * The residual is worth stating because it cannot be closed here: an override
  * that *builds* — `npm ci && npm run build`, the documented example — is not
@@ -372,11 +372,13 @@ async function firstPresent(
  * ## This is only half of the skip condition
  *
  * A matching fingerprint means "the same install would produce the same tree".
- * It does **not** mean the tree is there. `node_modules` lives in the container
- * and dies with it, while this fingerprint is stored in the Durable Object and
- * does not — so on a cold container the two disagree, and a caller that skips on
- * the fingerprint alone skips the install that the empty tree needs most. The
- * caller must also confirm `node_modules` is actually present.
+ * It does **not** mean the tree is there. The two are written at different
+ * moments and by different things — the fingerprint when an install resolves,
+ * the tree when the container's writes reach the workspace — so a pull that
+ * never finished, or a workspace predating the install, leaves a fingerprint
+ * standing over a tree that is absent or partial. The caller must also confirm
+ * `node_modules` is actually present, and should record the fingerprint only
+ * once the tree it describes has landed.
  */
 export async function installFingerprint(
   fs: InstallProbe,

@@ -293,7 +293,7 @@ describe("the host restriction", () => {
       async (host) => {
         const sent = stubUpstream();
         const response = await openGateway().fetch(
-          new Request(`http://${host}/ws`)
+          new Request(`http://${host}/api`)
         );
 
         expect(response.status).toBe(403);
@@ -308,9 +308,9 @@ describe("the host restriction", () => {
      * spelling walks straight past a naive `Set.has`.
      */
     it.each([
-      ["http://[::1]/ws", "bracketed IPv6"],
-      ["http://computer.internal./ws", "trailing dot"],
-      ["http://COMPUTER.INTERNAL/ws", "uppercase"]
+      ["http://[::1]/api", "bracketed IPv6"],
+      ["http://computer.internal./api", "trailing dot"],
+      ["http://COMPUTER.INTERNAL/api", "uppercase"]
     ])("refuses %s (%s)", async (url) => {
       const sent = stubUpstream();
       const response = await openGateway().fetch(new Request(url));
@@ -321,7 +321,7 @@ describe("the host restriction", () => {
 
     it("says which rule refused it, so the log is actionable", async () => {
       const response = await openGateway().fetch(
-        new Request("http://computer.internal/ws")
+        new Request("http://computer.internal/api")
       );
       const body = (await response.json()) as { error: { message: string } };
       expect(body.error.message).toMatch(/names the egress gateway itself/);

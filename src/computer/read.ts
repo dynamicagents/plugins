@@ -1,5 +1,4 @@
 import type { WorkspaceClient } from "@cloudflare/computer";
-import { isGitInternal } from "./paths.js";
 
 /**
  * Reading the workspace without pulling more of it across the boundary than the
@@ -131,12 +130,13 @@ export async function readWindow(
  * The subtle part is why `rawIndex` exists at all. `offset` counts items at the
  * source; the caller renders a filtered, budget-trimmed subset of them. So the
  * obvious `nextOffset = offset + shown` is wrong — it silently skips or repeats
- * whenever anything was dropped, which is precisely when `.git` is involved. Keeping
- * each survivor's source index means the next page starts exactly after the last one
- * the model actually saw.
+ * whenever anything was dropped, which is precisely when a skipped directory is
+ * involved. Keeping each survivor's source index means the next page starts exactly
+ * after the last one the model actually saw.
  *
- * Retries because `.git` can outnumber a whole page on its own: at a repo root it is
- * walked *first* (`.` sorts before alphanumerics) and holds thousands of objects, so
+ * Retries because a skipped directory can outnumber a whole page on its own: at a
+ * repo root `.git` is walked *first* (`.` sorts before alphanumerics) and holds
+ * thousands of objects, and a dependency tree runs to tens of thousands of files, so
  * one fetch can come back entirely excluded. `maxRounds` is the caller's, and the
  * asymmetry is deliberate — a `find` retry re-walks dirents, which is cheap SQLite
  * reads, while a `grep` retry re-reads and re-scans every file it already looked at.
@@ -147,6 +147,7 @@ export async function readWindow(
 export async function collectVisible<T>(
   fetch: (offset: number, limit: number) => Promise<T[]>,
   pathOf: (item: T) => string,
+  skip: (path: string) => boolean,
   want: number,
   offset: number,
   maxRounds: number
@@ -172,7 +173,7 @@ export async function collectVisible<T>(
     rounds += 1;
     const batch = await fetch(cursor, want + 1);
     batch.forEach((item, i) => {
-      if (isGitInternal(pathOf(item))) return;
+      if (skip(pathOf(item))) return;
       items.push(item);
       rawIndex.push(cursor + i);
     });
@@ -205,7 +206,7 @@ interface VisiblePage {
  *
  * `rawIndex[shown]` rather than `offset + shown`: the first item the model did *not*
  * see, at its source coordinate. Anything else drifts by however many entries the
- * `.git` filter removed, and drifts silently — the next page would repeat or skip
+ * skip filter removed, and drifts silently — the next page would repeat or skip
  * with nothing to indicate it had.
  *
  * Narrowing is still offered, and still first-class, because it is cheaper than

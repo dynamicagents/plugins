@@ -1,40 +1,20 @@
 /**
  * Which paths these tools act on, and the sentence a refused one gets.
  *
- * Two lists that look alike and mean opposite things. `node_modules` is *absent*
- * — physics, decided by `computerd` — so its note explains a file that is really
- * there and names the tool that can reach it. `.git` is present, readable, and
- * refused anyway — policy, decided here — so its note names where repository work
- * belongs. Two reasons want two sentences, which is why they are not one list.
+ * Two questions that look alike and are not. **Refusal** is about access, and
+ * only `.git` is refused — policy, decided here, because a model that edits
+ * `.git/HEAD` corrupts a checkout in a way that surfaces much later. **Skipping**
+ * is about attention: a recursive walk that spends its page on a dependency tree
+ * shows the model nothing it asked for, so the walk steps over those directories
+ * while every one of their files stays readable by name.
  *
  * Everything here is a string comparison: no filesystem, no `await`, which is
  * what lets {@link guardPath} run before a tool opens the workspace at all.
  */
 
-/**
- * Whether a path sits under a directory the workspace never receives.
- *
- * Only `node_modules` today, and it is not configurable here because it is not
- * our choice: `computerd` applies its own `DEFAULT_IGNORE` container-side, and
- * this list exists to *predict* that so a read can explain itself rather than
- * reporting a missing file. A dependency the model can plainly see in a `ls` but
- * cannot read is the kind of thing that sends it hunting for the wrong bug.
- */
-const CONTAINER_ONLY_SEGMENTS = ["node_modules"];
-
-export function isContainerOnly(path: string): boolean {
-  return path
-    .split("/")
-    .some((segment) => CONTAINER_ONLY_SEGMENTS.includes(segment));
-}
-
-/** The sentence a container-only path gets instead of "not found". */
-function containerOnlyNote(path: string, verb: string): string {
-  return (
-    `${path} is inside node_modules, which lives only in the container and is ` +
-    `not part of the durable workspace — ${verb} cannot see it. Use \`sb_exec\` ` +
-    `(for example \`cat ${path}\`) to read it through the shell instead.`
-  );
+/** Whether any segment of `path` is exactly `segment`. */
+function hasSegment(path: string, segment: string): boolean {
+  return path.split("/").includes(segment);
 }
 
 /**
@@ -44,10 +24,50 @@ function containerOnlyNote(path: string, verb: string): string {
  * checkout in a way that surfaces much later as an inexplicable git failure.
  *
  * Exact segment rather than substring, so `.gitignore`, `.gitattributes` and
- * `.github/` are untouched — the same trap `node_modules_old` sets one function up.
+ * `.github/` are untouched.
  */
 export function isGitInternal(path: string): boolean {
-  return path.split("/").includes(".git");
+  return hasSegment(path, ".git");
+}
+
+/**
+ * Directories a recursive walk steps over.
+ *
+ * Both are *present and readable* — the workspace holds the dependency tree the
+ * same way it holds the source — and both are large enough to fill a page on
+ * their own. At a repository root `.git` is walked first, since `.` sorts before
+ * alphanumerics, and a dependency tree runs to tens of thousands of files; either
+ * way the model pays a page to learn nothing.
+ *
+ * Skipping is therefore about what a walk is *for*, and it is not containment: a
+ * path inside one of these reads normally, and naming one as the root of a walk
+ * searches it. {@link walkSkips} is what makes that second part true.
+ */
+const WALK_SKIPPED = [".git", "node_modules"] as const;
+
+/**
+ * What a walk rooted at `root` steps over.
+ *
+ * A root already inside one of these is the caller asking for it by name, so it
+ * is not skipped — otherwise `sb_grep` with a path inside a dependency would
+ * search nothing and say everything was skipped, which is the kind of answer
+ * that sends a model looking for the wrong bug.
+ */
+export function walkSkips(root: string): readonly string[] {
+  return WALK_SKIPPED.filter((segment) => !hasSegment(root, segment));
+}
+
+/** Whether a walk carrying `skips` steps over `path`. */
+export function isSkipped(skips: readonly string[], path: string): boolean {
+  return skips.some((segment) => hasSegment(path, segment));
+}
+
+/** The skipped directories, for a sentence: "`.git` and `node_modules`". */
+export function skipNames(skips: readonly string[]): string {
+  const quoted = skips.map((segment) => `\`${segment}\``);
+  return quoted.length > 1
+    ? `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`
+    : (quoted[0] ?? "");
 }
 
 /**
@@ -77,21 +97,18 @@ function gitInternalNote(path: string, verb: string): string {
 /**
  * The path check every file tool makes, before it opens anything.
  *
- * Returns the sentence to hand back, or `undefined` to proceed. Two string
- * comparisons — no `stat`, no round trip — which is why all six tools can afford
- * to call it before the workspace is opened.
+ * Returns the sentence to hand back, or `undefined` to proceed. One string
+ * comparison — no `stat`, no round trip — which is why every file tool can
+ * afford to call it before the workspace is opened.
  *
  * ## A redirect, not a boundary
  *
- * `node_modules` is a fact about the substrate and the note names the tool that
- * can see it; `.git` is a rule about where repository work belongs and the note
- * names the tools it belongs to. Both catch the case that actually happens — a
- * model reaching into `.git/HEAD` to fix a merge, or reading a dependency's
- * source and finding nothing there.
+ * The note names the tools repository work belongs to, because the case that
+ * actually happens is a model reaching into `.git/HEAD` to fix a merge.
  *
  * It is not containment, and this is the only place worth saying so. `sb_exec`
  * is in the same tool family, granted per family rather than per tool, so every
- * agent holding these six also holds a shell that reads and writes `.git`
+ * agent holding these file tools also holds a shell that reads and writes `.git`
  * directly.
  *
  * Symlinks are not resolved, for the same reason: a tracked
@@ -106,7 +123,6 @@ function gitInternalNote(path: string, verb: string): string {
  * segment.
  */
 export function guardPath(path: string, verb: string): string | undefined {
-  if (isContainerOnly(path)) return containerOnlyNote(path, verb);
   if (isGitInternal(path)) return gitInternalNote(path, verb);
   return undefined;
 }

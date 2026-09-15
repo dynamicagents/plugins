@@ -4,6 +4,7 @@ import {
   packBlocks,
   renderGrepMatches,
   renderResult,
+  syncPendingNote,
   truncateOutput
 } from "./render.js";
 
@@ -290,5 +291,39 @@ describe("packBlocks", () => {
 
   it("reports nothing shown for no blocks", () => {
     expect(packBlocks([], 100)).toEqual({ body: "", shown: 0 });
+  });
+});
+
+/**
+ * A command can succeed while the pull that carries its writes back does not.
+ * The model's next move is almost always to read what it just wrote, and the
+ * file tools read the workspace rather than the container — so without a word
+ * the file looks unchanged and the obvious conclusion is that the command
+ * failed, which is the one conclusion that is wrong.
+ */
+describe("a sync that has not landed", () => {
+  const result = {
+    exitCode: 0,
+    stdout: "built\n",
+    stderr: "",
+    status: "completed" as const
+  };
+
+  it("says so under the verdict, without touching the transcript", () => {
+    const out = renderResult({ ...result, sync: { status: "pending" } }, 1_000);
+    expect(out).toContain("built");
+    expect(out).toContain("--- exit 0 ---");
+    expect(out).toContain("has not reached the workspace");
+    // The recovery is to look again, never to run the command twice: the host
+    // drives the outstanding pull, and a re-run would repeat the side effects.
+    expect(out).toContain("read again");
+  });
+
+  it("stays quiet when the sync completed, or when there is none to report", () => {
+    expect(
+      renderResult({ ...result, sync: { status: "complete" } }, 1_000)
+    ).not.toContain("workspace");
+    expect(renderResult(result, 1_000)).not.toContain("workspace");
+    expect(syncPendingNote(undefined)).toBeUndefined();
   });
 });

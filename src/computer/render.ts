@@ -209,6 +209,7 @@ export function renderResult(
     stdout: string;
     stderr: string;
     status?: WorkspaceRuntimeStatus;
+    sync?: { status: "complete" | "pending" };
   },
   maxChars: number
 ): string {
@@ -223,7 +224,38 @@ export function renderResult(
   const state =
     result.status && result.status !== "completed" ? ` (${result.status})` : "";
   const verdict = `--- exit ${result.exitCode}${state} ---`;
-  return body ? `${body}\n${verdict}` : `(no output)\n${verdict}`;
+  const pending = syncPendingNote(result.sync);
+  const transcript = body ? `${body}\n${verdict}` : `(no output)\n${verdict}`;
+  return pending ? `${transcript}\n${pending}` : transcript;
+}
+
+/**
+ * The command ran; its changes have not landed in the workspace yet.
+ *
+ * Every command is bracketed by a sync, and the pull afterwards is what moves
+ * what it wrote from the container into the Durable Object. That pull can fail
+ * while the command itself succeeds — a transport that dropped, a container
+ * replaced underneath — and the runtime reports it in `sync` rather than in the
+ * exit code, because the command genuinely did run.
+ *
+ * Worth a sentence to the model because the *next* thing it does is usually read
+ * what it just wrote, and the file tools read the workspace rather than the
+ * container. Without this the file looks unchanged and the obvious conclusion is
+ * that the command did not work, which is the one conclusion that is wrong.
+ *
+ * Recovery is deliberately not the model's: the host drives the outstanding pull
+ * and a later command's own bracket carries what is left, so the advice is to
+ * look again rather than to run anything.
+ */
+export function syncPendingNote(
+  sync: { status: "complete" | "pending" } | undefined
+): string | undefined {
+  if (sync?.status !== "pending") return undefined;
+  return (
+    "(The command finished, but what it wrote has not reached the workspace " +
+    "yet. The file tools may still show the previous contents; it catches up " +
+    "on its own, so read again rather than re-running the command.)"
+  );
 }
 
 /**

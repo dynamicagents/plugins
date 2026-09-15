@@ -23,28 +23,29 @@ Install exactly one filesystem plugin. An agent holding this and
 [`/workspace`](../workspace/) gives the model no way to know which one a path refers
 to.
 
-## `node_modules` is not in the workspace
+## `node_modules` is in the workspace too
 
-The one thing to internalise. `computerd` excludes it from the sync by design, and the
-exclusion is right: pushing a real one (429 MB, 22,470 files) into the object exceeds
-the Durable Object's 128 MB isolate limit, leaving the tree silently short.
+The one thing to internalise. `computerd` syncs the dependency tree along with
+everything else, so an install outlives its container: a replacement is handed the
+tree back rather than rebuilding it, and the file tools read inside it like anywhere
+else.
 
-So dependencies live in the container and die with it, while source and `.git` are
-durable. Two consequences: an install has to be re-run on a cold container, and the
-file tools cannot see a path under `node_modules` even though a shell in the same
-container can — they say so rather than reporting a missing file.
+What it costs is attention, not correctness. A real tree is 22,470 files and sorts
+before `src`, so `sb_grep` and recursive `sb_ls` step over it — and over `.git` — and
+say so when a page is skipped entirely. Naming either as the `path` searches it, which
+is what keeps the skip a default rather than a wall.
 
 ## `.git` is off limits
 
-Present in the workspace, refused by the file tools anyway, and skipped by `sb_grep`
-and recursive `sb_ls`. Reading it tells the model less than [`/repo`](../repo/) does,
+Present in the workspace, refused by the file tools anyway, and skipped by walks like
+the dependency tree above. Reading it tells the model less than [`/repo`](../repo/) does,
 and writing it corrupts the checkout. Repository work goes through the repo tools.
 
 ## Searching
 
 `sb_grep` and `sb_ls` read the durable workspace rather than the container, so they
-keep answering while it restarts or while dependencies install — which is exactly when
-a subagent would otherwise be blocked. Both bound their results at the source and
+keep answering while it restarts or while an install runs — which is exactly when a
+subagent would otherwise be blocked. Both bound their results at the source and
 report the `offset` that continues a cut one; `sb_read` takes a byte range for the
 same reason, so nothing needs a shell to be reached.
 
@@ -89,17 +90,18 @@ Two consequences worth stating outright:
   count for an edit the workspace threw away.
 
   Build it with `deriveAdvisories({ install, storage, dependencyTreePresent })` rather
-  than by hand — implementing this is gathering three values the host already has,
-  not writing policy. Which advisories reach which commands, whether one may hold a
+  than by hand — implementing this is gathering what the host already has, not
+  writing policy. Which advisories reach which commands, whether one may hold a
   command back, and how each is worded are decided here, in one place each. A host
   that renders its own wording is re-deriving severity from an error string, which
   is what this replaced.
 
-  `dependencyTreePresent` is existence only — `test -d node_modules` — and is
-  reported to the reader rather than acted on, because a `npm ci` that died partway
-  leaves the directory behind. It qualifies a failure; it never cancels one.
+  `dependencyTreePresent` is existence only — is there a `node_modules` directory in
+  the workspace — and is reported to the reader rather than acted on, because an
+  `npm ci` that died partway leaves the directory behind. It qualifies a failure; it
+  never cancels one.
 
-  Two tools consult this. `sb_exec` waits out anything transient and warns about the
+  `sb_exec` and the write tools consult this. `sb_exec` waits out anything transient and warns about the
   rest; `sb_write` and `sb_edit` **refuse** when an advisory says writes do not
   survive, since a write has no successful outcome available there and reporting one
   is worse than refusing.
