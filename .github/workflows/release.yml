@@ -106,9 +106,28 @@ jobs:
             echo "publish=true" >>"$GITHUB_OUTPUT"
           fi
 
-      # From the committed lockfile, never from a sibling checkout. This only runs
-      # on `main`, where the release has to have put core back on a semver range —
-      # AGENTS.md says why — so what ships is built against a published core.
+      # What ships is built against a published core — AGENTS.md says why. A git
+      # ref onto core's `main` may sit on `main` here while a change needs
+      # unreleased core, and the release PR removes it; a bump that lands with one
+      # still in place stops here, before anything is published. A range never
+      # contains `:`, `/` or `#`, and every git, GitHub and file spec does. Each
+      # field is read on its own: core is named in more than one, and its peer
+      # range would hide the git ref beside it in a merged object.
+      - name: Built against published versions only
+        if: steps.gate.outputs.publish == 'true'
+        run: |
+          node -e '
+            const pkg = require("./package.json");
+            const refs = ["dependencies", "devDependencies", "peerDependencies"].flatMap((field) =>
+              Object.entries(pkg[field] ?? {})
+                .filter(([, spec]) => /[:/#]/.test(spec))
+                .map(([name, spec]) => `${field}: ${name} is "${spec}"`));
+            for (const ref of refs)
+              console.error(`${ref} — a release builds against published versions only`);
+            process.exit(refs.length ? 1 : 0);
+          '
+
+      # From the committed lockfile, never from a sibling checkout.
       - if: steps.gate.outputs.publish == 'true'
         run: npm ci
 
