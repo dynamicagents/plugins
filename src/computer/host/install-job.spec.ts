@@ -14,13 +14,49 @@ import type { Workspace } from "@cloudflare/computer";
  * reaches for on this path is `ctx.storage`.
  */
 
+/**
+ * A checkout the install planner will act on, whose container refuses every
+ * command.
+ *
+ * The filesystem is answered from a fixed set rather than "yes to everything",
+ * so `node_modules` is genuinely absent and the install is not skipped as
+ * already done — the one way this fake could make the test pass for the wrong
+ * reason.
+ */
+function refusingWorkspace(err: Error): Workspace {
+  const present = new Set([
+    "/workspace/repo/package.json",
+    "/workspace/repo/package-lock.json"
+  ]);
+  return {
+    fs: {
+      exists: async (path: string) => present.has(path),
+      readFile: async () => "{}"
+    },
+    runtime: {
+      exec: async () => {
+        throw err;
+      }
+    }
+  } as unknown as Workspace;
+}
+
 /** A job wired to one workspace's real storage, and nothing else it does not need. */
-function jobOn(storage: DurableObjectStorage): InstallJob {
+function jobOn(
+  storage: DurableObjectStorage,
+  workspace?: Workspace
+): InstallJob {
   return new InstallJob({
     storage,
-    // Untouched on the sync paths below, which are storage reads and writes.
-    scheduler: {} as never,
-    workspace: () => ({}) as unknown as Workspace,
+    // Enough of a scheduler to accept the watchdog an install arms before it
+    // spawns. The rows themselves are not what these specs pin — the deadline
+    // wrapper around it writes to the real storage above, which is.
+    scheduler: {
+      set: async () => ({ id: "spec-schedule" }),
+      cancel: async () => {},
+      get: async () => undefined
+    } as never,
+    workspace: () => workspace ?? ({} as unknown as Workspace),
     plan: () => ({ ...DEFAULT_INSTALL_PLAN, overrides: {} }),
     timeoutMs: () => 20 * 60_000,
     headroom: () => undefined,
@@ -101,5 +137,44 @@ describe("what a completed pull is allowed to certify", () => {
     // The wait is over, and deliberately without a fingerprint: the next access
     // should find a missing tree and arm an install rather than skip one.
     expect(after).toEqual({ marker: undefined, completed: undefined });
+  });
+});
+
+describe("what an install says when the container cannot be reached", () => {
+  /** The host refusing a container whose image predates the shared secret. */
+  const AUTH_FAULT = new Error(
+    "WorkspaceTransportError: CloudflareContainerBackend(container-shell) " +
+      "[stage=auth]: container served an unauthenticated request to /api with " +
+      "405, so this workspace would run without authorization. A container or " +
+      "image predating RPC_CLIENT_SECRET has to be recycled."
+  );
+
+  /** The same spawn failing because the container was merely not there. */
+  const UNREACHABLE = new Error("Network connection lost.");
+
+  async function failedInstall(err: Error, name: string) {
+    const stub = freshWorkspace(name);
+    return await runInDurableObject(stub, async (_instance, state) =>
+      jobOn(state.storage, refusingWorkspace(err)).start({
+        dir: "/workspace/repo"
+      })
+    );
+  }
+
+  it("tells an operator to redeploy when the image cannot authenticate", async () => {
+    const state = await failedInstall(AUTH_FAULT, "install-auth-fault");
+    expect(state.state).toBe("failed");
+    // The record is what reaches the subagent, so it must not send it after a
+    // command that would have to reach the same container this one could not.
+    expect(state.state === "failed" && state.error).toMatch(/redeploy/);
+    expect(state.state === "failed" && state.error).not.toMatch(/sb_exec/);
+  });
+
+  it("still sends the subagent after an unreachable container", async () => {
+    // The guard: without it the test above passes against a version that gives
+    // every spawn failure the same sentence.
+    const state = await failedInstall(UNREACHABLE, "install-unreachable");
+    expect(state.state).toBe("failed");
+    expect(state.state === "failed" && state.error).toMatch(/sb_exec/);
   });
 });

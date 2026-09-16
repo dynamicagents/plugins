@@ -14,6 +14,7 @@ import {
   type InstallState
 } from "../install.js";
 import { pathExists } from "../read.js";
+import { deploymentFault } from "./container-fault.js";
 import { truncateOutput } from "../render.js";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 
@@ -697,19 +698,32 @@ export class InstallJob {
       // re-attach can find it. Close the record here: a `failed` install is
       // recoverable — the subagent is told what happened and can run the command
       // itself — where a `running` one that nobody owns is not.
-      console.error(`[${this.deps.tag()}] the install could not be started`, {
-        id: this.deps.id(),
-        command: resolution.command,
-        err: String(err)
-      });
+      //
+      // Which sentence, though, depends on why. The default advice — run it
+      // yourself with `sb_exec` — is good for a container that is merely
+      // unreachable, and useless for a deployment fault: the same container is
+      // what `sb_exec` would have to reach. Under one of those, say what an
+      // operator has to do and do not send the subagent after a command that
+      // cannot run either.
+      const fault = deploymentFault(err);
+      console.error(
+        `[${this.deps.tag()}] ${fault?.summary ?? "the install could not be started"}`,
+        {
+          id: this.deps.id(),
+          command: resolution.command,
+          ...(fault ? { remedy: fault.remedy } : {}),
+          err: String(err)
+        }
+      );
       const failed: InstallState = {
         state: "failed",
         command: resolution.command,
         finishedAt: Date.now(),
-        error:
-          `the install could not be started (${String(err)}). The container ` +
-          "was most likely unreachable. Run the command yourself with sb_exec, " +
-          "or clone again to retry it."
+        error: fault
+          ? `the install could not be started: ${fault.remedy}`
+          : `the install could not be started (${String(err)}). The container ` +
+            "was most likely unreachable. Run the command yourself with sb_exec, " +
+            "or clone again to retry it."
       };
       await this.#job.write(failed);
       await this.#job.clearWatch();
@@ -982,18 +996,33 @@ export class InstallJob {
       // rather than leaving the gate closed forever; the next checkout starts a
       // new install, and `sb_exec` can run in the meantime.
       if (execWasLost(err)) this.deps.forgetTrust();
-      console.warn(`[${this.deps.tag()}] could not re-attach to the install`, {
-        id: this.deps.id(),
-        err: String(err)
-      });
+      // Same split as the spawn path: a replaced container is worth re-running
+      // into, a deployment fault is not, and only one of them is the container's
+      // own doing.
+      const fault = deploymentFault(err);
+      if (fault)
+        console.error(`[${this.deps.tag()}] ${fault.summary}`, {
+          id: this.deps.id(),
+          remedy: fault.remedy,
+          err: String(err)
+        });
+      else
+        console.warn(
+          `[${this.deps.tag()}] could not re-attach to the install`,
+          {
+            id: this.deps.id(),
+            err: String(err)
+          }
+        );
       const context = await this.#job.context();
       await this.#job.write({
         state: "failed",
         command: context?.command ?? "(unknown)",
         finishedAt: Date.now(),
-        error:
-          "the install stopped without reporting — its container was most " +
-          "likely replaced. Re-run it with sb_exec, or clone again to restart it."
+        error: fault
+          ? `the install stopped without reporting: ${fault.remedy}`
+          : "the install stopped without reporting — its container was most " +
+            "likely replaced. Re-run it with sb_exec, or clone again to restart it."
       });
       await this.#job.clearWatch();
     }

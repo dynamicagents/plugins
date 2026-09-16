@@ -34,6 +34,19 @@ function trustWith(output: string | Error) {
   return { trust, exec };
 }
 
+/**
+ * A container the host refuses outright: its image predates the shared secret.
+ *
+ * Verbatim from a deployment that hit it, for the reason given in
+ * {@link file://./container-fault.spec.ts} — the string being matched is the
+ * backend's, not ours.
+ */
+const AUTH_FAULT =
+  "WorkspaceTransportError: CloudflareContainerBackend(container-shell) " +
+  "[stage=auth]: container served an unauthenticated request to /api with 405, " +
+  "so this workspace would run without authorization. A container or image " +
+  "predating RPC_CLIENT_SECRET has to be recycled.";
+
 /** How many times the trust command was actually sent. */
 async function runsAfterTwoEnsures(output: string | Error): Promise<number> {
   const { trust, exec } = trustWith(output);
@@ -72,6 +85,44 @@ describe("when the container is asked to trust the CA again", () => {
 
   it("tries again when the container could not be reached", async () => {
     expect(await runsAfterTwoEnsures(new Error("EEXEC_LOST"))).toBe(2);
+  });
+
+  it("reports a deployment fault once, and keeps trying the command", async () => {
+    // Two different lifetimes in one assertion, which is the point: the report
+    // is once per container because an operator needs it once, and the command
+    // keeps going out because the classification is a string match and a
+    // misread must not leave a container permanently untrusted.
+    const { trust, exec } = trustWith(new Error(AUTH_FAULT));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await trust.ensure();
+      await trust.ensure();
+      expect(error.mock.calls.length).toBe(1);
+      expect(String(error.mock.calls[0]?.[0])).toContain("image");
+      // The symptom line is what this replaces, not something it joins.
+      expect(warn.mock.calls.length).toBe(0);
+      expect(exec.mock.calls.length).toBe(2);
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("still reports an ordinary failure as one", async () => {
+    // The guard: without it the test above passes against a class that treats
+    // every throw as a deployment fault.
+    const { trust } = trustWith(new Error("EEXEC_LOST"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await trust.ensure();
+      expect(error.mock.calls.length).toBe(0);
+      expect(warn.mock.calls.length).toBe(1);
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it("forgets a container it had already trusted", async () => {
