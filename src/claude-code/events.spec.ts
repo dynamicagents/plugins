@@ -429,8 +429,25 @@ describe("toProgress", () => {
       parseStream(assistant("x".repeat(PROGRESS_MAX_CHARS * 2))).events,
       0
     );
-    expect(note[0]!.text.length).toBeLessThanOrEqual(PROGRESS_MAX_CHARS);
+
+    // The exact length, not a bound: an upper bound passes just as happily on a
+    // ceiling far below the one the parent is promised, which is the whole of
+    // what this pair is protecting.
+    expect(note[0]!.text).toHaveLength(PROGRESS_MAX_CHARS);
     expect(note[0]!.text.endsWith("…")).toBe(true);
+  });
+
+  /**
+   * The other side of the clip, and the side a reader notices. A turn that
+   * fits arrives as the session wrote it — no marker, nothing lost — so the
+   * ellipsis means what it says, and a note without one can be read as ending
+   * where the session stopped talking.
+   */
+  it("posts a turn that fits exactly, unmarked and whole", () => {
+    const text = `${"x".repeat(PROGRESS_MAX_CHARS - 1)}.`;
+    const note = toProgress(parseStream(assistant(text)).events, 0);
+
+    expect(note[0]!.text).toBe(text);
   });
 });
 
