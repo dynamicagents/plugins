@@ -607,6 +607,21 @@ export class InstallJob {
       return state;
     }
 
+    /**
+     * The previous completion goes **before** this install starts, and the hole
+     * it closes is the one the skip condition above is built to avoid.
+     *
+     * Reaching here with a matching fingerprint means the tree is not present —
+     * the skip already returned for the case where it is. If that marker were
+     * left standing and this install's pull then became unrecoverable after
+     * writing part of a tree, `armIfTreeMissing` would find a directory *and* a
+     * fingerprint that agrees with it, conclude the tree landed, and never
+     * repair it. The marker means "this object holds the tree that lockfile
+     * produces", and from the moment an install starts that is not known again
+     * until its pull completes and {@link InstallJob.onSyncComplete} says so.
+     */
+    await this.deps.storage.delete(INSTALL_COMPLETED_KEY);
+
     const startedAt = Date.now();
     const state: InstallState = {
       state: "running",

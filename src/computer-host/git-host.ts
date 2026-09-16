@@ -148,8 +148,12 @@ export class WorkspaceGitHost {
           .filter(([, status]) => !status.ok)
           .map(([ref, status]) => `${ref}: ${status.error ?? "rejected"}`)
           .join("; ");
+        // `||`, not `??`, on the second rung: `perRef` is a joined string, so
+        // "no failing ref carried a reason" is `""` rather than nullish — and
+        // `??` would hand that through as the error message. A rejected push
+        // reporting a blank reason is the one outcome worse than a generic one.
         throw new Error(
-          result.error ?? perRef ?? "the remote rejected the push"
+          result.error ?? (perRef || "the remote rejected the push")
         );
       }
       return `pushed ${req.branch} to ${req.url}`;

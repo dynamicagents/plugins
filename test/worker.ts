@@ -56,7 +56,10 @@ export class TestWorkspaceDO extends WorkspaceObjectBase {
       installPlan: { ...DEFAULT_INSTALL_PLAN, overrides: {} },
       egress: { mode: "direct" },
       git: {
-        token: undefined,
+        // A binding this test Worker does not declare, which reads `undefined`
+        // — the unauthenticated case, and the only one reachable with no
+        // container to run git against.
+        tokenBinding: "GITHUB_TOKEN",
         author: { name: "test", email: "test@example.invalid" }
       }
     };

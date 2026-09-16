@@ -153,19 +153,22 @@ export class ContainerTrust {
           timeoutMs: TRUST_TIMEOUT_MS
         });
       const result = await handle.result();
-      /**
-       * Marked on a command that *ran*, not on one that found a CA.
-       *
-       * The command exits 0 either way — it prints `NO CA AT …` when there is
-       * nothing to install — and that case is not worth retrying within a
-       * container: interception is configured by the `connect()` already
-       * awaited, so a CA absent now stays absent until the container is
-       * replaced. Retrying on every call would buy nothing and cost a round trip
-       * on the object's hottest path.
-       *
-       * A throw leaves this false, so an unreachable container is tried again.
-       */
-      this.#trusted = true;
+      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
+      // Marked only when the command reported an outcome that will not change
+      // inside this container. `TRUSTED` is the success; `NO CA AT …` is the
+      // intentional terminal case, since interception is configured by the
+      // `connect()` already awaited and a CA absent now stays absent until the
+      // container is replaced — retrying that on the object's hottest path would
+      // buy nothing.
+      //
+      // `TRUST FAILED` is neither. The command exits 0 whatever happens, so
+      // treating "it ran" as "it worked" would mark a container trusted whose
+      // `install` or `update-ca-certificates` failed — and every later HTTPS
+      // connection in it fails with nothing naming the cause, permanently,
+      // because nothing tries again.
+      //
+      // A throw leaves this false too, so an unreachable container is retried.
+      this.#trusted = !output.includes("TRUST FAILED");
       // Logged at info once per container, deliberately. The container's own
       // stdout does not reach Workers Observability, so this line is the only
       // place an operator can see whether the container can speak TLS at all —
@@ -177,7 +180,8 @@ export class ContainerTrust {
       console.info(`[${this.deps.tag()}] container TLS trust`, {
         id: this.deps.id(),
         exitCode: result.exitCode,
-        output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim()
+        trusted: this.#trusted,
+        output
       });
     } catch (err) {
       console.warn(`[${this.deps.tag()}] could not trust the interception CA`, {

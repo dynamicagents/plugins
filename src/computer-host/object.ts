@@ -53,10 +53,12 @@ import type { RepoGitResult } from "../repo/index.js";
  * agent's container", and the alternative is a second copy of this file
  * drifting in whichever direction the object nobody redeployed recently went.
  *
- * It lives in `src/workspace/` rather than in either agent's directory because
- * `verify:isolation` fails an agent that imports a sibling's module: the
- * sibling's plugins come with it. Anything agents share belongs here or at the
- * top level, never inside one of them.
+ * It is its own subpath rather than part of `../computer/` because the two have
+ * opposite bundle costs: an agent that installs the tools carries no container
+ * backend and no isomorphic-git, and only a Worker that *deploys* a workspace
+ * pays for those. The dependency runs one way — this reaches `../computer/` for
+ * the policy both halves must agree on, and nothing there may reach back.
+ * `scripts/verify-exports.mjs` holds that on the built graph.
  *
  * `@cloudflare/computer` pairs a SQLite-backed virtual filesystem in *this*
  * object's storage with a container running `computerd`, which mounts it over
@@ -112,10 +114,10 @@ export const WORKSPACE_DIR = "/workspace";
  * before any git runs, and `scratch_open` sets its sentinel before anything
  * resolves a name.
  *
- * `repo` is not always a repository. `SCRATCH_REPO` in `./scratch.ts` passes
- * through here as one, which is what keys a scratchpad to its own object and its
- * own container — see that file for why a scratchpad is modelled as a repository
- * whose remote is nowhere.
+ * `repo` is not always a repository. A host may pass a sentinel through here as
+ * one — a scratchpad is modelled that way, which is what keys it to its own
+ * object and its own container. Anything that is not a forge name works, as long
+ * as no caller could clone something that collides with it.
  */
 export function workspaceName(callerKey: string, repo?: string): string {
   return repo ? `${callerKey}|${repo}` : `${callerKey}|<unassigned>`;
@@ -269,14 +271,26 @@ const WorkspaceContainerBase = withWorkspaceContainer(WorkspaceContainerHost);
  */
 export interface WorkspaceGitConfig {
   /**
-   * The forge credential, or nothing.
+   * The **name** of the binding holding the forge credential — never the
+   * credential itself.
    *
-   * Read through the memoised config at the moment it would be handed over,
-   * never captured at construction: `undefined` here means an unauthenticated
-   * request rather than a throw, which is what lets a workspace with no token
-   * still clone a public repository.
+   * `workspaceConfig()` is an ordinary method on the prototype, and on a Durable
+   * Object `protected` is a typechecker's opinion rather than a runtime
+   * boundary: anything holding the namespace can call it. A config carrying the
+   * token would therefore hand it to any caller that asked — exactly what
+   * {@link file://./git-host.ts} exists to prevent, since the credential is
+   * supposed to be unreachable from anywhere but the moment git authenticates.
+   *
+   * So the config names the binding and the object reads it. Naming a secret by
+   * string is what the plugin contract's `requires.secrets` already does, and it
+   * is the only form available here: this package cannot name a consumer's
+   * ambient `Env`.
+   *
+   * An unset binding reads `undefined`, which means an unauthenticated request
+   * rather than a throw — that is what lets a workspace with no token still
+   * clone a public repository.
    */
-  token: string | undefined;
+  tokenBinding: string;
   /**
    * Who a commit made on this side is attributed to.
    *
@@ -306,9 +320,9 @@ export interface WorkspaceObjectConfig {
    * supplies, which is what puts the Worker on the model path — see
    * `@dynamicagents/plugins/claude-code`.
    *
-   * **Required in practice, and its absence is silent.** `@cloudflare/computer`
-   * 0.2.0 made this a policy defaulting to `{ mode: "none" }`, and the backend
-   * derives the container's network flag from it. Omit it and the container
+   * **Required in practice, and its absence is silent.** It is a policy that
+   * defaults to `{ mode: "none" }`, and the backend derives the container's
+   * network flag from it. Omit it and the container
    * comes up with no network at all: the workspace mounts, commands run, and
    * the install dies on a registry it cannot reach with nothing naming egress
    * as the cause.
@@ -490,10 +504,25 @@ export abstract class WorkspaceObjectBase<
     id: () => this.ctx.id.toString()
   });
 
+  /**
+   * The forge credential, read at the moment it would be handed over.
+   *
+   * `#`-private, which is the only spelling actually unreachable over RPC — see
+   * {@link WorkspaceGitConfig.tokenBinding} for why that matters here and not
+   * for the rest of the config.
+   *
+   * Indexed rather than named: the subclass says which binding holds it, because
+   * this package cannot name a consumer's `Env`.
+   */
+  #token(): string | undefined {
+    const env = this.env as unknown as Record<string, string | undefined>;
+    return env[this.#cfg.git.tokenBinding];
+  }
+
   /** Clone, fetch and push, with the credential — see `./git-host.ts`. */
   readonly #gitHost = new WorkspaceGitHost({
     git: () => this.#workspace.git,
-    token: () => this.#cfg.git.token,
+    token: () => this.#token(),
     tag: () => this.#tag
   });
 

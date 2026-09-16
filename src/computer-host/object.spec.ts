@@ -258,6 +258,38 @@ describe("the install gate", () => {
    * subagent's to act on, via the warning the gate renders in front of the next
    * command.
    */
+  it("drops the previous completion marker when a real install starts", async () => {
+    /**
+     * The marker means "this object holds the tree that lockfile produces", and
+     * an install starting is the moment that stops being known.
+     *
+     * Leaving it standing is a trap with no symptom: if this install's pull then
+     * dies after writing part of a tree, `armIfTreeMissing` finds a directory
+     * *and* a fingerprint that agrees with it, concludes the tree landed, and
+     * never repairs it — on a workspace whose dependencies are the thing that is
+     * missing. The skip condition above is what stops a redundant install; this
+     * is what stops a skipped necessary one.
+     */
+    const stub = freshWorkspace("install-clears-completion");
+    const dir = "/workspace/probe";
+    // A tree that is not here, and a marker from when it was.
+    await seedNodeCheckout(stub, dir, { tree: false });
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("install:completed", {
+        fingerprint: "stale",
+        at: Date.now() - 60_000
+      });
+    });
+
+    await stub.startInstall({ dir });
+
+    expect(
+      await runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("install:completed")
+      )
+    ).toBeUndefined();
+  });
+
   it("does not auto-retry a failed install", async () => {
     const stub = freshWorkspace("install-failed-sticky");
 
@@ -289,7 +321,7 @@ describe("the install gate", () => {
  * - **A checkout is recorded whether or not anything was installed into it.**
  *   The install resolver skips a checkout it finds nothing to do in, and that
  *   says nothing about whether there is a checkout. See `noteCheckout` in
- *   `src/workspace/object.ts` for why the two records are separate.
+ *   `noteCheckout` in `./object.ts` for why the two records are separate.
  * - **The answer is probed, not remembered.** A recorded path is where to look;
  *   `.git` being there is what makes it true. A session's cwd and the
  *   cancellation `git reset --hard` both act on it, and neither recovers from a
