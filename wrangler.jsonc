@@ -24,7 +24,13 @@
   "compatibility_date": "2026-08-04",
 
   "durable_objects": {
-    "bindings": [{ "name": "TEST_AGENT", "class_name": "TestAgent" }]
+    "bindings": [
+      { "name": "TEST_AGENT", "class_name": "TestAgent" },
+      // No `containers` entry paired with it: the pool cannot start a container,
+      // and the workspace specs are written against exactly that — a host whose
+      // `runtime.exec` fails the way it fails when a container is unreachable.
+      { "name": "TEST_WORKSPACE", "class_name": "TestWorkspaceDO" }
+    ]
   },
 
   // `new_sqlite_classes`, not `new_classes`: a `PluginStore` talks to
@@ -32,7 +38,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TestAgent"]
+      "new_sqlite_classes": ["TestAgent", "TestWorkspaceDO"]
     }
   ]
 }

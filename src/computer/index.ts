@@ -253,7 +253,7 @@ export interface WorkspaceHost extends Rpc.DurableObjectBranded {
  * of the class's private brand: runtime-compatible, type-incompatible. This is
  * the only place in the plugin that gap is crossed.
  */
-function openWorkspace(
+export function openWorkspace(
   host: DurableObjectStub<WorkspaceHost>
 ): Promise<WorkspaceClient> {
   return getWorkspace(host as unknown as Parameters<typeof getWorkspace>[0]);
@@ -1285,3 +1285,58 @@ export function computer(config: ComputerConfig): AgentPlugin {
     ].join("\n")
   });
 }
+
+// --- the host half ----------------------------------------------------------
+
+/**
+ * The Durable Object everything above talks to.
+ *
+ * `./host/` is a directory rather than a subpath of its own, and that is the
+ * point: one capability is one import path, so a consumer cannot install the
+ * tools and miss the object they address. The two halves have opposite bundle
+ * costs — an agent that only calls `sb_exec` carries no container backend and no
+ * isomorphic-git — and `"sideEffects": false` is what keeps that true, since
+ * nothing here references the host unless the consumer does.
+ *
+ * The dependency runs one way for a mechanical reason: `./host/` imports the
+ * leaf modules beside this file, never this barrel, because this barrel
+ * re-exports `./host/` and a cycle through a module that builds a class at
+ * import time is a base that evaluates `undefined`.
+ */
+export {
+  WorkspaceObjectBase,
+  WORKSPACE_DIR,
+  workspaceName,
+  type WorkspaceObjectConfig,
+  type WorkspaceGitConfig
+} from "./host/workspace.js";
+
+// The dependency install, exported because a host that wants to report on one —
+// or a spec that drives it — needs the type, not because anything but
+// `./host/workspace.ts` constructs it.
+export { InstallJob, type InstallJobDeps } from "./host/install-job.js";
+
+// The pull the library owns no alarm for. Its constants are exported because a
+// host deferring to a drain has to back off at the same rate this does.
+export {
+  WorkspaceSync,
+  SYNC_DRAIN_BUDGET_MS,
+  SYNC_DRAIN_RESUME_MS,
+  SYNC_DRAIN_MAX_BACKOFF_MS,
+  syncRetryDelayMs,
+  type DrainOutcome,
+  type SyncDrainIntent,
+  type WorkspaceSyncDeps
+} from "./host/sync.js";
+
+// `TRUST_CA_COMMAND` is exported so a host can assert what its image will be
+// asked to run — see the file for why this cannot live in an entrypoint.
+export {
+  ContainerTrust,
+  TRUST_CA_COMMAND,
+  type ContainerTrustDeps
+} from "./host/ca-trust.js";
+
+export { WorkspaceGitHost, type GitHostDeps } from "./host/git-host.js";
+
+export type { WorkspaceWakeHandlers } from "./host/wake.js";

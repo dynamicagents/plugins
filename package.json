@@ -77,11 +77,12 @@
     "types:check": "wrangler types --include-env=false --check && node scripts/verify-runtime-types.mjs",
     "format": "prettier --write .",
     "lint": "eslint .",
-    "check": "npm run verify:peer-ranges && npm run types:check && prettier --check . && eslint . && tsc && npm run build",
+    "check": "npm run verify:peer-ranges && npm run verify:references && npm run types:check && prettier --check . && eslint . && tsc && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:record": "RECORD=1 vitest run recorded.spec.ts",
     "verify:exports": "node scripts/verify-exports.mjs",
+    "verify:references": "node scripts/verify-references.mjs",
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
     "prepack": "npm run build && npm run verify:exports",
     "prepublishOnly": "npm run check && npm test && npm run verify:exports",
@@ -91,6 +92,7 @@
     "@cloudflare/computer": "^0.3.0",
     "@cloudflare/shell": "^0.4.3",
     "@dynamicagents/core": ">=0.11.0 <0.12.0",
+    "@platformatic/vfs": "^0.4.0",
     "agents": ">=0.23.0 <0.24.0",
     "ai": "^7.0.77",
     "drizzle-orm": ">=0.45.2",
@@ -103,11 +105,15 @@
     },
     "@cloudflare/computer": {
       "optional": true
+    },
+    "@platformatic/vfs": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@cloudflare/computer": "^0.3.0",
     "@cloudflare/shell": "0.4.3",
+    "@platformatic/vfs": "^0.4.0",
     "@cloudflare/vitest-plugin": "^1.1.9",
     "@dynamicagents/core": "git+https://github.com/dynamicagents/core.git#main",
     "@types/node": "^26.5.1",

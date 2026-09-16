@@ -38,9 +38,8 @@ export const ARC_GAME_TYPE = "arc-game";
  * never called once, and the three `ws_write` calls between them were a
  * scratchpad for arithmetic — a use that costs a turn per note and now belongs in
  * `arc_act`'s `note` field, which costs none and stays in the model's own history.
- * The session file is unaffected: the family reaches the workspace through its
- * {@link file://../../agent/tools.ts ToolFamilyContext}, not through the tools the
- * model can see.
+ * The session file is unaffected: the family reaches the workspace through the
+ * `ToolFamilyContext` core hands it, not through the tools the model can see.
  */
 export const ARC_GAME_RECIPE: ResolvedRecipe = {
   key: ARC_GAME_TYPE,
