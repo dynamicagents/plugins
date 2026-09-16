@@ -4,17 +4,18 @@ import { deploymentFault } from "./container-fault.js";
 /**
  * Which container failures are the deployment's fault, and which are ordinary.
  *
- * The distinction decides whether a caller retries and what it tells an
- * operator, so the cost of a false positive is a workspace told to give up on a
- * container that was only starting, and the cost of a false negative is an hour
- * of logs naming a symptom. Both directions are asserted below.
+ * The distinction decides what a caller *says*, never whether it retries —
+ * every call site keeps the control flow it had. So the cost of a false
+ * positive is an operator sent to redeploy over a container that was only
+ * starting, and the cost of a false negative is an hour of logs naming a
+ * symptom. Both directions are asserted below.
  *
  * The messages are verbatim from a deployment that hit each one, because what is
  * being matched is the backend's formatting rather than our own — a fixture
  * written from memory would pass against a string the library never emits.
  */
 
-/** A 0.3 host that reached a container built before the daemon authenticated. */
+/** A host that reached a container built before the daemon authenticated. */
 const AUTH =
   'WorkspaceTransportError: Workspace backend "container-shell": shell.exec ' +
   "failed after 1 reconnect retry: initial=CloudflareContainerBackend" +

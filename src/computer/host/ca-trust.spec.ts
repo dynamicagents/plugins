@@ -103,6 +103,13 @@ describe("when the container is asked to trust the CA again", () => {
       // The symptom line is what this replaces, not something it joins.
       expect(warn.mock.calls.length).toBe(0);
       expect(exec.mock.calls.length).toBe(2);
+      // The replacement container is a different container, and an operator who
+      // missed the first report needs this one. Without the reset in `forget`
+      // the fault would be reported for the life of the isolate and never for
+      // the container that is actually failing now.
+      trust.forget();
+      await trust.ensure();
+      expect(error.mock.calls.length).toBe(2);
     } finally {
       error.mockRestore();
       warn.mockRestore();

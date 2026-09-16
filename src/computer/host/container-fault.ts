@@ -1,18 +1,22 @@
 /**
  * The container failures that are the deployment's fault, not the workspace's.
  *
- * Everything else this host catches is worth retrying: a container that is
- * starting, a connection that dropped, a command that died with it. These two
- * are not. They describe a Worker and a container application that cannot work
- * together no matter how many times they are asked, and they clear only when an
- * operator deploys.
+ * Everything else this host catches is the kind of thing a retry clears: a
+ * container that is starting, a connection that dropped, a command that died
+ * with it. These two are not. They describe a Worker and a container
+ * application that cannot work together no matter how many times they are
+ * asked, and they end only when an operator deploys.
  *
- * Telling them apart matters for what gets *said*. The cause is already in the
- * thrown message, but a caller logs its own sentence and the cause travels in a
- * detail field that a log digest truncates — so an operator scanning for what
- * broke reads the symptom ("could not trust the interception CA") and not the
- * reason. {@link deploymentFault} is how a caller puts the reason in the message
- * instead.
+ * **This changes what is said, not what is done.** No caller branches its
+ * control flow on the answer, and none should start: the match is on a string
+ * the library is free to reword, so a misread has to cost a misleading sentence
+ * rather than a workspace that stopped trying. What it earns is the log line.
+ * The cause is already in the thrown message, but a caller logs its own
+ * sentence and the cause travels in a detail field a log digest truncates — so
+ * an operator scanning for what broke reads the symptom ("could not trust the
+ * interception CA") and not the reason. {@link deploymentFault} is how a caller
+ * puts the reason in the message instead, and how the install record stops
+ * offering advice that cannot work.
  */
 
 /**

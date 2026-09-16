@@ -36,6 +36,9 @@ function refusingWorkspace(err: Error): Workspace {
     runtime: {
       exec: async () => {
         throw err;
+      },
+      getExec: async () => {
+        throw err;
       }
     }
   } as unknown as Workspace;
@@ -166,6 +169,26 @@ describe("what an install says when the container cannot be reached", () => {
     expect(state.state).toBe("failed");
     // The record is what reaches the subagent, so it must not send it after a
     // command that would have to reach the same container this one could not.
+    expect(state.state === "failed" && state.error).toMatch(/redeploy/);
+    expect(state.state === "failed" && state.error).not.toMatch(/sb_exec/);
+  });
+
+  it("tells an operator to redeploy when the re-attach cannot reach it", async () => {
+    // The other way in. A `running` record that this isolate did not start is
+    // resolved by re-attaching to the command, and that reaches the same
+    // container through `getExec` — so it fails the same way and owes the same
+    // sentence. Young on purpose: a stale record is closed by the timeout bound
+    // above this path and never reaches it.
+    const stub = freshWorkspace("reattach-auth-fault");
+    const state = await runInDurableObject(stub, async (_instance, s) => {
+      await s.storage.put("install", {
+        state: "running",
+        command: "npm ci --no-audit --no-fund",
+        startedAt: Date.now()
+      } satisfies InstallState);
+      return jobOn(s.storage, refusingWorkspace(AUTH_FAULT)).state();
+    });
+    expect(state.state).toBe("failed");
     expect(state.state === "failed" && state.error).toMatch(/redeploy/);
     expect(state.state === "failed" && state.error).not.toMatch(/sb_exec/);
   });
