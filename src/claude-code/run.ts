@@ -313,21 +313,33 @@ export interface DrainCursor {
    * event can land in different windows.
    */
   stderr?: string;
-  /**
-   * The most recent reading of the subscription bucket, once one has arrived.
-   *
-   * Carried for the reason {@link DrainCursor.result} is: the client reports it
-   * a handful of times across a session and a window boundary can fall anywhere,
-   * so a caller that only looked at the window it happened to be draining would
-   * see it on one chunk and not the next. Latest wins — an older reading of the
-   * same bucket is strictly worse.
-   */
-  rateLimit?: RateLimitInfo;
 }
 
 /** A cursor for a session that has not started yet. */
 export function freshCursor(execId: string): DrainCursor {
   return { execId, seq: 0, carry: "", emitted: 0 };
+}
+
+/**
+ * Whether a bucket reading says anything the last one did not.
+ *
+ * Every field, because each is separately actionable: the status decides whether
+ * a credential is worth using, `resetsAt` is when it recovers, and the type says
+ * which of the two buckets is talking. Comparing only the status would hold a
+ * rollover — a new `resetsAt` under an unchanged `allowed` — out of the logs
+ * entirely.
+ */
+function changedReading(
+  previous: RateLimitInfo | undefined,
+  next: RateLimitInfo
+): boolean {
+  return (
+    previous === undefined ||
+    previous.status !== next.status ||
+    previous.resetsAt !== next.resetsAt ||
+    previous.rateLimitType !== next.rateLimitType ||
+    previous.overageStatus !== next.overageStatus
+  );
 }
 
 /** Distinguishes "the window ran out" from a real stream event in the race below. */
@@ -338,13 +350,22 @@ export type DrainOutcome =
       done: false;
       cursor: DrainCursor;
       progress: ProgressEvent[];
+      /**
+       * The bucket as the client reported it **during this window**, if it did.
+       *
+       * Deliberately not carried on the cursor the way `result` is. A caller
+       * acts on this against whichever credential is leading *now*, so a reading
+       * replayed on every later chunk would let one window's observation retire
+       * a credential that was not even in use when it was taken. Absent means
+       * "this window learned nothing", which is the honest answer.
+       */
       rateLimit?: RateLimitInfo;
     }
   | {
       done: true;
       cursor: DrainCursor;
       progress: ProgressEvent[];
-      /** The bucket as the client last reported it. See {@link DrainCursor.rateLimit}. */
+      /** The bucket as reported **in this window**. See the `done: false` arm. */
       rateLimit?: RateLimitInfo;
       exitCode: number;
       /** Absent when the process died without ever emitting a `result` line. */
@@ -366,10 +387,10 @@ export interface DrainOptions {
    * the moment it had nothing to read would exhaust `MAX_CHUNKS_PER_BRANCH`
    * before the session finished thinking.
    *
-   * **It is not the reporting interval**, and sizing it as though it were is the
-   * mistake {@link DrainOptions.onProgress} exists to remove: a session that
-   * finishes inside one window used to deliver every note it ever wrote in the
-   * seconds after it stopped working.
+   * **It is not the reporting interval**, and reading it as one is the mistake
+   * {@link DrainOptions.onProgress} exists to remove: a session that finishes
+   * inside a single window reaches no boundary at all, so a caller with nothing
+   * but the outcome learns everything at once, once the work is over.
    */
   windowMs: number;
   /**
@@ -516,7 +537,10 @@ export async function drainRun(
   let buffer = cursor.carry;
   let seq = cursor.seq;
   let result = cursor.result;
-  let rateLimit = cursor.rateLimit;
+  // This window's reading only — see `DrainOutcome`. Starting undefined also
+  // means the first reading of each window reaches the log, which is what keeps
+  // a resumed session's bucket visible without carrying a stale one forward.
+  let rateLimit: RateLimitInfo | undefined;
   let stderr = cursor.stderr ?? "";
   let exitCode: number | undefined;
   let checkpointedAt = now();
@@ -547,7 +571,10 @@ export async function drainRun(
       if (event.kind === "result") result = event.result;
       if (event.kind === "rateLimit") {
         /**
-         * Logged when the reading **changes**, not per line.
+         * Logged when the reading **changes**, not per line — and a change is
+         * any field of it, not just the status: a bucket rolling over moves
+         * `resetsAt` while saying `allowed` throughout, and the new reset is
+         * the useful half of that line.
          *
          * The client repeats itself for as long as a session runs, so a log per
          * event would be the noisiest thing this package writes and every copy
@@ -557,11 +584,16 @@ export async function drainRun(
          * nobody has captured yet, and the one the pool needs before it can be
          * trusted to act on a status rather than on a refused request.
          */
-        if (event.info.status !== rateLimit?.status) {
-          const ok = event.info.status === RATE_LIMIT_OK;
+        if (changedReading(rateLimit, event.info)) {
           const at = { execId: cursor.execId, ...event.info };
-          if (ok) console.info("[claude-code] subscription bucket", at);
-          else console.warn("[claude-code] subscription bucket refusing", at);
+          // An unrecognised status is **not** reported as a refusal. Nothing
+          // here knows what one means, and a log that calls it exhaustion is
+          // how a healthy credential gets retired by the next person to read
+          // it. See `RATE_LIMIT_OK`.
+          if (event.info.status === RATE_LIMIT_OK)
+            console.info("[claude-code] subscription bucket", at);
+          else
+            console.warn("[claude-code] unrecognised subscription status", at);
         }
         rateLimit = event.info;
       }
@@ -608,7 +640,6 @@ export async function drainRun(
     carry: buffer,
     emitted,
     ...(result ? { result } : {}),
-    ...(rateLimit ? { rateLimit } : {}),
     ...(stderr ? { stderr } : {})
   });
 
@@ -622,7 +653,13 @@ export async function drainRun(
    */
   const offerCheckpoint = (): void => {
     const sink = options.onCheckpoint;
-    if (!sink || now() - checkpointedAt < CHECKPOINT_MIN_MS) return;
+    // **Refused without `onProgress`, not merely discouraged.** A checkpoint is
+    // only safe because the notes behind it have been posted; offered to a
+    // caller that posts nothing, it advances a cursor past notes that were never
+    // delivered, and a chunk dying after it loses them permanently. The
+    // documented unsafe combination is one nothing can reach.
+    if (!sink || !options.onProgress) return;
+    if (now() - checkpointedAt < CHECKPOINT_MIN_MS) return;
     checkpointedAt = now();
     const at = checkpoint();
     sunk = sunk.then(() => sink(at)).catch(() => {});

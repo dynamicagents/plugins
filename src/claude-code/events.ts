@@ -74,17 +74,20 @@ export interface ClaudeCodeUsage {
  * What the client knows about the subscription bucket it is drawing on.
  *
  * The one thing on this stream that is about the *deployment* rather than the
- * run. `plugins/src/claude-code/index.ts` describes the 5-hour and weekly limits
- * as routed around rather than predicted, because the gateway only learns a
- * bucket is empty when Anthropic refuses a request — this is the client saying
- * so in advance, on every session.
+ * run. This plugin's entry point describes the 5-hour and weekly limits as
+ * routed around rather than predicted, because the gateway only learns a bucket
+ * is empty when Anthropic refuses a request — this is the client saying so in
+ * advance, on every session.
  *
  * `resetsAt` is **seconds**, not milliseconds, which is the one field here it is
  * possible to get silently wrong: a value handed to `Date` unconverted lands in
  * January 1970, and a credential marked spent until then reads as usable.
  */
 export interface RateLimitInfo {
-  /** `allowed` on a healthy bucket. Anything else is the bucket saying no. */
+  /**
+   * {@link RATE_LIMIT_OK} on a healthy bucket. Any other value is
+   * **unclassified** — no consumer should read one as exhaustion.
+   */
   status: string;
   /** Unix **seconds** at which this bucket refills. */
   resetsAt?: number;
@@ -404,7 +407,13 @@ function readRateLimit(
   const resetsAt = info.resetsAt;
   return {
     status,
-    ...(typeof resetsAt === "number" && Number.isFinite(resetsAt)
+    // Finite is not enough. `1e308` is finite, and seconds past the `Date` range
+    // make `toISOString()` throw — inside `describe`, inside the drain's parse
+    // loop, which would take a whole session down over one malformed vendor
+    // field. The contract everywhere else here is to drop a bad line, not to
+    // raise, so the check is "does this name a moment" rather than "is this a
+    // number".
+    ...(typeof resetsAt === "number" && isRealDate(resetsAt * 1000)
       ? { resetsAt }
       : {}),
     ...(str(info.rateLimitType)
@@ -419,7 +428,21 @@ function readRateLimit(
   };
 }
 
-/** A bucket that is not refusing anything. The only status observed in the wild. */
+/** Whether a millisecond value is one `Date` can actually represent. */
+function isRealDate(ms: number): boolean {
+  return Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime());
+}
+
+/**
+ * The status a healthy bucket reports, and the only one ever observed.
+ *
+ * **Every other value is unclassified, not a refusal.** Nothing here knows what
+ * a non-`allowed` status means, and the one place that decides whether a
+ * credential is spent — `readRateLimitEvent` in this package's `credentials.ts`
+ * — recognises none of them, deliberately: retiring a working credential on a
+ * guess is the expensive half of that trade. What an unrecognised status earns
+ * is a note and a log, so somebody can name it.
+ */
 export const RATE_LIMIT_OK = "allowed";
 
 /** Read a `result` line. Total by construction — a missing field reads as zero. */
@@ -533,7 +556,7 @@ function describe(event: ClaudeCodeEvent): string | undefined {
        */
       return event.info.status === RATE_LIMIT_OK
         ? undefined
-        : `the ${event.info.rateLimitType ?? "subscription"} limit is ${event.info.status}` +
+        : `the ${event.info.rateLimitType ?? "subscription"} limit reports "${event.info.status}"` +
             (event.info.resetsAt === undefined
               ? ""
               : ` until ${new Date(event.info.resetsAt * 1000).toISOString()}`);

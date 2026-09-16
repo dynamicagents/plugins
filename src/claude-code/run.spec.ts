@@ -77,6 +77,45 @@ function fakeHandle(
   }) as unknown as WorkspaceRuntimeExecHandle<"utf8">;
 }
 
+/**
+ * A handle whose stream stays open until the test closes it.
+ *
+ * {@link fakeHandle} enqueues a fixed script, so a drain over it either ends
+ * immediately or waits out its whole window — neither of which lets a test look
+ * at a drain *while it is running*. This one can be ended on demand, which is
+ * what makes the mid-flight assertions below deterministic rather than a race
+ * against a short window.
+ */
+function liveHandle(script: readonly Event[]): {
+  handle: WorkspaceRuntimeExecHandle<"utf8">;
+  end: (seq: number, code: number) => void;
+} {
+  let controller!: ReadableStreamDefaultController<Event>;
+  const stream = new ReadableStream<Event>({
+    start(c) {
+      controller = c;
+      for (const event of script) c.enqueue(event);
+    }
+  });
+  const handle = Object.assign(stream, {
+    id: EXEC,
+    backend: "container",
+    result: async () => {
+      throw new Error("not used by the drain");
+    },
+    kill: async () => {},
+    [Symbol.dispose]: () => {}
+  }) as unknown as WorkspaceRuntimeExecHandle<"utf8">;
+
+  return {
+    handle,
+    end: (seq, code) => {
+      controller.enqueue(exit(seq, code));
+      controller.close();
+    }
+  };
+}
+
 const line = (value: unknown) => `${JSON.stringify(value)}\n`;
 const assistant = (text: string) =>
   line({ type: "assistant", message: { content: [{ type: "text", text }] } });
@@ -697,37 +736,54 @@ describe("the result across a chunk boundary", () => {
 });
 
 describe("drainRun, reporting as it goes", () => {
-  it("hands over each note as it is parsed, not when the window ends", async () => {
+  it("hands over each note while the drain is still running", async () => {
     /**
-     * The whole point of the sink, and the thing a returned array cannot show.
+     * **Observed before the drain settles, which is the whole assertion.**
      *
-     * Two notes arrive in separate stdout events with the stream still open, so
-     * the window is nowhere near over when they land. Before the sink existed
-     * this drain would have held both for the rest of its eight minutes and a
-     * caller would have posted them together, minutes after they were written.
+     * Checking the sink's calls after `await drainRun(...)` proves nothing: a
+     * drain that collected every note and flushed them in `finish()` would pass
+     * that test and fail at the only thing this sink is for. So the notes are
+     * awaited while the drain's promise is still pending, and the drain is
+     * asserted to be pending at that moment.
      */
     const seen: string[] = [];
-    const outcome = await drainRun(
-      // `open`, so the session is still thinking when the window runs out —
-      // which is the state the whole sink exists for.
-      fakeHandle(
-        [
-          stdout(1, assistant("reading the tree")),
-          stdout(2, assistant("running the suite"))
-        ],
-        true
-      ),
-      FRESH,
-      {
-        windowMs: 50,
-        onProgress: (event) => {
-          seen.push(event.text);
-        }
-      }
-    );
+    let settled = false;
+    // Hand-rolled rather than `Promise.withResolvers`, which this package's lib
+    // target does not carry.
+    let sawBoth!: () => void;
+    const bothSeen = new Promise<void>((resolve) => {
+      sawBoth = resolve;
+    });
 
+    // Still thinking, and stays that way until this test says otherwise — the
+    // state the sink exists for.
+    const session = liveHandle([
+      stdout(1, assistant("reading the tree")),
+      stdout(2, assistant("running the suite"))
+    ]);
+
+    const drain = drainRun(session.handle, FRESH, {
+      // Long, so nothing can end the window while the assertion below runs.
+      windowMs: 60_000,
+      onProgress: (event) => {
+        seen.push(event.text);
+        if (seen.length === 2) sawBoth();
+      }
+    });
+    void drain.then(() => {
+      settled = true;
+    });
+
+    await bothSeen;
     expect(seen).toEqual(["reading the tree", "running the suite"]);
-    expect(outcome.done).toBe(false);
+    // The session has not exited and the window has not expired, so the drain
+    // cannot have returned — these notes were delivered mid-flight.
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    session.end(3, 0);
+    const outcome = await drain;
+    expect(outcome.done).toBe(true);
     // Returned as well, so a caller that passes no sink is unaffected — which is
     // also why a caller that does pass one must drop what it is handed back.
     expect(outcome.progress.map((p) => p.text)).toEqual(seen);
@@ -816,7 +872,7 @@ describe("drainRun, reporting as it goes", () => {
     expect(checkpoints[0]!.seq).toBe(2);
   });
 
-  it("carries the last bucket reading across a window, like the result line", async () => {
+  it("reports a bucket reading only to the window that saw it", async () => {
     const rateLine = line({
       type: "rate_limit_event",
       rate_limit_info: { status: "allowed", resetsAt: 1789587600 }
@@ -826,13 +882,49 @@ describe("drainRun, reporting as it goes", () => {
     });
     expect(first.rateLimit?.resetsAt).toBe(1789587600);
 
-    // The reading arrived in the previous window; a caller draining this one
-    // still has to be able to see it.
+    /**
+     * **Not carried forward, unlike the result line**, and the asymmetry is the
+     * point. A caller acts on this against whichever credential is leading when
+     * it reads it, so a reading repeated on every later chunk would let one
+     * window's observation retire a credential that was not in use when it was
+     * taken. A window that learned nothing says nothing.
+     */
     const second = await drainRun(
       fakeHandle([stdout(2, assistant("on we go")), exit(3, 0)]),
       first.cursor,
       { windowMs: 50 }
     );
-    expect(second.rateLimit?.resetsAt).toBe(1789587600);
+    expect(second.rateLimit).toBeUndefined();
+  });
+
+  it("refuses to checkpoint for a caller that posts nothing", async () => {
+    /**
+     * The unsafe combination, made unreachable rather than only documented.
+     *
+     * A checkpoint is safe because the notes behind it are already posted.
+     * Offered to a caller with no `onProgress`, it advances a cursor past notes
+     * nobody ever saw, and a chunk dying after it loses them for good.
+     */
+    const checkpoints: DrainCursor[] = [];
+    let clock = 0;
+    await drainRun(
+      fakeHandle([
+        stdout(1, assistant("one")),
+        stdout(2, assistant("two")),
+        exit(3, 0)
+      ]),
+      FRESH,
+      {
+        windowMs: 5 * 60_000,
+        now: () => {
+          clock += 40_000;
+          return clock;
+        },
+        onCheckpoint: (cursor) => {
+          checkpoints.push(cursor);
+        }
+      }
+    );
+    expect(checkpoints).toEqual([]);
   });
 });

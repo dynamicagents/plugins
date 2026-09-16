@@ -352,14 +352,16 @@ protected override async executeChunk(...): Promise<RecipeChunkResult> {
 `DrainCursor` is the only state, and the caller persists it. A fresh isolate
 resumes from the exact event sequence the last one consumed.
 
-**A note is worth nothing at the time it is delivered, only at the time it is
-written.** A drain window is eight minutes and a session that finishes inside one
-reports everything at the end — one production session ran thirteen minutes in a
-single chunk and delivered all sixteen of its notes in the eleven seconds after
-it stopped working. `onProgress` is handed each note as the line is parsed, so a
-host can post it then; the notes still arrive on the outcome, so a host that
-passes no sink is unaffected, and a host that passes one must return an empty
-`progress` or pay for every note twice.
+**The drain window is not the reporting interval.** It is eight minutes, and a
+session that finishes inside one reaches no boundary at all — so a host with
+nothing but the outcome learns everything at once, once the work is over. One
+production session ran thirteen minutes in a single chunk and its sixteen notes
+arrived in the eleven seconds after it stopped working.
+
+`onProgress` is handed each note as the line is parsed, so a host can post it
+then. The notes still arrive on the outcome, so a host that passes no sink is
+unaffected — and a host that passes one must return an empty `progress` or pay
+for every note twice.
 
 **`onCheckpoint` is only correct alongside `onProgress`.** A cursor is normally
 committed after the drain returns, because one written ahead of consuming events

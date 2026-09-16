@@ -496,8 +496,34 @@ describe("rate_limit_event", () => {
     expect(notes[0]!.key).toBe("claude:4");
     // Seconds, not milliseconds — the one field here it is possible to get
     // silently wrong, and the wrong reading lands in January 1970.
+    // Quotes the status rather than asserting it: nothing here knows what a
+    // non-`allowed` value means, and prose that reads as a verdict is how a
+    // healthy credential gets retired by the next person to act on it.
     expect(notes[0]!.text).toBe(
-      "the five_hour limit is rejected until 2026-09-16T19:40:00.000Z"
+      'the five_hour limit reports "rejected" until 2026-09-16T19:40:00.000Z'
+    );
+  });
+
+  it("drops a reset that is not a moment, instead of throwing on it", () => {
+    /**
+     * `1e308` is finite, and a finite number of seconds can still be past what
+     * `Date` represents. Kept, it reaches `toISOString()` inside the drain's
+     * parse loop and throws — taking down a whole session over one malformed
+     * vendor field, in a parser whose entire contract is to drop a bad line.
+     */
+    const parsed = parseStream(
+      line({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", resetsAt: 1e308 }
+      })
+    );
+
+    expect(parsed.events).toEqual([
+      { kind: "rateLimit", info: { status: "rejected" } }
+    ]);
+    expect(() => toProgress(parsed.events, 0)).not.toThrow();
+    expect(toProgress(parsed.events, 0)[0]!.text).toBe(
+      'the subscription limit reports "rejected"'
     );
   });
 
