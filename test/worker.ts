@@ -1,9 +1,9 @@
 import { Agent } from "agents";
-import { DEFAULT_INSTALL_PLAN } from "../src/computer/index.js";
 import {
+  DEFAULT_INSTALL_PLAN,
   WorkspaceObjectBase,
   type WorkspaceObjectConfig
-} from "../src/computer-host/index.js";
+} from "../src/computer/index.js";
 
 // Not one of our classes, and not optional: `CloudflareContainerBackend` builds
 // the container's egress loopback out of `ctx.exports.WorkspaceProxy`, so a host

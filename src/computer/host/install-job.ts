@@ -2,15 +2,19 @@ import type { Workspace } from "@cloudflare/computer";
 import type { WorkspaceRuntimeExecHandle } from "@cloudflare/computer";
 import type { Scheduler } from "@dynamicagents/core/alarm";
 import { JobLifecycle, type JobContext } from "@dynamicagents/core/job";
+// Leaf modules rather than `../index.js`, and that is structural: the barrel
+// re-exports this directory, so reaching it from here would be a cycle — through
+// a module that builds a class at import time, where initialisation order
+// decides whether the base is `undefined`.
 import {
   installFingerprint,
-  pathExists,
   resolveInstallCommand,
-  truncateOutput,
   type InstallPlan,
   type InstallProbe,
   type InstallState
-} from "../computer/index.js";
+} from "../install.js";
+import { pathExists } from "../read.js";
+import { truncateOutput } from "../render.js";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 
 /**

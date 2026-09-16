@@ -19,12 +19,11 @@
  *   5. Realm isolation: no *runtime* subpath can reach `node:*`, `undici`,
  *      `cloudflare:test` or `vitest` through any depth of relative import.
  *   6. **Plugin isolation**: no subpath's module graph reaches a file belonging
- *      to another subpath, except down a one-way edge declared in `MAY_REACH`.
- *      This is the promise the package is built around — a bundle grows only
- *      with what it imports — and it is the one that rots silently, because a
- *      convenience re-export across two plugins typechecks, lints, and tests
- *      perfectly while quietly doubling every consumer's bundle. Only a check on
- *      the built graph catches it.
+ *      to another subpath. This is the promise the package is built around — a
+ *      bundle grows only with what it imports — and it is the one that rots
+ *      silently, because a convenience re-export across two plugins typechecks,
+ *      lints, and tests perfectly while quietly doubling every consumer's
+ *      bundle. Only a check on the built graph catches it.
  *   7. No root barrel: `exports` must have no `"."` entry, for the same reason.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -119,40 +118,6 @@ for (const file of walk(path.join(root, "dist"))) {
 const ownDir = (subpath) =>
   path.join(root, "dist", subpath.replace(/^\.\//, ""));
 
-/**
- * The declared dependencies between subpaths, and every one of them runs **one
- * way**.
- *
- * The rule this bends is the package's central promise — installing one plugin
- * must not pull in another's code — so it is an allowlist rather than a
- * relaxation, and the direction is the whole of what makes it safe.
- * `computer-host` is the Durable Object that *deploys* a workspace; it reaches
- * `computer` for the policy both halves have to agree on (which advisories
- * matter, how an install command resolves, what an `InstallState` means).
- * `computer` cannot reach back, so an agent installing only the tools still
- * carries no container backend and no isomorphic-git — which is the direction
- * bundle size actually depends on.
- *
- * Adding an entry here is a decision about the package's shape. A helper two
- * plugins want is still duplicated, or moved into the only plugin that uses it.
- */
-const MAY_REACH = {
-  "./computer-host": ["./computer"]
-};
-
-// One way, and checked rather than trusted: a pair allowed in both directions is
-// two plugins that are really one, and neither bundle would be bounded again.
-for (const [from, targets] of Object.entries(MAY_REACH)) {
-  for (const to of targets) {
-    if (MAY_REACH[to]?.includes(from)) {
-      fail(
-        `MAY_REACH declares "${from}" → "${to}" and "${to}" → "${from}". A cycle ` +
-          `means neither subpath bounds the other's bundle; keep it one way.`
-      );
-    }
-  }
-}
-
 for (const [subpath, target] of subpathEntries) {
   const { files, bare } = reachableFrom(path.join(root, target));
 
@@ -166,18 +131,15 @@ for (const [subpath, target] of subpathEntries) {
   // A plugin may reach only its own directory. `arc-agi` bundling its grid
   // analysis is fine — that code lives inside `arc-agi/` precisely because only
   // arc-agi consumes it. Reaching *out* into a sibling is what must not happen.
-  const reachable = [subpath, ...(MAY_REACH[subpath] ?? [])].map(
-    (s) => ownDir(s) + path.sep
-  );
+  const home = ownDir(subpath);
   const trespass = [...files]
-    .filter((f) => !reachable.some((dir) => f.startsWith(dir)))
+    .filter((f) => !f.startsWith(home + path.sep))
     .map((f) => path.relative(root, f));
   if (trespass.length > 0) {
     fail(
       `subpath "${subpath}" reaches outside its own directory: ${trespass.join(", ")}. ` +
         `Installing one plugin would pull in another's code. Duplicate the helper, ` +
-        `move it inside the only plugin that uses it, or — if the dependency is ` +
-        `deliberate and one-way — declare it in MAY_REACH.`
+        `or move it inside the only plugin that uses it.`
     );
   }
 }

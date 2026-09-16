@@ -1,4 +1,4 @@
-import type { RepoGitResult } from "../repo/index.js";
+import type { RepoGitResult } from "../../repo/index.js";
 import type { AuthCallback, GitClient } from "@cloudflare/computer/git";
 
 /**

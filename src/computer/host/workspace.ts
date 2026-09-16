@@ -21,7 +21,7 @@ import {
 import { createGitClient } from "@cloudflare/computer/git";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
 import { ContainerTrust } from "./ca-trust.js";
-import { InstallJob } from "./install.js";
+import { InstallJob } from "./install-job.js";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 import { WorkspaceGitHost } from "./git-host.js";
 import {
@@ -31,17 +31,15 @@ import {
   syncRetryDelayMs,
   type SyncDrainIntent
 } from "./sync.js";
-import {
-  deriveAdvisories,
-  pathExists,
-  type InstallPlan,
-  type InstallState,
-  type WorkspaceAdvisory
-} from "../computer/index.js";
+// Leaf modules rather than `../index.js` — see the same import in
+// {@link file://./install-job.ts} for why the barrel is not reachable from here.
+import { deriveAdvisories, type WorkspaceAdvisory } from "../advisory.js";
+import { pathExists } from "../read.js";
+import type { InstallPlan, InstallState } from "../install.js";
 // The shape `/repo` already defines for exactly this: a git failure is data,
 // because it means git answered. A throw on this path means the object was
 // unreachable, which is a different thing and must stay distinguishable.
-import type { RepoGitResult } from "../repo/index.js";
+import type { RepoGitResult } from "../../repo/index.js";
 
 /**
  * A workspace: one Durable Object, one container, one repository.
@@ -53,12 +51,16 @@ import type { RepoGitResult } from "../repo/index.js";
  * agent's container", and the alternative is a second copy of this file
  * drifting in whichever direction the object nobody redeployed recently went.
  *
- * It is its own subpath rather than part of `../computer/` because the two have
- * opposite bundle costs: an agent that installs the tools carries no container
- * backend and no isomorphic-git, and only a Worker that *deploys* a workspace
- * pays for those. The dependency runs one way — this reaches `../computer/` for
- * the policy both halves must agree on, and nothing there may reach back.
- * `scripts/verify-exports.mjs` holds that on the built graph.
+ * A directory inside the plugin rather than a subpath beside it, so that one
+ * capability stays one import path and a consumer cannot take the tools without
+ * the object they address. The bundle cost of that is nothing: `sideEffects` is
+ * false, so an agent that only calls `sb_exec` carries no container backend and
+ * no isomorphic-git.
+ *
+ * What this file must not do is import the plugin barrel. The barrel re-exports
+ * this module, and the class below is built at import time — a cycle would
+ * evaluate its base as `undefined`. The imports above reach the leaf modules
+ * beside it instead.
  *
  * `@cloudflare/computer` pairs a SQLite-backed virtual filesystem in *this*
  * object's storage with a container running `computerd`, which mounts it over

@@ -1,16 +1,13 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import type { TestWorkspaceDO } from "../../test/worker.js";
+import type { TestWorkspaceDO } from "../../../test/worker.js";
 import {
   freshWorkspace,
   workspaceNamespace
-} from "../../test/computer-host/do.js";
-import {
-  DEFAULT_INSTALL_PLAN,
-  openWorkspace,
-  type InstallState
-} from "../computer/index.js";
-import { DEFAULT_SCRATCH_DIR } from "../scratch/index.js";
+} from "../../../test/computer/do.js";
+import { DEFAULT_INSTALL_PLAN, type InstallState } from "../install.js";
+import { openWorkspace } from "../index.js";
+import { DEFAULT_SCRATCH_DIR } from "../../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
 
 /**

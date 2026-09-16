@@ -68,10 +68,6 @@
       "types": "./dist/computer/index.d.ts",
       "import": "./dist/computer/index.js"
     },
-    "./computer-host": {
-      "types": "./dist/computer-host/index.d.ts",
-      "import": "./dist/computer-host/index.js"
-    },
     "./package.json": "./package.json"
   },
   "scripts": {
