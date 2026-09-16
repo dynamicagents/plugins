@@ -2,7 +2,7 @@
  * What a workspace object wakes for, as one map.
  *
  * Its own module because the object that registers these callbacks and the
- * `JobLifecycle` in `./install.ts` that schedules some of them by name both type
+ * `JobLifecycle` in `./install-job.ts` that schedules some of them by name both type
  * against it, and neither should own it. A name that exists in one and not the
  * other is then a compile error rather than a schedule that is rejected at
  * runtime.

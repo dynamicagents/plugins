@@ -88,7 +88,7 @@ import type { RepoGitResult } from "../../repo/index.js";
  * and the wiring between them. The work each of those drives has its own home,
  * and each carries the reasoning for its own decisions:
  *
- * - `./install.ts` — when a dependency install runs, and every guard on it.
+ * - `./install-job.ts` — when a dependency install runs, and every guard on it.
  * - `./sync.ts` — the host's half of syncing, which nothing else will do.
  * - `./ca-trust.ts` — making a container able to speak TLS.
  * - `./git-host.ts` — the operations that hold the forge credential.
@@ -251,7 +251,7 @@ class WorkspaceContainerHost extends DurableObject<Cloudflare.Env> {}
 const WorkspaceContainerBase = withWorkspaceContainer(WorkspaceContainerHost);
 
 /**
- * The three things one workspace object does not share with the other.
+ * What one workspace object does not share with the next.
  *
  * Everything else about a workspace is identical between agents, which is why
  * this interface is short and why it is worth having at all: a seam this narrow
@@ -484,7 +484,7 @@ export abstract class WorkspaceObjectBase<
   });
 
   /**
-   * The dependency install — see `./install.ts`, which owns every guard on it.
+   * The dependency install — see `./install-job.ts`, which owns every guard on it.
    *
    * The seam is what only this object can answer: where its storage and its
    * scheduler are, what the workspace is, and the entry-point bookkeeping an
@@ -543,8 +543,8 @@ export abstract class WorkspaceObjectBase<
    * `container: () => this` hands the backend this object's own container.
    * `workspace` is how `computerd` dials *back* in: the runtime builds a loopback
    * binding from the exported `WorkspaceProxy` class and the values below, which
-   * is why `src/index.ts` re-exports it and why dropping that export breaks the
-   * container with no compile error.
+   * is why the consuming Worker's entry point must re-export `WorkspaceProxy`
+   * and why dropping that export breaks the container with no compile error.
    *
    * Nothing sets `egressHost`; the default `computer.internal` is the host the
    * container's outbound HTTP is intercepted on, internal to that loopback.
@@ -622,7 +622,23 @@ export abstract class WorkspaceObjectBase<
    * containers is spelled `#`.
    */
   async #ready(): Promise<void> {
-    if (!this.ctx.container?.running) this.#trust.forget();
+    if (!this.ctx.container?.running) {
+      this.#trust.forget();
+      /**
+       * Whatever the last container still held, it is not coming.
+       *
+       * `ready()` below starts a replacement, and once it has there is nothing
+       * left to distinguish "the tree never crossed" from "the tree is here":
+       * the first pull from a fresh container finds a clean filesystem and
+       * reports itself complete. Said before that happens, while the absence is
+       * still knowable.
+       *
+       * Without it the marker outlives the container it described —
+       * `armIfTreeMissing` keeps deferring to a pull that cannot arrive, and the
+       * workspace never reinstalls the dependencies it is missing.
+       */
+      await this.#install.onSyncUnrecoverable();
+    }
     await this.#workspace.ready();
     await this.#trust.ensure();
   }
@@ -826,7 +842,7 @@ export abstract class WorkspaceObjectBase<
    * Start this checkout's dependency install, and return without waiting.
    *
    * Called from `repo_clone` through the repo plugin's `afterCheckout` hook, so
-   * it runs inside a model turn — see `./install.ts` for why the drain's owner
+   * it runs inside a model turn — see `./install-job.ts` for why the drain's owner
    * is the thing that matters here.
    */
   async startInstall(req: {

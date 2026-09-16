@@ -318,7 +318,7 @@ describe("the install gate", () => {
  * - **A checkout is recorded whether or not anything was installed into it.**
  *   The install resolver skips a checkout it finds nothing to do in, and that
  *   says nothing about whether there is a checkout. See `noteCheckout` in
- *   `noteCheckout` in `./object.ts` for why the two records are separate.
+ *   `./workspace.ts` for why the two records are separate.
  * - **The answer is probed, not remembered.** A recorded path is where to look;
  *   `.git` being there is what makes it true. A session's cwd and the
  *   cancellation `git reset --hard` both act on it, and neither recovers from a
@@ -734,6 +734,12 @@ describe("draining an outstanding pull", () => {
    * finds an empty filesystem rather than the writes it was after. Launching a
    * container to discover that is pure cost — and on the idle path it would
    * restart the very container the deadline had just decided to stop.
+   *
+   * **The property itself is pinned next door**, in `./sync.spec.ts`, which
+   * asserts the workspace is never opened. It has to be: the pool starts no
+   * containers, so `container.running` reads false here whatever the handler
+   * does, and an assertion on it cannot fail. What this adds is the wiring —
+   * that a due deadline reaches the drain through the alarm at all.
    */
   it("starts no container when none is running", async () => {
     const stub = freshWorkspace("drain-no-container");
@@ -743,6 +749,11 @@ describe("draining an outstanding pull", () => {
       // The idle handler's own path, with the clock far enough back that it
       // decides to stop. It reaches the drain first, which must decline.
       await state.storage.put("lastUsedAt", Date.now() - 24 * 60 * 60_000);
+      // Moving the clock is not enough to make the handler run: `lastUsedAt` is
+      // storage, and the schedule is a row with its own due time a day out. The
+      // assertion below passes vacuously without this — a container that never
+      // started because nothing ever asked.
+      expect(forceDue(state, "containerIdle")).toBeGreaterThan(0);
       await instance.alarm?.();
       expect(state.container?.running ?? false).toBe(false);
     });

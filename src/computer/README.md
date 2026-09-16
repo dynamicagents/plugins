@@ -144,9 +144,14 @@ see the export's own comment.
 
 ```ts
 import {
+  DEFAULT_INSTALL_PLAN,
   WorkspaceObjectBase,
   type WorkspaceObjectConfig
 } from "@dynamicagents/plugins/computer";
+
+// This deployment's install commands. `DEFAULT_INSTALL_PLAN` resolves npm, pnpm
+// or yarn from what the checkout contains; `overrides` is keyed `owner/repo`.
+const INSTALL_PLAN = { ...DEFAULT_INSTALL_PLAN, overrides: {} };
 
 export class Workspace extends WorkspaceObjectBase {
   protected workspaceConfig(): WorkspaceObjectConfig {

@@ -398,6 +398,25 @@ export class InstallJob {
    * one way to say a pull finished, and it says both halves.
    */
   async onSyncComplete(): Promise<void> {
+    /**
+     * Promoted only if something was actually in flight.
+     *
+     * A drain reports `complete` for an empty pull as readily as for one that
+     * moved a tree — "nothing outstanding" and "everything arrived" are the same
+     * answer from the cursor's point of view. So `complete` on its own says
+     * nothing about whether *this* object holds the tree: a container replaced
+     * after the install left its writes unreachable, and the first pull from the
+     * replacement finds a clean filesystem and completes immediately.
+     *
+     * The marker is what distinguishes them. It is written only by an install
+     * whose own bracket reported the sync incomplete, so a drain that finds it
+     * standing is the drain that finished that pull. Absent, there was nothing to
+     * finish and there is nothing to certify.
+     */
+    const inFlight = await this.deps.storage.get<{ at: number }>(
+      TREE_IN_FLIGHT_KEY
+    );
+    if (!inFlight) return;
     await this.deps.storage.delete(TREE_IN_FLIGHT_KEY);
     await this.#promoteFingerprint();
   }
@@ -438,10 +457,10 @@ export class InstallJob {
    * this.
    */
   async start(req: { dir: string; repo?: string }): Promise<InstallState> {
-    return this.#beginInstall(req, (handle) => {
+    return this.#beginInstall(req, (handle, startedAt) => {
       // Drained here, in this object, on nobody's step budget. The watchdog picks
       // it up if this isolate does not survive the command.
-      this.deps.waitUntil(this.#drainInstall(handle));
+      this.deps.waitUntil(this.#drainInstall(handle, startedAt));
     });
   }
 
@@ -456,9 +475,11 @@ export class InstallJob {
     req: { dir: string; repo?: string },
     armedAt: number
   ): Promise<InstallState> {
-    await this.#beginInstall(req, (handle) => this.#drainInstall(handle), {
-      takeOverArmedAt: armedAt
-    });
+    await this.#beginInstall(
+      req,
+      (handle, startedAt) => this.#drainInstall(handle, startedAt),
+      { takeOverArmedAt: armedAt }
+    );
     return this.state();
   }
 
@@ -470,7 +491,10 @@ export class InstallJob {
    */
   async #beginInstall(
     req: { dir: string; repo?: string },
-    own: (handle: WorkspaceRuntimeExecHandle<"utf8">) => void | Promise<void>,
+    own: (
+      handle: WorkspaceRuntimeExecHandle<"utf8">,
+      startedAt: number
+    ) => void | Promise<void>,
     opts?: { takeOverArmedAt?: number }
   ): Promise<InstallState> {
     await this.deps.touch();
@@ -692,7 +716,7 @@ export class InstallJob {
       return failed;
     }
 
-    await own(handle);
+    await own(handle, startedAt);
 
     return state;
   }
@@ -770,12 +794,27 @@ export class InstallJob {
   #draining = false;
 
   async #drainInstall(
-    handle: WorkspaceRuntimeExecHandle<"utf8">
+    handle: WorkspaceRuntimeExecHandle<"utf8">,
+    /**
+     * The stamp the install this drain was handed belongs to.
+     *
+     * Passed in rather than read below, and that is the whole of the fix: this
+     * method's first `await` is reached long after `#beginInstall` returned, so a
+     * second install that claimed in between has already rewritten the context.
+     * A drain reading it then adopts the *other* install's generation, passes
+     * every `stillMine()` check, and writes its own verdict over a command that
+     * is still running.
+     *
+     * Absent only for {@link InstallJob.#reattachInstall}, which by definition
+     * did not start what it is picking up and has nothing but the record to go
+     * on.
+     */
+    ownedAt?: number
   ): Promise<void> {
     this.#draining = true;
     const context = await this.#job.context();
     const command = context?.command ?? "(unknown)";
-    const startedAt = context?.startedAt ?? Date.now();
+    const startedAt = ownedAt ?? context?.startedAt ?? Date.now();
 
     /**
      * Whether this drain still owns the record.

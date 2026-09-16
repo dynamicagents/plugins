@@ -23,7 +23,7 @@ import type { AuthCallback, GitClient } from "@cloudflare/computer/git";
  * the workspace object's job and it must happen first: git here reads that
  * object's SQLite, so a commit made in the container that has not been pulled
  * yet is a commit this code cannot see. The workspace object's `gitClone`,
- * `gitFetch` and `gitPush` in `./object.ts` are where that is settled.
+ * `gitFetch` and `gitPush` in `./workspace.ts` are where that is settled.
  */
 
 export interface GitHostDeps {
@@ -70,9 +70,13 @@ export class WorkspaceGitHost {
         url: req.url,
         dir: req.dir,
         onAuth,
-        // `depth: 0` means full history to isomorphic-git, so a caller that
-        // asked for nothing gets the shallow default rather than the whole repo.
-        depth: req.depth ?? 1,
+        // Omission is passed through as omission, because the tool the model
+        // reads says so: `repo_clone` describes `depth` as "omit for full
+        // history; needed if you must rebase", and `/repo` deliberately leaves
+        // the key off when it is unset. Defaulting to 1 here made every such
+        // clone shallow, so the one thing the model was told to omit it for —
+        // rebasing — failed on a repository it had asked for in full.
+        ...(req.depth === undefined ? {} : { depth: req.depth }),
         singleBranch: true,
         tags: false,
         ...(req.branch ? { ref: req.branch } : {})
