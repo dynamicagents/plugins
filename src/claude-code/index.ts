@@ -311,7 +311,11 @@ export function claudeCode(config: ClaudeCodeConfig): AgentPlugin {
 
 export { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
 export type { EgressConfig } from "./egress.js";
-export { credentialPool, readRefusal } from "./credentials.js";
+export {
+  credentialPool,
+  readRefusal,
+  readRateLimitEvent
+} from "./credentials.js";
 export type {
   CredentialPool,
   CredentialPoolConfig,
