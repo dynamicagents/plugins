@@ -1,4 +1,5 @@
 import type { Workspace } from "@cloudflare/computer";
+import { deploymentFault } from "./container-fault.js";
 
 /**
  * Making a container able to speak TLS, once there is a CA to trust.
@@ -89,11 +90,22 @@ export class ContainerTrust {
   /** Whether an exit watch is standing for the container now running. */
   #watching = false;
 
+  /**
+   * Whether this container's deployment fault has already been reported.
+   *
+   * Same lifetime as {@link ContainerTrust.forget}'s other flag, and for the
+   * same reason: what it describes is one container. A fault that outlived it
+   * would silence the report for the replacement, which is the container an
+   * operator is waiting to hear about.
+   */
+  #faultReported = false;
+
   constructor(private readonly deps: ContainerTrustDeps) {}
 
   /** Forget that any container was trusted. */
   forget(): void {
     this.#trusted = false;
+    this.#faultReported = false;
   }
 
   /**
@@ -184,6 +196,32 @@ export class ContainerTrust {
         output
       });
     } catch (err) {
+      // A deployment fault is reported as itself, at error, once per container.
+      // The generic line below is the right one for a container that is merely
+      // unreachable — a retry is what clears that. It is the wrong one for a
+      // Worker whose image or container application cannot work at all:
+      // retrying logs the same symptom until something else gives up, and the
+      // sentence naming the cause is the one an operator needs.
+      //
+      // Only the *log* stops. The trust command is still sent on the next call,
+      // because the classification is a string match and this is the direction
+      // that is safe to be wrong in: a misread costs a line nobody needed, where
+      // refusing to retry would leave a container permanently untrusted on the
+      // strength of a message the library is free to reword. What actually ends
+      // the reporting is the container going away, which clears the flag through
+      // the same watch that clears the trust.
+      const fault = deploymentFault(err);
+      if (fault) {
+        if (!this.#faultReported) {
+          this.#faultReported = true;
+          console.error(`[${this.deps.tag()}] ${fault.summary}`, {
+            id: this.deps.id(),
+            remedy: fault.remedy,
+            err: String(err)
+          });
+        }
+        return;
+      }
       console.warn(`[${this.deps.tag()}] could not trust the interception CA`, {
         id: this.deps.id(),
         err: String(err)
