@@ -472,8 +472,17 @@ function readResult(event: Record<string, unknown>): ClaudeCodeResult {
   };
 }
 
-/** How much of one progress note the parent is shown. */
-const PROGRESS_MAX_CHARS = 240;
+/**
+ * How much of one progress note the parent is shown.
+ *
+ * Generous, because a clipped note is worse than a long one here. What arrives
+ * is an assistant turn a session wrote to be read — a caveat about what it
+ * changed, a table of what it found — and a cut lands mid-sentence, leaving the
+ * reader a beginning that reads complete and is not. The thing this bounds is a
+ * session pasting a whole file into the thread, and that is far above where a
+ * written turn ends.
+ */
+export const PROGRESS_MAX_CHARS = 4_000;
 
 /**
  * How much of an unrecognised line is kept for the logs.

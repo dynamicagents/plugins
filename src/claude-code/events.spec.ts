@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseStream,
   toProgress,
+  PROGRESS_MAX_CHARS,
   RATE_LIMIT_OK,
   type ClaudeCodeEvent
 } from "./events.js";
@@ -425,11 +426,28 @@ describe("toProgress", () => {
 
   it("clips a long turn rather than pasting an essay into the parent", () => {
     const note = toProgress(
-      parseStream(assistant("x".repeat(5_000))).events,
+      parseStream(assistant("x".repeat(PROGRESS_MAX_CHARS * 2))).events,
       0
     );
-    expect(note[0]!.text.length).toBeLessThan(300);
+
+    // The exact length, not a bound: an upper bound passes just as happily on a
+    // ceiling far below the one the parent is promised, which is the whole of
+    // what this pair is protecting.
+    expect(note[0]!.text).toHaveLength(PROGRESS_MAX_CHARS);
     expect(note[0]!.text.endsWith("…")).toBe(true);
+  });
+
+  /**
+   * The other side of the clip, and the side a reader notices. A turn that
+   * fits arrives as the session wrote it — no marker, nothing lost — so the
+   * ellipsis means what it says, and a note without one can be read as ending
+   * where the session stopped talking.
+   */
+  it("posts a turn that fits exactly, unmarked and whole", () => {
+    const text = `${"x".repeat(PROGRESS_MAX_CHARS - 1)}.`;
+    const note = toProgress(parseStream(assistant(text)).events, 0);
+
+    expect(note[0]!.text).toBe(text);
   });
 });
 
