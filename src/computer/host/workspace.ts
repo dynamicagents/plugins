@@ -1123,10 +1123,26 @@ export abstract class WorkspaceObjectBase<
   async advisories(): Promise<readonly WorkspaceAdvisory[]> {
     const install = await this.#install.state();
     const storage = this.#storageHeadroom();
+    // Only when the record says failed: it is the one state whose reading a
+    // queued repair changes, and every other one would pay a storage read for an
+    // answer nothing looks at.
+    const reinstallArmedAt =
+      install.state === "failed"
+        ? await this.#install.reinstallArmedAt()
+        : undefined;
     return deriveAdvisories({
       install,
       ...(storage ? { storage } : {}),
-      dependencyTreePresent: await this.#install.treePresentIfItMatters(install)
+      ...(reinstallArmedAt === undefined ? {} : { reinstallArmedAt }),
+      // The probe qualifies `deps-broken` and nothing else, and a queued
+      // reinstall turns a failed record into `deps-building`, which does not
+      // read it. `failed` alone is no longer the condition under which the
+      // question is worth asking, so the caller narrows it — see
+      // `InstallJob.treePresentIfItMatters`, whose contract this keeps true.
+      dependencyTreePresent:
+        reinstallArmedAt === undefined
+          ? await this.#install.treePresentIfItMatters(install)
+          : false
     });
   }
 

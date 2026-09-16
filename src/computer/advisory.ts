@@ -254,6 +254,21 @@ export interface AdvisoryInput {
    * mode it was recording.
    */
   dependencyTreePresent: boolean;
+
+  /**
+   * A reinstall the host has already queued, as the moment it was queued.
+   *
+   * The difference between "your dependencies are broken" and "your
+   * dependencies are being rebuilt", and the two read identically from the
+   * durable record alone — an install whose container was replaced writes
+   * `failed`, and the arming that will repair it is a separate fact the record
+   * does not carry.
+   *
+   * A production session was briefed `deps-broken` six seconds before the
+   * armed reinstall it did not know about finished, and spent its own turns
+   * re-running `npm ci` on top of a tree that was already landing.
+   */
+  reinstallArmedAt?: number;
 }
 
 /**
@@ -293,9 +308,34 @@ export function deriveAdvisories(
       break;
 
     case "failed":
-      // Always reported. The record is durable evidence that an install failed,
-      // and nothing available here is evidence that a later one succeeded — so
-      // the presence of a tree qualifies the advisory instead of deleting it.
+      /**
+       * A queued reinstall changes the *kind*, not the severity of the facts.
+       *
+       * `deps-broken` is permanent by definition — nothing clears that record
+       * except another checkout — and that permanence is what the reader acts
+       * on: a session told this installs for itself. When a reinstall is
+       * already armed that is the wrong instruction and the wrong shape, because
+       * the condition does clear with nobody acting. `deps-building` is the one
+       * that says so, and its wording for a session already asks the reader to
+       * wait rather than start a second install on top of the first.
+       *
+       * Counted from when the reinstall was armed rather than when it starts:
+       * arming is the moment the repair became certain, and the alarm that runs
+       * it owns no clock this can read.
+       */
+      if (input.reinstallArmedAt !== undefined) {
+        advisories.push({
+          kind: "deps-building",
+          command: install.command,
+          startedAt: input.reinstallArmedAt,
+          ...(install.tail ? { tail: install.tail } : {})
+        });
+        break;
+      }
+      // Otherwise always reported. The record is durable evidence that an
+      // install failed, and nothing available here is evidence that a later one
+      // succeeded — so the presence of a tree qualifies the advisory instead of
+      // deleting it.
       advisories.push({
         kind: "deps-broken",
         command: install.command,

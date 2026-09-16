@@ -383,6 +383,47 @@ function resetAtFrom(value: string | null): number | undefined {
 }
 
 /**
+ * The `rate_limit_event` statuses that mean the bucket is empty.
+ *
+ * **Empty, and that is the finding rather than a placeholder.** The client
+ * announces its bucket on every session and the only status ever observed is
+ * {@link file://./events.ts RATE_LIMIT_OK} — so there is no known value here to
+ * put in, and putting in a guess is the expensive half of the asymmetry
+ * {@link readRefusal} is built around: reading a healthy bucket as exhausted
+ * retires a working credential for hours, and with a pool of one that is an
+ * outage. The same reasoning that leaves a 403 unclassified leaves this set
+ * empty.
+ *
+ * What fills it is the log. `run.ts` reports every change of reading, and a
+ * status that is not `allowed` is also surfaced as a progress note, so the first
+ * real one arrives named — at which point it goes in here and the pool starts
+ * rotating *before* Anthropic refuses a request rather than because it did.
+ */
+const RATE_LIMIT_SPENT: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Read the client's own bucket reading as a verdict on the credential in use.
+ *
+ * `undefined` means "nothing to act on", which today is every reading — see
+ * {@link RATE_LIMIT_SPENT}. Otherwise the epoch-milliseconds the bucket refills,
+ * ready for {@link CredentialPool.spend}.
+ *
+ * Here rather than beside the parser because this is the same question
+ * {@link readRefusal} answers about a response: is this credential still worth
+ * using? The parser's job is to say what the line contained.
+ */
+export function readRateLimitEvent(info: {
+  status: string;
+  resetsAt?: number;
+}): number | undefined {
+  if (!RATE_LIMIT_SPENT.has(info.status)) return undefined;
+  // Seconds on the wire. A value passed through unconverted lands in 1970, and a
+  // credential marked spent until then reads as usable — the failure would be
+  // this function doing nothing, silently.
+  return info.resetsAt === undefined ? undefined : info.resetsAt * 1000;
+}
+
+/**
  * Read a response as a verdict on the credential that produced it.
  *
  * Returns `undefined` for anything it does not recognise — which the caller

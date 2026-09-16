@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseStream, toProgress, type ClaudeCodeEvent } from "./events.js";
+import {
+  parseStream,
+  toProgress,
+  RATE_LIMIT_OK,
+  type ClaudeCodeEvent
+} from "./events.js";
 
 /**
  * The stream parser, and the three ways it can quietly ruin a run.
@@ -425,5 +430,108 @@ describe("toProgress", () => {
     );
     expect(note[0]!.text.length).toBeLessThan(300);
     expect(note[0]!.text.endsWith("…")).toBe(true);
+  });
+});
+
+describe("rate_limit_event", () => {
+  /**
+   * Captured from production, not invented.
+   *
+   * This exact line was skipped twice in one thirteen-minute session and counted
+   * as `skipped: 1` on every session before that — the sample on the warning is
+   * what turned it from background noise into a schema anyone could read. Keeping
+   * the real shape is what makes this spec worth having: a hand-written
+   * approximation would pass while the field names drifted.
+   */
+  const CAPTURED = line({
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "allowed",
+      resetsAt: 1789587600,
+      rateLimitType: "five_hour",
+      overageStatus: "rejected",
+      overageDisabledReason: "org_level_disabled_until"
+    }
+  });
+
+  it("reads the captured line instead of counting it as a schema change", () => {
+    const parsed = parseStream(CAPTURED);
+    expect(parsed.skipped).toBe(0);
+    expect(parsed.sample).toBeUndefined();
+    expect(parsed.events).toEqual([
+      {
+        kind: "rateLimit",
+        info: {
+          status: RATE_LIMIT_OK,
+          resetsAt: 1789587600,
+          rateLimitType: "five_hour",
+          overageStatus: "rejected",
+          overageDisabledReason: "org_level_disabled_until"
+        }
+      }
+    ]);
+  });
+
+  it("says nothing while the bucket is allowing requests", () => {
+    // Every line of a healthy session carries this. A note apiece would be the
+    // noisiest thing on the stream, and each one would say "allowed".
+    expect(toProgress(parseStream(CAPTURED).events, 0)).toEqual([]);
+  });
+
+  it("surfaces an unrecognised status rather than assuming it is benign", () => {
+    const notes = toProgress(
+      parseStream(
+        line({
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "rejected",
+            resetsAt: 1789587600,
+            rateLimitType: "five_hour"
+          }
+        })
+      ).events,
+      4
+    );
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.key).toBe("claude:4");
+    // Seconds, not milliseconds — the one field here it is possible to get
+    // silently wrong, and the wrong reading lands in January 1970.
+    // Quotes the status rather than asserting it: nothing here knows what a
+    // non-`allowed` value means, and prose that reads as a verdict is how a
+    // healthy credential gets retired by the next person to act on it.
+    expect(notes[0]!.text).toBe(
+      'the five_hour limit reports "rejected" until 2026-09-16T19:40:00.000Z'
+    );
+  });
+
+  it("drops a reset that is not a moment, instead of throwing on it", () => {
+    /**
+     * `1e308` is finite, and a finite number of seconds can still be past what
+     * `Date` represents. Kept, it reaches `toISOString()` inside the drain's
+     * parse loop and throws — taking down a whole session over one malformed
+     * vendor field, in a parser whose entire contract is to drop a bad line.
+     */
+    const parsed = parseStream(
+      line({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", resetsAt: 1e308 }
+      })
+    );
+
+    expect(parsed.events).toEqual([
+      { kind: "rateLimit", info: { status: "rejected" } }
+    ]);
+    expect(() => toProgress(parsed.events, 0)).not.toThrow();
+    expect(toProgress(parsed.events, 0)[0]!.text).toBe(
+      'the subscription limit reports "rejected"'
+    );
+  });
+
+  it("skips a line carrying no status, rather than recording an unknown bucket", () => {
+    const parsed = parseStream(
+      line({ type: "rate_limit_event", rate_limit_info: { resetsAt: 1 } })
+    );
+    expect(parsed.events).toEqual([]);
+    expect(parsed.skipped).toBe(1);
   });
 });

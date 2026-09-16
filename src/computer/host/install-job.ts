@@ -740,9 +740,12 @@ export class InstallJob {
    *
    * It qualifies a `deps-broken` advisory and nothing else (see
    * `deriveAdvisories`), so outside that state there is nothing to learn and the
-   * question is not asked. It needs no cache of its own: the probe is a read of
-   * this object's storage, and memoising a SQL lookup would only buy the chance
-   * of being wrong for a window.
+   * question is not asked. A failed record is a necessary condition and not a
+   * sufficient one — a reinstall queued behind it reads as `deps-building`
+   * instead — so the caller narrows it further before asking; see
+   * `WorkspaceObjectBase.advisories`. It needs no cache of its own: the probe is
+   * a read of this object's storage, and memoising a SQL lookup would only buy
+   * the chance of being wrong for a window.
    */
   async treePresentIfItMatters(install: InstallState): Promise<boolean> {
     if (install.state !== "failed") return false;
@@ -802,6 +805,17 @@ export class InstallJob {
       return await this.#job.read();
     }
     return state;
+  }
+
+  /**
+   * When a reinstall was queued, if one is waiting to run.
+   *
+   * Read by {@link file://../advisory.ts deriveAdvisories}, which is the only
+   * caller that needs it: a `failed` record with a repair already queued is a
+   * transient condition wearing a permanent record's clothes.
+   */
+  async reinstallArmedAt(): Promise<number | undefined> {
+    return await this.#job.armedAt();
   }
 
   /** True while this isolate holds the drain, so the watchdog leaves it alone. */

@@ -331,17 +331,47 @@ And the subagent drives the session:
 
 ```ts
 protected override async executeChunk(...): Promise<RecipeChunkResult> {
+  const sinks = {
+    // Post each note the moment it is parsed. Core labels and delivers it.
+    onProgress: (event) => this.postProgress(event),
+    // Only safe alongside `onProgress` — see below.
+    onCheckpoint: (cursor) => this.ctx.storage.put(CURSOR_KEY, cursor)
+  };
   const outcome = cursor
-    ? await session.resume(runtime, cursor)
-    : await session.start(runtime, subtaskId, prompt, dir);
+    ? await session.resume(runtime, cursor, sinks)
+    : await session.start(runtime, subtaskId, prompt, dir, sinks);
 
-  if (!outcome.done) return { done: false, progress: outcome.progress };
-  return { done: true, progress: outcome.progress, result: report(outcome) };
+  await this.ctx.storage.put(CURSOR_KEY, outcome.cursor);
+  // Empty, because `onProgress` already posted them. Returning them here as well
+  // would post every note twice.
+  if (!outcome.done) return { done: false, progress: [] };
+  return { done: true, progress: [], result: report(outcome) };
 }
 ```
 
 `DrainCursor` is the only state, and the caller persists it. A fresh isolate
 resumes from the exact event sequence the last one consumed.
+
+**The drain window is not the reporting interval.** Whatever `windowMs` is set to
+— eight minutes by default — a session that finishes inside one window reaches no
+boundary at all, so a host with nothing but the outcome learns everything at
+once, once the work is over. One production session ran thirteen minutes in a
+single chunk and its sixteen notes arrived in the eleven seconds after it stopped
+working.
+
+`onProgress` is handed each note as the line is parsed, so a host can post it
+then. The notes still arrive on the outcome, so a host that passes no sink is
+unaffected — and a host that passes one must return an empty `progress` or pay
+for every note twice.
+
+**`onCheckpoint` is only correct alongside `onProgress`.** A cursor is normally
+committed after the drain returns, because one written ahead of consuming events
+would skip events a retry never saw. A cursor offered to `onCheckpoint` names a
+position whose notes have _already been handed to the sink_, so resuming from it
+loses nothing anybody saw — which is true only because the sink posted them.
+Without it, a chunk that dies mid-window resumes from wherever the previous
+window ended; one production run lost six and a half minutes that way and
+re-derived it by replaying the stream from the start.
 
 **`subtaskId` namespaces the exec id, and it is not optional.** Subtasks are a
 flat concurrent fan-out and a workspace is one container, so two sessions
