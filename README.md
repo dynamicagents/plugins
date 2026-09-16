@@ -5,6 +5,10 @@
 One subpath per plugin, one factory per subpath, config passed at instantiation. Your bundle
 grows only with what you import.
 
+The exception is [`/computer-host`](src/computer-host/), which ships a Durable Object base
+class rather than a plugin: some capabilities need an object to live in, and the alternative
+is every consumer maintaining a copy of one.
+
 ```bash
 npm install @dynamicagents/plugins
 ```
@@ -80,17 +84,18 @@ needing per-caller state takes it the same way.
 
 ## The plugins
 
-| Subpath                            | What it adds                                                                                 | Needs                                        |
-| ---------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| [`/arc-agi`](src/arc-agi/)         | Play ARC-AGI-3 games — a delegable subtask type, a catalogue tool, a scorecard ledger        | `ARC_API_KEY`                                |
-| [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                           | `BROWSER` (paid plan)                        |
-| [`/claude-code`](src/claude-code/) | Delegate a coding task to a Claude Code session in the workspace container                   | one or more `claude setup-token` credentials |
-| [`/computer`](src/computer/)       | A Linux container whose filesystem outlives it: shell, package manager, unrestricted network | `@cloudflare/computer` (paid)                |
-| [`/recall`](src/recall/)           | Episodic memory over Vectorize — search history that compaction folded away                  | `VECTORIZE` (1024-dim/cosine)                |
-| [`/repo`](src/repo/)               | Clone, commit, push a branch, open a pull request — over any container                       | `GITHUB_TOKEN`                               |
-| [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout   | —                                            |
-| [`/triage`](src/triage/)           | A pre-turn gate: is this message even for me?                                                | —                                            |
-| [`/workspace`](src/workspace/)     | A durable file store for long subagent runs, plus tools over it                              | `@cloudflare/shell`                          |
+| Subpath                                | What it adds                                                                                      | Needs                                          |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| [`/arc-agi`](src/arc-agi/)             | Play ARC-AGI-3 games — a delegable subtask type, a catalogue tool, a scorecard ledger             | `ARC_API_KEY`                                  |
+| [`/browser`](src/browser/)             | Read web pages via Browser Rendering Quick Actions                                                | `BROWSER` (paid plan)                          |
+| [`/claude-code`](src/claude-code/)     | Delegate a coding task to a Claude Code session in the workspace container                        | one or more `claude setup-token` credentials   |
+| [`/computer`](src/computer/)           | A Linux container whose filesystem outlives it: shell, package manager, unrestricted network      | `@cloudflare/computer` (paid)                  |
+| [`/computer-host`](src/computer-host/) | The Durable Object `/computer` talks to — container backend, dependency install, credentialed git | a DO binding, a container, `@platformatic/vfs` |
+| [`/recall`](src/recall/)               | Episodic memory over Vectorize — search history that compaction folded away                       | `VECTORIZE` (1024-dim/cosine)                  |
+| [`/repo`](src/repo/)                   | Clone, commit, push a branch, open a pull request — over any container                            | `GITHUB_TOKEN`                                 |
+| [`/scratch`](src/scratch/)             | A throwaway git repository with no remote, for work that needs a container but no checkout        | —                                              |
+| [`/triage`](src/triage/)               | A pre-turn gate: is this message even for me?                                                     | —                                              |
+| [`/workspace`](src/workspace/)         | A durable file store for long subagent runs, plus tools over it                                   | `@cloudflare/shell`                            |
 
 Each directory has its own README with the config shape and a paste-ready `wrangler.jsonc`
 snippet — a plugin cannot add its own binding, which is why it declares what it needs.

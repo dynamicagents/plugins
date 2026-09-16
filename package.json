@@ -68,6 +68,10 @@
       "types": "./dist/computer/index.d.ts",
       "import": "./dist/computer/index.js"
     },
+    "./computer-host": {
+      "types": "./dist/computer-host/index.d.ts",
+      "import": "./dist/computer-host/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -91,6 +95,7 @@
     "@cloudflare/computer": "^0.3.0",
     "@cloudflare/shell": "^0.4.3",
     "@dynamicagents/core": ">=0.11.0 <0.12.0",
+    "@platformatic/vfs": "^0.4.0",
     "agents": ">=0.23.0 <0.24.0",
     "ai": "^7.0.77",
     "drizzle-orm": ">=0.45.2",
@@ -103,11 +108,15 @@
     },
     "@cloudflare/computer": {
       "optional": true
+    },
+    "@platformatic/vfs": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@cloudflare/computer": "^0.3.0",
     "@cloudflare/shell": "0.4.3",
+    "@platformatic/vfs": "^0.4.0",
     "@cloudflare/vitest-plugin": "^1.1.9",
     "@dynamicagents/core": "git+https://github.com/dynamicagents/core.git#main",
     "@types/node": "^26.5.1",

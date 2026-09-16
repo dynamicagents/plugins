@@ -253,7 +253,7 @@ export interface WorkspaceHost extends Rpc.DurableObjectBranded {
  * of the class's private brand: runtime-compatible, type-incompatible. This is
  * the only place in the plugin that gap is crossed.
  */
-function openWorkspace(
+export function openWorkspace(
   host: DurableObjectStub<WorkspaceHost>
 ): Promise<WorkspaceClient> {
   return getWorkspace(host as unknown as Parameters<typeof getWorkspace>[0]);

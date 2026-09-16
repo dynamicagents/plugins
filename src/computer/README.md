@@ -87,6 +87,12 @@ Two consequences worth stating outright:
 
 ## The host's Durable Object
 
+**You probably do not write this.** [`/computer-host`](../computer-host/) ships the
+object — the container backend, the alarm, the dependency install, the credentialed
+git — and a host subclasses it and answers a short config. What follows is the
+interface this plugin actually requires, which is what a host bringing its own must
+satisfy instead.
+
 `binding` points at a class that owns the workspace and exposes two methods:
 
 - `__getWorkspaceStub()` — what `withWorkspace` from `@cloudflare/computer` installs.
@@ -136,18 +142,10 @@ see the export's own comment.
 
 ## wrangler.jsonc
 
-```jsonc
-{
-  "durable_objects": {
-    "bindings": [{ "name": "WORKSPACE", "class_name": "Workspace" }]
-  },
-  // `new_sqlite_classes`, not `new_classes`: the filesystem is the DO's SQLite.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Workspace"] }]
-}
-```
-
-The class also needs a container attached — see `@cloudflare/computer` for the image
-and `containers` block, which are that package's contract rather than this one's.
+`binding` needs a SQLite-backed Durable Object with a container attached, and the
+Worker entry needs to re-export `WorkspaceProxy`. The paste-ready block for all of it
+lives with the object it configures, in [`/computer-host`](../computer-host/) — along
+with the storage keys such an object owns.
 
 ## Requirements
 
