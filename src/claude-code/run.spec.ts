@@ -695,3 +695,144 @@ describe("the result across a chunk boundary", () => {
     expect(second.result?.costUsd).toBe(1.25);
   });
 });
+
+describe("drainRun, reporting as it goes", () => {
+  it("hands over each note as it is parsed, not when the window ends", async () => {
+    /**
+     * The whole point of the sink, and the thing a returned array cannot show.
+     *
+     * Two notes arrive in separate stdout events with the stream still open, so
+     * the window is nowhere near over when they land. Before the sink existed
+     * this drain would have held both for the rest of its eight minutes and a
+     * caller would have posted them together, minutes after they were written.
+     */
+    const seen: string[] = [];
+    const outcome = await drainRun(
+      // `open`, so the session is still thinking when the window runs out —
+      // which is the state the whole sink exists for.
+      fakeHandle(
+        [
+          stdout(1, assistant("reading the tree")),
+          stdout(2, assistant("running the suite"))
+        ],
+        true
+      ),
+      FRESH,
+      {
+        windowMs: 50,
+        onProgress: (event) => {
+          seen.push(event.text);
+        }
+      }
+    );
+
+    expect(seen).toEqual(["reading the tree", "running the suite"]);
+    expect(outcome.done).toBe(false);
+    // Returned as well, so a caller that passes no sink is unaffected — which is
+    // also why a caller that does pass one must drop what it is handed back.
+    expect(outcome.progress.map((p) => p.text)).toEqual(seen);
+  });
+
+  it("numbers notes across a window boundary exactly as one drain would", async () => {
+    const first = await drainRun(
+      fakeHandle([stdout(1, assistant("one"))]),
+      FRESH,
+      { windowMs: 50 }
+    );
+    const second = await drainRun(
+      fakeHandle([stdout(2, assistant("two")), exit(3, 0)]),
+      first.cursor,
+      { windowMs: 50 }
+    );
+
+    // Positional keys are what make a replayed chunk dedupe rather than repost,
+    // so the count has to survive the boundary the notes were split across.
+    expect(first.progress.map((p) => p.key)).toEqual(["claude:0"]);
+    expect(second.progress.map((p) => p.key)).toEqual(["claude:1"]);
+  });
+
+  it("re-emits identical keys when a retry replays the same stream", async () => {
+    // A chunk that died before committing its cursor is retried from whatever
+    // was last written. The same lines are parsed twice, and the second pass has
+    // to produce keys the gatekeeper already knows or the whole tail is reposted.
+    const script = [stdout(1, assistant("one")), stdout(2, assistant("two"))];
+    const attempt = () => drainRun(fakeHandle(script), FRESH, { windowMs: 50 });
+
+    const died = await attempt();
+    const retried = await attempt();
+    expect(retried.progress).toEqual(died.progress);
+  });
+
+  it("settles the sink before returning an outcome that names its notes", async () => {
+    /**
+     * A caller commits the returned cursor, and the cursor claims those notes
+     * were emitted. If the drain returned first, an isolate unwinding its RPC
+     * could drop a post the cursor had already counted — and the retry would
+     * skip it, because its key is behind the committed position.
+     */
+    let delivered = 0;
+    await drainRun(
+      fakeHandle([stdout(1, assistant("one")), exit(2, 0)]),
+      FRESH,
+      {
+        windowMs: 50,
+        onProgress: async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          delivered++;
+        }
+      }
+    );
+    expect(delivered).toBe(1);
+  });
+
+  it("offers no checkpoint until the interval has passed, then one behind the notes", async () => {
+    const checkpoints: DrainCursor[] = [];
+    let clock = 0;
+    await drainRun(
+      fakeHandle([
+        stdout(1, assistant("one")),
+        stdout(2, assistant("two")),
+        exit(3, 0)
+      ]),
+      FRESH,
+      {
+        windowMs: 5 * 60_000,
+        now: () => clock,
+        onProgress: () => {
+          // Each stdout event advances the clock past the floor, so the second
+          // one is eligible and the first is not.
+          clock += 40_000;
+        },
+        onCheckpoint: (cursor) => {
+          checkpoints.push(cursor);
+        }
+      }
+    );
+
+    expect(checkpoints).toHaveLength(1);
+    // A checkpoint names a position whose notes are already on the sink's queue —
+    // that is the only reason it is safe to resume from mid-window.
+    expect(checkpoints[0]!.emitted).toBe(2);
+    expect(checkpoints[0]!.seq).toBe(2);
+  });
+
+  it("carries the last bucket reading across a window, like the result line", async () => {
+    const rateLine = line({
+      type: "rate_limit_event",
+      rate_limit_info: { status: "allowed", resetsAt: 1789587600 }
+    });
+    const first = await drainRun(fakeHandle([stdout(1, rateLine)]), FRESH, {
+      windowMs: 50
+    });
+    expect(first.rateLimit?.resetsAt).toBe(1789587600);
+
+    // The reading arrived in the previous window; a caller draining this one
+    // still has to be able to see it.
+    const second = await drainRun(
+      fakeHandle([stdout(2, assistant("on we go")), exit(3, 0)]),
+      first.cursor,
+      { windowMs: 50 }
+    );
+    expect(second.rateLimit?.resetsAt).toBe(1789587600);
+  });
+});

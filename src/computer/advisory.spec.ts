@@ -281,3 +281,44 @@ describe("what a session is told", () => {
     expect(brief).toContain("ERESOLVE");
   });
 });
+
+describe("a failed install with a repair already queued", () => {
+  const failed = {
+    state: "failed" as const,
+    command: "npm ci --no-audit --no-fund",
+    finishedAt: Date.now(),
+    error:
+      "the install stopped without reporting — its container was most likely replaced."
+  };
+
+  it("reads as building, not broken, so a session waits instead of reinstalling", () => {
+    /**
+     * The production case this exists for: a container replaced under an
+     * install, the record written `failed`, a reinstall armed in the same
+     * breath, and a session briefed in the six seconds between. It was told its
+     * dependencies were broken and spent its own turns on `npm ci`.
+     */
+    const [advisory] = deriveAdvisories({
+      install: failed,
+      dependencyTreePresent: false,
+      reinstallArmedAt: Date.now() - 2_000
+    });
+
+    expect(advisory?.kind).toBe("deps-building");
+    // Transient is the load-bearing half: it is what tells every reader the
+    // condition clears with nobody acting.
+    expect(shapeOf(advisory!).transient).toBe(true);
+    expect(renderAdvisory(advisory!, "session")).toContain(
+      "rather than starting a second install"
+    );
+  });
+
+  it("still reads as broken when nothing is queued to fix it", () => {
+    const [advisory] = deriveAdvisories({
+      install: failed,
+      dependencyTreePresent: false
+    });
+    expect(advisory?.kind).toBe("deps-broken");
+    expect(shapeOf(advisory!).transient).toBe(false);
+  });
+});

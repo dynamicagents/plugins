@@ -70,8 +70,39 @@ export interface ClaudeCodeUsage {
   cacheWrite: number;
 }
 
+/**
+ * What the client knows about the subscription bucket it is drawing on.
+ *
+ * The one thing on this stream that is about the *deployment* rather than the
+ * run. `plugins/src/claude-code/index.ts` describes the 5-hour and weekly limits
+ * as routed around rather than predicted, because the gateway only learns a
+ * bucket is empty when Anthropic refuses a request — this is the client saying
+ * so in advance, on every session.
+ *
+ * `resetsAt` is **seconds**, not milliseconds, which is the one field here it is
+ * possible to get silently wrong: a value handed to `Date` unconverted lands in
+ * January 1970, and a credential marked spent until then reads as usable.
+ */
+export interface RateLimitInfo {
+  /** `allowed` on a healthy bucket. Anything else is the bucket saying no. */
+  status: string;
+  /** Unix **seconds** at which this bucket refills. */
+  resetsAt?: number;
+  /** Which bucket — `five_hour`, and the weekly one. */
+  rateLimitType?: string;
+  /** Whether spend beyond the bucket is permitted, and why not. */
+  overageStatus?: string;
+  overageDisabledReason?: string;
+}
+
 export type ClaudeCodeEvent =
   | { kind: "init"; sessionId: string; model?: string }
+  /**
+   * The subscription bucket, as the client sees it. Carried rather than acted
+   * on here — {@link describe} decides what a reader is told, and the caller
+   * decides what the credential pool is told.
+   */
+  | { kind: "rateLimit"; info: RateLimitInfo }
   | { kind: "assistant"; text: string; tools: string[] }
   | { kind: "retry"; detail: string }
   /**
@@ -328,6 +359,25 @@ export function parseStream(buffer: string): ParsedStream {
         break;
       }
 
+      /**
+       * A top-level type, not a `system` subtype — which is why it landed in
+       * `default` and was counted as a schema change on every single session.
+       *
+       * It was: the warning was right that something was being dropped, and the
+       * dropped thing was the only reading of the subscription bucket anything
+       * here gets for free. A sample on the warning is what turned "skipped: 1"
+       * into a line somebody could act on.
+       */
+      case "rate_limit_event": {
+        const info = readRateLimit(event);
+        if (!info) {
+          skip(trimmed);
+          break;
+        }
+        events.push({ kind: "rateLimit", info });
+        break;
+      }
+
       default:
         skip(trimmed);
     }
@@ -335,6 +385,42 @@ export function parseStream(buffer: string): ParsedStream {
 
   return { events, carry, skipped, nested, ...(sample ? { sample } : {}) };
 }
+
+/**
+ * Read a `rate_limit_event` line, or nothing when it carries no status.
+ *
+ * `status` is the only required field: it is what decides whether anything is
+ * wrong, and a line without it says nothing this package can use — so it is
+ * skipped and sampled like any other unrecognised shape, rather than recorded as
+ * a bucket in an unknown state.
+ */
+function readRateLimit(
+  event: Record<string, unknown>
+): RateLimitInfo | undefined {
+  const info = asRecord(event.rate_limit_info);
+  const status = info && str(info.status);
+  if (!info || !status) return undefined;
+
+  const resetsAt = info.resetsAt;
+  return {
+    status,
+    ...(typeof resetsAt === "number" && Number.isFinite(resetsAt)
+      ? { resetsAt }
+      : {}),
+    ...(str(info.rateLimitType)
+      ? { rateLimitType: str(info.rateLimitType) }
+      : {}),
+    ...(str(info.overageStatus)
+      ? { overageStatus: str(info.overageStatus) }
+      : {}),
+    ...(str(info.overageDisabledReason)
+      ? { overageDisabledReason: str(info.overageDisabledReason) }
+      : {})
+  };
+}
+
+/** A bucket that is not refusing anything. The only status observed in the wild. */
+export const RATE_LIMIT_OK = "allowed";
 
 /** Read a `result` line. Total by construction — a missing field reads as zero. */
 function readResult(event: Record<string, unknown>): ClaudeCodeResult {
@@ -434,6 +520,23 @@ function describe(event: ClaudeCodeEvent): string | undefined {
       // gateway looks like from inside the container, and a run that ends
       // shortly afterwards is explained by it.
       return `retrying the model call: ${clip(event.detail)}`;
+    case "rateLimit":
+      /**
+       * Silent while the bucket is fine, which is every line of a healthy
+       * session — one note per `rate_limit_event` would be the noisiest thing on
+       * the stream and would say "allowed" each time.
+       *
+       * The test is inverted deliberately: an unrecognised status produces a
+       * note rather than silence. The statuses are a vendor's and only
+       * {@link RATE_LIMIT_OK} has been seen, so a new one meaning "nearly out"
+       * should surface as prose somebody reads, not be assumed benign.
+       */
+      return event.info.status === RATE_LIMIT_OK
+        ? undefined
+        : `the ${event.info.rateLimitType ?? "subscription"} limit is ${event.info.status}` +
+            (event.info.resetsAt === undefined
+              ? ""
+              : ` until ${new Date(event.info.resetsAt * 1000).toISOString()}`);
     // `init` names a session id nobody outside this package can use, and
     // `result` is the terminal outcome the caller reports itself.
     case "init":

@@ -13,6 +13,7 @@ import {
   startRun,
   type DrainCursor,
   type DrainOutcome,
+  type DrainOptions,
   type SessionRuntime
 } from "./run.js";
 import {
@@ -92,6 +93,16 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
   const windowMs = config.windowMs ?? DEFAULT_WINDOW_MS;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+  /**
+   * What a host may hand a drain beyond its window: where to send a note the
+   * moment it is parsed, and where to offer a cursor part-way through.
+   *
+   * Optional, and a host that passes neither gets exactly the behaviour a drain
+   * had before they existed — every note on the outcome, one cursor at the end.
+   * See {@link file://./run.ts DrainOptions}.
+   */
+  type Sinks = Pick<DrainOptions, "onProgress" | "onCheckpoint">;
+
   const launch = (prompt: string, dir: string) => ({
     prompt,
     dir,
@@ -121,7 +132,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       runtime: SessionRuntime,
       subtaskId: string | number,
       prompt: string,
-      dir: string
+      dir: string,
+      sinks: Sinks = {}
     ): Promise<DrainOutcome> {
       const execId = execIdFor(subtaskId);
       // `using`, so the attachment is released even when the drain throws.
@@ -130,7 +142,10 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         execId,
         timeoutMs
       });
-      return await drainRun(handle, freshCursor(execId), { windowMs });
+      return await drainRun(handle, freshCursor(execId), {
+        windowMs,
+        ...sinks
+      });
     },
 
     /**
@@ -155,7 +170,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
      */
     async resume(
       runtime: SessionRuntime,
-      cursor: DrainCursor
+      cursor: DrainCursor,
+      sinks: Sinks = {}
     ): Promise<DrainOutcome> {
       let handle;
       try {
@@ -182,7 +198,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         };
       }
       using session = handle;
-      return await drainRun(session, cursor, { windowMs });
+      return await drainRun(session, cursor, { windowMs, ...sinks });
     },
 
     /** Stop a session — `SIGTERM`, so its own process tree goes with it. */
@@ -313,16 +329,18 @@ export {
 } from "./run.js";
 export type {
   DrainCursor,
+  DrainOptions,
   DrainOutcome,
   Launch,
   LaunchOptions,
   SessionRuntime
 } from "./run.js";
-export { parseStream, toProgress } from "./events.js";
+export { parseStream, toProgress, RATE_LIMIT_OK } from "./events.js";
 export type {
   ClaudeCodeEvent,
   ClaudeCodeResult,
-  ClaudeCodeUsage
+  ClaudeCodeUsage,
+  RateLimitInfo
 } from "./events.js";
 export {
   CLAUDE_CODE_CAPABILITY,

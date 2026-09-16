@@ -1123,9 +1123,17 @@ export abstract class WorkspaceObjectBase<
   async advisories(): Promise<readonly WorkspaceAdvisory[]> {
     const install = await this.#install.state();
     const storage = this.#storageHeadroom();
+    // Only when the record says failed: it is the one state whose reading a
+    // queued repair changes, and every other one would pay a storage read for an
+    // answer nothing looks at.
+    const reinstallArmedAt =
+      install.state === "failed"
+        ? await this.#install.reinstallArmedAt()
+        : undefined;
     return deriveAdvisories({
       install,
       ...(storage ? { storage } : {}),
+      ...(reinstallArmedAt === undefined ? {} : { reinstallArmedAt }),
       dependencyTreePresent: await this.#install.treePresentIfItMatters(install)
     });
   }

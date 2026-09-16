@@ -804,6 +804,17 @@ export class InstallJob {
     return state;
   }
 
+  /**
+   * When a reinstall was queued, if one is waiting to run.
+   *
+   * Read by {@link file://../advisory.ts deriveAdvisories}, which is the only
+   * caller that needs it: a `failed` record with a repair already queued is a
+   * transient condition wearing a permanent record's clothes.
+   */
+  async reinstallArmedAt(): Promise<number | undefined> {
+    return await this.#job.armedAt();
+  }
+
   /** True while this isolate holds the drain, so the watchdog leaves it alone. */
   #draining = false;
 
