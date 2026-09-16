@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseStream,
   toProgress,
+  PROGRESS_MAX_CHARS,
   RATE_LIMIT_OK,
   type ClaudeCodeEvent
 } from "./events.js";
@@ -425,10 +426,10 @@ describe("toProgress", () => {
 
   it("clips a long turn rather than pasting an essay into the parent", () => {
     const note = toProgress(
-      parseStream(assistant("x".repeat(5_000))).events,
+      parseStream(assistant("x".repeat(PROGRESS_MAX_CHARS * 2))).events,
       0
     );
-    expect(note[0]!.text.length).toBeLessThan(300);
+    expect(note[0]!.text.length).toBeLessThanOrEqual(PROGRESS_MAX_CHARS);
     expect(note[0]!.text.endsWith("…")).toBe(true);
   });
 });
