@@ -324,21 +324,28 @@ export function freshCursor(execId: string): DrainCursor {
  * Whether a bucket reading says anything the last one did not.
  *
  * Every field, because each is separately actionable: the status decides whether
- * a credential is worth using, `resetsAt` is when it recovers, and the type says
- * which of the two buckets is talking. Comparing only the status would hold a
- * rollover — a new `resetsAt` under an unchanged `allowed` — out of the logs
- * entirely.
+ * a credential is worth using, `resetsAt` is when it recovers, the type says
+ * which bucket is talking, and the overage pair says whether spending past it is
+ * allowed and why not. Comparing only the status would hold a rollover — a new
+ * `resetsAt` under an unchanged `allowed` — out of the logs entirely.
+ *
+ * **Over the keys rather than a written-out list**, which is the difference
+ * between one bug and a class of them: a field added to
+ * {@link RateLimitInfo} and forgotten here does not make a smaller log, it makes
+ * a change to the reading that never reaches a log at all — the one failure this
+ * function exists to prevent, and a silent one. Shallow is exact because the
+ * reading is flat and every value on it is a primitive; a nested field would
+ * need this revisited, and the parser is where that would be decided.
  */
 function changedReading(
   previous: RateLimitInfo | undefined,
   next: RateLimitInfo
 ): boolean {
-  return (
-    previous === undefined ||
-    previous.status !== next.status ||
-    previous.resetsAt !== next.resetsAt ||
-    previous.rateLimitType !== next.rateLimitType ||
-    previous.overageStatus !== next.overageStatus
+  if (previous === undefined) return true;
+  const before: Record<string, unknown> = { ...previous };
+  const after: Record<string, unknown> = { ...next };
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].some(
+    (key) => before[key] !== after[key]
   );
 }
 

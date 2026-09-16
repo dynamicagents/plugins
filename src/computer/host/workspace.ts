@@ -1134,7 +1134,15 @@ export abstract class WorkspaceObjectBase<
       install,
       ...(storage ? { storage } : {}),
       ...(reinstallArmedAt === undefined ? {} : { reinstallArmedAt }),
-      dependencyTreePresent: await this.#install.treePresentIfItMatters(install)
+      // The probe qualifies `deps-broken` and nothing else, and a queued
+      // reinstall turns a failed record into `deps-building`, which does not
+      // read it. `failed` alone is no longer the condition under which the
+      // question is worth asking, so the caller narrows it — see
+      // `InstallJob.treePresentIfItMatters`, whose contract this keeps true.
+      dependencyTreePresent:
+        reinstallArmedAt === undefined
+          ? await this.#install.treePresentIfItMatters(install)
+          : false
     });
   }
 

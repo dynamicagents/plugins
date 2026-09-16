@@ -363,13 +363,15 @@ export function parseStream(buffer: string): ParsedStream {
       }
 
       /**
-       * A top-level type, not a `system` subtype — which is why it landed in
-       * `default` and was counted as a schema change on every single session.
+       * A top-level `type`, not a `system` subtype, so it is handled here and
+       * not in the subtype switch above.
        *
-       * It was: the warning was right that something was being dropped, and the
-       * dropped thing was the only reading of the subscription bucket anything
-       * here gets for free. A sample on the warning is what turned "skipped: 1"
-       * into a line somebody could act on.
+       * The placement is load-bearing rather than tidy: everything this switch
+       * does not name falls to `default`, which counts it as an unrecognised
+       * line and warns. A recognised shape parsed in the wrong place is
+       * therefore indistinguishable from a schema that moved — the drain reports
+       * a steady `skipped` on every session, and the reading it is dropping is
+       * the only free view of the subscription bucket anything here gets.
        */
       case "rate_limit_event": {
         const info = readRateLimit(event);

@@ -352,11 +352,12 @@ protected override async executeChunk(...): Promise<RecipeChunkResult> {
 `DrainCursor` is the only state, and the caller persists it. A fresh isolate
 resumes from the exact event sequence the last one consumed.
 
-**The drain window is not the reporting interval.** It is eight minutes, and a
-session that finishes inside one reaches no boundary at all — so a host with
-nothing but the outcome learns everything at once, once the work is over. One
-production session ran thirteen minutes in a single chunk and its sixteen notes
-arrived in the eleven seconds after it stopped working.
+**The drain window is not the reporting interval.** Whatever `windowMs` is set to
+— eight minutes by default — a session that finishes inside one window reaches no
+boundary at all, so a host with nothing but the outcome learns everything at
+once, once the work is over. One production session ran thirteen minutes in a
+single chunk and its sixteen notes arrived in the eleven seconds after it stopped
+working.
 
 `onProgress` is handed each note as the line is parsed, so a host can post it
 then. The notes still arrive on the outcome, so a host that passes no sink is
