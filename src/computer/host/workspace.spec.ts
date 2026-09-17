@@ -6,7 +6,7 @@ import {
   workspaceNamespace
 } from "../../../test/computer/do.js";
 import { DEFAULT_INSTALL_PLAN, type InstallState } from "../install.js";
-import { openWorkspace } from "../index.js";
+import { openWorkspace, openWorkspaceFs } from "../index.js";
 import { DEFAULT_SCRATCH_DIR } from "../../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
 
@@ -976,6 +976,104 @@ describe("trusting the interception CA", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+/**
+ * What a file tool waits for — `__getWorkspaceFsStub` in `./workspace.ts` holds
+ * why.
+ *
+ * These run **without a container**, which is what makes it observable: the
+ * trust command cannot succeed here, so *attempting* it is what logs.
+ */
+describe("the filesystem stub", () => {
+  /** Every outcome of the trust step logs; a skipped one logs nothing at all. */
+  function trustAttempts(calls: unknown[][]): number {
+    return calls.filter(([msg]) =>
+      String(msg).includes("trust the interception CA")
+    ).length;
+  }
+
+  const warmRows = async (stub: DurableObjectStub<TestWorkspaceDO>) =>
+    (
+      await runInDurableObject(stub, (_instance, state) => scheduleRows(state))
+    ).filter((row) => row.callback === "containerWarm");
+
+  /** Poll until `check` holds: the alarm fires on its own clock. */
+  async function eventually(
+    check: () => boolean,
+    ms = 5_000
+  ): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (!check()) {
+      if (Date.now() > deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return true;
+  }
+
+  it("reads the workspace without starting a container", async () => {
+    const stub = freshWorkspace("fs-no-container");
+    await seedGitCheckout(stub, "/workspace/probe");
+
+    // Spied after seeding, which opens the workspace the other way.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      using ws = await openWorkspaceFs(stub);
+      // Still answers, and answers from here.
+      expect(await ws.fs.readdir("/workspace")).toHaveLength(1);
+      expect(trustAttempts(warn.mock.calls)).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("asks the alarm to start the container it did not wait for", async () => {
+    const stub = freshWorkspace("fs-warms");
+    const dir = "/workspace/probe";
+    await seedGitCheckout(stub, dir);
+    await stub.noteCheckout({ dir, kind: "repo", repo: "acme/spike" });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      using ws = await openWorkspaceFs(stub);
+      void ws;
+
+      // Armed for now, so the alarm carries it out on its own.
+      expect(await eventually(() => trustAttempts(warn.mock.calls) > 0)).toBe(
+        true
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /** Nothing to push and nothing to run, so a warm would only bill. */
+  it("warms nothing for a workspace with no checkout", async () => {
+    const stub = freshWorkspace("fs-no-checkout");
+
+    using ws = await openWorkspaceFs(stub);
+    void ws;
+
+    expect(await warmRows(stub)).toHaveLength(0);
+  });
+
+  /**
+   * The rule {@link touch} lives under, on a path that runs per tool call: a
+   * schedule is a minted row, so arming without cancelling leaves one per read.
+   */
+  it("keeps one warm row however many files are read", async () => {
+    const stub = freshWorkspace("fs-one-row");
+    const dir = "/workspace/probe";
+    await seedGitCheckout(stub, dir);
+    await stub.noteCheckout({ dir, kind: "repo", repo: "acme/spike" });
+
+    for (let i = 0; i < 3; i++) {
+      using ws = await openWorkspaceFs(stub);
+      await ws.fs.readdir("/workspace");
+    }
+
+    expect((await warmRows(stub)).length).toBeLessThanOrEqual(1);
   });
 });
 

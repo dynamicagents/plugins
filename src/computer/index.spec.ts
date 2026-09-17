@@ -1735,3 +1735,80 @@ describe("cancellation before the command runs", () => {
     expect(disposed).toBe(true);
   });
 });
+
+/**
+ * Which way each tool opens the workspace — `WorkspaceHost.__getWorkspaceFsStub`
+ * in `./index.ts` holds why the two openers exist.
+ *
+ * Asserted per tool, because one that reached for the wrong opener would
+ * compile, pass everything else here, and be slow only on a cold container.
+ */
+describe("which way the workspace is opened", () => {
+  /** The two openers, counted apart. Both hand back the same client. */
+  function openers(seed: Record<string, string> = {}) {
+    const inner = stub(seed);
+    const opens = { exec: 0, fs: 0 };
+    return {
+      ...inner,
+      opens,
+      tools: buildComputerTools(
+        () => {
+          opens.exec++;
+          return inner.workspace();
+        },
+        config,
+        undefined,
+        () => {
+          opens.fs++;
+          return inner.workspace();
+        }
+      )
+    };
+  }
+
+  it("serves every file tool from the filesystem opener", async () => {
+    const path = "/workspace/repo/src/a.ts";
+    const { tools, opens } = openers({ [path]: "const a = 1;\n" });
+
+    await run(tools, "sb_read", { path });
+    await run(tools, "sb_ls", { path: "/workspace/repo" });
+    await run(tools, "sb_exists", { path });
+    await run(tools, "sb_grep", { query: "const" });
+    await run(tools, "sb_write", { path, content: "const a = 2;\n" });
+    await run(tools, "sb_edit", {
+      path,
+      oldString: "const a = 2;",
+      newString: "const a = 3;"
+    });
+
+    expect(opens).toEqual({ exec: 0, fs: 6 });
+  });
+
+  it("serves a command from the opener that readies the container", async () => {
+    const { tools, opens, execs } = openers();
+
+    await run(tools, "sb_exec", { command: "npm test" });
+
+    expect(opens.exec).toBe(1);
+    expect(opens.fs).toBe(0);
+    expect(execs).toHaveLength(1);
+  });
+
+  /**
+   * The **fourth argument** is what is optional, not the host method:
+   * `WorkspaceHost.__getWorkspaceFsStub` is required. A caller passing one
+   * opener gets the old behaviour rather than a file tool with nothing to open.
+   */
+  it("falls back to the one opener when a host passes only one", async () => {
+    const inner = stub();
+    let opens = 0;
+    const tools = buildComputerTools(() => {
+      opens++;
+      return inner.workspace();
+    }, config);
+
+    await run(tools, "sb_ls", { path: "/workspace/repo" });
+
+    expect(opens).toBe(1);
+  });
+});

@@ -156,6 +156,10 @@ export class ContainerTrust {
   async ensure(): Promise<void> {
     this.#watch();
     if (this.#trusted) return;
+    // An exec pushes the workspace before it spawns, and a new container is
+    // empty, so this one — the first in every container — carries the whole
+    // tree. {@link TRUST_TIMEOUT_MS} bounds the process, not any of that.
+    const startedAt = Date.now();
     try {
       using handle = await this.deps
         .workspace()
@@ -193,6 +197,10 @@ export class ContainerTrust {
         id: this.deps.id(),
         exitCode: result.exitCode,
         trusted: this.#trusted,
+        // Where a cold workspace's time went, on the line already logged once
+        // per container.
+        pushed: result.pushed,
+        ms: Date.now() - startedAt,
         output
       });
     } catch (err) {
@@ -224,6 +232,9 @@ export class ContainerTrust {
       }
       console.warn(`[${this.deps.tag()}] could not trust the interception CA`, {
         id: this.deps.id(),
+        // Separates a container that refused at once from one that was pushed
+        // to and then dropped.
+        ms: Date.now() - startedAt,
         err: String(err)
       });
     }

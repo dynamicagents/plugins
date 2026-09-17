@@ -181,6 +181,9 @@ const IDLE_RECLAIM_MS = 7 * 24 * 60 * 60 * 1000;
 /** Where the container-idle deadline keeps its current schedule id. */
 const CONTAINER_IDLE_ID = "container-idle-id";
 
+/** Where the container-warm wake keeps its current schedule id. */
+const CONTAINER_WARM_ID = "container-warm-id";
+
 /**
  * How long a container stays up after the last command **started**.
  *
@@ -440,6 +443,7 @@ export abstract class WorkspaceObjectBase<
         installWatch: () => this.#install.onWatch(),
         idleReclaim: () => this.#onIdleReclaim(),
         containerIdle: (payload) => this.#onContainerIdle(payload),
+        containerWarm: () => this.#onContainerWarm(),
         syncRetry: (payload?: SyncDrainIntent) => this.#onSyncDrain(payload)
       },
       onError: (err: unknown) => {
@@ -464,6 +468,20 @@ export abstract class WorkspaceObjectBase<
     scheduler: this.#wake.scheduler,
     key: CONTAINER_IDLE_ID,
     callback: "containerIdle"
+  });
+
+  /**
+   * Start a cold container in the background — see {@link #warmIfCold}.
+   *
+   * A deadline rather than a bare `scheduler.set`, for the reason {@link #touch}
+   * gives: armed per tool call, so anything that did not cancel the row standing
+   * would leave one per call.
+   */
+  readonly #containerWarm = namedDeadline({
+    storage: this.ctx.storage,
+    scheduler: this.#wake.scheduler,
+    key: CONTAINER_WARM_ID,
+    callback: "containerWarm"
   });
 
   /**
@@ -592,6 +610,14 @@ export abstract class WorkspaceObjectBase<
   #reclaimed = false;
 
   /**
+   * The start already in flight, shared by everyone who asks for one.
+   *
+   * In memory, like {@link file://./ca-trust.ts}'s flag and for the same reason:
+   * it describes a container, and an isolate that lost it asks again.
+   */
+  #readying?: Promise<void>;
+
+  /**
    * Open the workspace, and make sure the container behind it can speak TLS.
    *
    * **Every path that might start a container goes through here**, which is the
@@ -620,8 +646,23 @@ export abstract class WorkspaceObjectBase<
    * Object `protected` is a typechecker's opinion and not a runtime boundary —
    * every non-`#` method is reachable over RPC — so a helper that starts
    * containers is spelled `#`.
+   *
+   * **One start at a time**, because {@link #warmIfCold} makes overlap ordinary:
+   * a warm and the first `sb_exec` want the container at the same moment, as do
+   * a warm and the install alarm. Two starts means two trust commands through a
+   * half-established connection, the second pushing the tree again behind the
+   * first. Cleared on settle, so the next caller asks about the container that
+   * is there now.
    */
   async #ready(): Promise<void> {
+    this.#readying ??= this.#readyNow().finally(() => {
+      this.#readying = undefined;
+    });
+    return this.#readying;
+  }
+
+  /** One start, run for whoever got there first — see {@link #ready}. */
+  async #readyNow(): Promise<void> {
     if (!this.ctx.container?.running) {
       this.#trust.forget();
       /**
@@ -652,10 +693,15 @@ export abstract class WorkspaceObjectBase<
       storage: this.ctx.storage as unknown as DurableObjectStorageLike,
       backends: [this.backend],
       // One line per committed sync block and one per finished operation, into
-      // the same Workers Observability view as the spans below. It is the only
-      // measurement of what a pull actually costs — blocks, entries, bytes, and
-      // the CPU headroom each block left — which is what a dependency tree
-      // crossing into this object's SQLite makes worth having.
+      // the same Workers Observability view as the spans below — blocks,
+      // entries, bytes, and the CPU headroom each block left, which is what a
+      // dependency tree crossing into this object's SQLite makes worth having.
+      //
+      // **It covers the syncs this object drives, not the ones a command drives
+      // for itself.** `pull()` and `push()` log; the push a `runtime.exec` does
+      // before it spawns — the expensive one, since a fresh container takes the
+      // whole tree — logs nothing. Its cost shows up as a `workspace.sync.push`
+      // span, and on `ca-trust.ts`'s line.
       syncTelemetryEnabled: true,
       // One span per sync push, sync pull, exec spawn and filesystem op, into
       // the same Workers Observability view the rest of this Worker traces to.
@@ -729,6 +775,58 @@ export abstract class WorkspaceObjectBase<
     await this.#install.armIfTreeMissing();
     await this.#ready();
     return this.#workspace.stub();
+  }
+
+  /**
+   * The same workspace, for a caller that will only touch the filesystem.
+   *
+   * **The container is not started, and that is the whole difference.** The
+   * filesystem is this object's own SQLite, so a read or write of it needs no
+   * container and an absent one cannot block it. {@link __getWorkspaceStub} adds
+   * `#ready()`, and the first command in a fresh container re-pushes the whole
+   * tree before it runs — minutes, on a checkout carrying `node_modules`, with
+   * `timeoutMs` reaching the spawned process and nothing earlier. That wait used
+   * to sit in front of every file tool.
+   *
+   * A stub cannot enforce what the caller does with it: `runtime.exec` on this
+   * one would run against a container with no CA. The exec paths take the other
+   * method — see `openWorkspaceFs` in `@dynamicagents/plugins/computer`.
+   */
+  async __getWorkspaceFsStub(): Promise<WorkspaceStub> {
+    await this.#touch();
+    await this.#repairAlarm();
+    await this.#install.armIfTreeMissing();
+    await this.#warmIfCold();
+    // Indexes mounts and nothing else — no backend connects here, which is what
+    // makes this cheap enough to sit in front of every file tool.
+    await this.#workspace.ready();
+    return this.#workspace.stub();
+  }
+
+  /**
+   * Ask the alarm to start the container, so the first `sb_exec` finds one that
+   * is up and already holding the tree.
+   *
+   * What this avoids is the push, not the boot — see {@link __getWorkspaceFsStub}.
+   * Moving it to the alarm overlaps it with the model's reading.
+   *
+   * **Only for a workspace with a checkout in it**, since an empty one has
+   * nothing to push and nothing to run, and a container it never uses still
+   * bills.
+   *
+   * Only the arming is awaited. A warm that fails costs the next `sb_exec` the
+   * start it would have paid for anyway.
+   */
+  async #warmIfCold(): Promise<void> {
+    // The case on every call but the first, which is what keeps the reads below
+    // off the per-tool-call cost.
+    if (this.ctx.container?.running) return;
+    // Already starting — `#ready()` dedupes that, but arming again would queue a
+    // wake-up for work in progress.
+    if (this.#readying) return;
+    const record = await this.ctx.storage.get<CheckoutRecord>(CHECKOUT_KEY);
+    if (!record?.dir) return;
+    await this.#containerWarm.set(new Date());
   }
 
   /**
@@ -1235,6 +1333,29 @@ export abstract class WorkspaceObjectBase<
       id: this.ctx.id.toString(),
       idleMinutes: Math.round(idleMs / 60_000)
     });
+  }
+
+  /**
+   * The container-warm wake came due — see {@link #warmIfCold}.
+   *
+   * **Swallows its own failure.** Every other wake here is work somebody waits
+   * for; this one is early, so a container that will not start must cost the
+   * next `sb_exec` a start rather than put the scheduler's retry ladder behind a
+   * deployment fault that will refuse for as long as it stands.
+   */
+  async #onContainerWarm(): Promise<void> {
+    // Started between the arming and now, so there is nothing to be early for.
+    // Trust it may still be missing is `#ready()`'s, on the next call that wants
+    // the container.
+    if (this.ctx.container?.running) return;
+    try {
+      await this.#ready();
+    } catch (err) {
+      console.warn(`[${this.#tag}] could not warm the container`, {
+        id: this.ctx.id.toString(),
+        err: String(err)
+      });
+    }
   }
 
   /** The container-idle deadline came due. */
