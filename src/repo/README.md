@@ -46,11 +46,15 @@ refuses a mismatch, which is the same reach `forgeRepo` denies everywhere else.
 
 ## Nothing is held for approval
 
-`repo_open_pr` was, and the deployment that installs this decided a pull request
-is not a call worth stopping for: it is the point of the work, it lands on a
-branch, and it is reviewable after the fact. The machinery is untouched in core —
-`AgentPlugin.mainAgentToolApproval` and `withoutToolApproval` are both still
-there — so a fork that wants the gate back declares a rule and gets it.
+No tool here declares a `mainAgentToolApproval` rule, opening a pull request
+included. A pull request is the point of the work, it lands on a branch, and it is
+reviewable after the fact — so stopping a round to ask about one buys nothing that
+the review itself does not.
+
+That is a judgement about these calls, not a limitation of the plugin contract. A
+fork that wants a gate declares a rule on the tools it cares about; a host that
+wants one dropped without touching this package wraps the plugin in core's
+`withoutToolApproval`.
 
 Two injected dependencies, and the line between them is the trust boundary rather
 than a matter of taste. `exec` is anything that runs a command in the container —

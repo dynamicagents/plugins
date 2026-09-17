@@ -346,6 +346,12 @@ const FORGE_PAGE_SIZE = 100;
  */
 const MAX_THREAD_PAGES = 10;
 
+/** One comment in a thread. */
+interface ThreadComment {
+  author?: { login?: string };
+  body?: string;
+}
+
 /** One review thread, as {@link REVIEW_THREADS_QUERY} selects it. */
 interface ReviewThread {
   id: string;
@@ -353,8 +359,21 @@ interface ReviewThread {
   isOutdated?: boolean;
   path?: string;
   line?: number | null;
-  comments?: { nodes?: { author?: { login?: string }; body?: string }[] };
+  /** The comment that opened it — the reviewer's actual point. */
+  opening?: { nodes?: ThreadComment[] };
+  /** The end of the conversation, including any reply this plugin sent. */
+  latest?: { totalCount?: number; nodes?: ThreadComment[] };
 }
+
+/**
+ * How much of one thread's conversation is read back.
+ *
+ * Both ends, because the two uses pull opposite ways: what the reviewer asked for
+ * is at the top, and whether a reply landed is at the bottom. A thread shorter
+ * than this is returned whole and the two selections are the same comments, which
+ * is why the render de-duplicates on the count rather than on the text.
+ */
+const MAX_THREAD_COMMENTS = 6;
 
 /** One page of them. */
 interface ThreadPage {
@@ -375,9 +394,8 @@ interface ThreadOwner {
  *
  * `isResolved` is the field the whole workflow turns on and REST does not expose
  * at all — which is why these three operations are GraphQL while everything else
- * in this file is REST. One comment per thread: the first is what the reviewer
- * said, and the rest are the conversation under it, which a model deciding what
- * to fix does not need and which would dominate the output bound.
+ * in this file is REST. Both ends of each thread are selected; see
+ * {@link MAX_THREAD_COMMENTS} for why one end is not enough.
  */
 const REVIEW_THREADS_QUERY = `
   query($owner:String!,$repo:String!,$number:Int!,$after:String){
@@ -385,7 +403,11 @@ const REVIEW_THREADS_QUERY = `
       pullRequest(number:$number){
         reviewThreads(first:${FORGE_PAGE_SIZE},after:$after){
           pageInfo{hasNextPage endCursor}
-          nodes{id isResolved isOutdated path line comments(first:1){nodes{author{login} body}}}
+          nodes{
+            id isResolved isOutdated path line
+            opening: comments(first:1){nodes{author{login} body}}
+            latest: comments(last:${MAX_THREAD_COMMENTS}){totalCount nodes{author{login} body}}
+          }
         }
       }
     }
@@ -412,6 +434,53 @@ const THREAD_RESOLVE_MUTATION = `
   mutation($id:ID!){
     resolveReviewThread(input:{threadId:$id}){thread{isResolved}}
   }`;
+
+/**
+ * Where GraphQL lives, given where REST does.
+ *
+ * On github.com they share an origin and `/graphql` hangs off it. On GitHub
+ * Enterprise — which {@link RepoConfig.apiBase} exists for — REST is under
+ * `/api/v3` and GraphQL is its **sibling** at `/api/graphql`, not a path beneath
+ * it. Appending blindly yields `/api/v3/graphql`, which is a 404 on every
+ * Enterprise install and no failure at all on the public API, so the mistake
+ * survives every test written against github.com.
+ */
+export function graphqlEndpoint(apiBase: string): string {
+  const trimmed = apiBase.replace(/\/+$/, "");
+  const enterprise = trimmed.replace(/\/api\/v3$/, "/api/graphql");
+  return enterprise === trimmed ? `${trimmed}/graphql` : enterprise;
+}
+
+/** One thread, as the model reads it: where it is, its id, and the conversation. */
+function renderThread(t: ReviewThread): string {
+  const where = t.path
+    ? `${t.path}${typeof t.line === "number" ? `:${t.line}` : ""}`
+    : "(no file)";
+  const total = t.latest?.totalCount ?? 0;
+  const tail = t.latest?.nodes ?? [];
+  // Whole when it fits, and both ends with the middle named when it does not.
+  // The opening comment is the reviewer's actual point and the tail is where a
+  // reply this plugin sent would be, so neither end can be the one dropped.
+  const conversation =
+    total > tail.length
+      ? [
+          ...(t.opening?.nodes ?? []),
+          {
+            author: { login: "…" },
+            body: `(${total - tail.length - 1} earlier replies not shown)`
+          },
+          ...tail
+        ]
+      : tail;
+
+  return [
+    `--- ${where}${t.isResolved ? " [resolved]" : ""}${t.isOutdated ? " [outdated]" : ""}`,
+    `id: ${t.id}`,
+    ...conversation.map(
+      (c) => `${c.author?.login ?? "unknown"}: ${c.body ?? ""}`
+    )
+  ].join("\n");
+}
 
 /**
  * The owner and repository as their own names, rather than as REST path segments.
@@ -570,6 +639,7 @@ function repoSurface(
 ): { tools: ToolSet } {
   const workdir = config.workdir ?? DEFAULT_WORKDIR;
   const apiBase = config.apiBase ?? DEFAULT_API_BASE;
+  const graphqlUrl = graphqlEndpoint(apiBase);
   const author = config.author ?? DEFAULT_AUTHOR;
   const allowedHosts = config.allowedHosts ?? DEFAULT_ALLOWED_HOSTS;
   const maxChars = config.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
@@ -812,9 +882,21 @@ function repoSurface(
    * its own sentence to add: a POST whose answer never arrived may have been
    * received, which a GET has no reason to warn about.
    */
-  const forge = async (
+  const forge = (
     tool: string,
     path: string,
+    init?: { method: string; body: unknown }
+  ) => forgeAt(tool, `${apiBase}${path}`, init);
+
+  /**
+   * The same call, against a URL rather than a path under {@link apiBase}.
+   *
+   * GraphQL needs it: on Enterprise the REST base carries `/api/v3` and GraphQL
+   * does not live under it — see {@link graphqlEndpoint}.
+   */
+  const forgeAt = async (
+    tool: string,
+    url: string,
     init?: { method: string; body: unknown }
   ): Promise<{ ok: true; data: unknown } | { ok: false; message: string }> => {
     const secret = credential();
@@ -824,7 +906,7 @@ function repoSurface(
     }
     let response: Response;
     try {
-      response = await fetch(`${apiBase}${path}`, {
+      response = await fetch(url, {
         method: init?.method ?? "GET",
         headers: {
           authorization: `Bearer ${secret.token}`,
@@ -837,17 +919,14 @@ function repoSurface(
       });
     } catch (err) {
       logFailure(tool, { stderr: String(err) });
-      return {
-        ok: false,
-        message: `could not reach ${apiBase}: ${String(err)}`
-      };
+      return { ok: false, message: `could not reach ${url}: ${String(err)}` };
     }
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       logFailure(tool, { exitCode: response.status, stderr: detail });
       return {
         ok: false,
-        message: `${apiBase}${path} answered ${response.status}: ${detail.slice(0, 500)}`
+        message: `${url} answered ${response.status}: ${detail.slice(0, 500)}`
       };
     }
     return { ok: true, data: await response.json().catch(() => ({})) };
@@ -873,7 +952,7 @@ function repoSurface(
     query: string,
     variables: Record<string, unknown>
   ): Promise<{ ok: true; data: unknown } | { ok: false; message: string }> => {
-    const answered = await forge(tool, "/graphql", {
+    const answered = await forgeAt(tool, graphqlUrl, {
       method: "POST",
       body: { query, variables }
     });
@@ -889,7 +968,7 @@ function repoSurface(
       logFailure(tool, { stderr: detail });
       return {
         ok: false,
-        message: `${apiBase}/graphql refused the query: ${detail.slice(0, 500)}`
+        message: `${graphqlUrl} refused the query: ${detail.slice(0, 500)}`
       };
     }
     return { ok: true, data: body.data };
@@ -1693,23 +1772,37 @@ function repoSurface(
           `/repos/${owner}/${repo}/pulls/${number}/reviews?per_page=${FORGE_PAGE_SIZE}`
         );
         if (!reviews.ok) return bounded(reviews.message);
-        const submitted = (
-          reviews.data as {
-            user?: { login?: string };
-            state?: string;
-            submitted_at?: string;
-          }[]
-        ).filter((r) => r.user?.login?.toLowerCase() === login);
+        const all = reviews.data as {
+          user?: { login?: string };
+          state?: string;
+          submitted_at?: string;
+        }[];
+        const submitted = all.filter(
+          (r) =>
+            r.user?.login?.toLowerCase() === login &&
+            // A `PENDING` review is a draft its author has not sent, and it is
+            // visible to whoever holds the token that wrote it. Counting one as
+            // finished reports a review nobody has read, which is the answer a
+            // poll loop acts on by stopping.
+            (r.state ?? "").toUpperCase() !== "PENDING"
+        );
 
         const theirs = submitted.at(-1);
         if (!theirs) {
-          const crowded =
-            (reviews.data as unknown[]).length >= FORGE_PAGE_SIZE
-              ? `\n(this pull request has at least ${FORGE_PAGE_SIZE} reviews and only the first were read, so an older one from ${who} may exist)`
-              : "";
+          // The endpoint pages oldest-first, so a match beyond the first page is
+          // **newer** than everything read — which is to say it is exactly the
+          // review being waited for. So a truncated read cannot answer the
+          // question at all, and must not answer it with "waiting will not help":
+          // that is the one reply a caller ends its polling on.
+          if (all.length >= FORGE_PAGE_SIZE)
+            return bounded(
+              `#${number} has at least ${FORGE_PAGE_SIZE} reviews and only the oldest were read, ` +
+                `so whether ${who} has reviewed it is unknown. Read the pull request itself with repo_pr_view, ` +
+                `or look for threads with repo_pr_threads.`
+            );
           return bounded(
             `#${number} has no review from ${who}, and none is pending. ` +
-              `Nobody asked them, or the request was withdrawn — waiting will not change it.${crowded}`
+              `Nobody asked them, or the request was withdrawn — waiting will not change it.`
           );
         }
         return bounded(
@@ -1771,37 +1864,31 @@ function repoSurface(
           if (!after) break;
         }
 
+        // Said once, and said on **every** exit including the empty one. A run
+        // that stopped early and found nothing open in what it did read must not
+        // answer "nothing to do": the unread pages are exactly where the newest
+        // threads are, which is the false-clean result the paging exists to
+        // prevent — reintroduced at the one exit that skipped the warning.
+        const unread = truncated
+          ? `\n\n(stopped after ${MAX_THREAD_PAGES} pages, so this is not the whole review — there are more threads than were read)`
+          : "";
+
         const shown = includeResolved
           ? threads
           : threads.filter((t) => !t.isResolved);
         if (shown.length === 0)
-          return includeResolved
-            ? `#${number} has no review threads.`
-            : `#${number} has no unresolved review threads.` +
+          return bounded(
+            (includeResolved
+              ? `#${number} has no review threads.`
+              : `#${number} has no unresolved review threads.` +
                 (threads.length > 0
                   ? ` (${threads.length} resolved — pass includeResolved to read them.)`
-                  : "");
+                  : "")) + unread
+          );
 
-        const rendered = shown
-          .map((t) => {
-            const first = t.comments?.nodes?.[0];
-            const where = t.path
-              ? `${t.path}${typeof t.line === "number" ? `:${t.line}` : ""}`
-              : "(no file)";
-            return [
-              `--- ${where}${t.isResolved ? " [resolved]" : ""}${t.isOutdated ? " [outdated]" : ""}`,
-              `id: ${t.id}`,
-              `${first?.author?.login ?? "unknown"}: ${first?.body ?? ""}`
-            ].join("\n");
-          })
-          .join("\n\n");
+        const rendered = shown.map((t) => renderThread(t)).join("\n\n");
 
-        return bounded(
-          rendered +
-            (truncated
-              ? `\n\n(stopped after ${MAX_THREAD_PAGES} pages; this pull request has more threads than were read)`
-              : "")
-        );
+        return bounded(rendered + unread);
       }
     }),
 
@@ -1814,7 +1901,12 @@ function repoSurface(
         threadId: z
           .string()
           .describe("The thread's id, exactly as repo_pr_threads printed it"),
-        body: z.string().describe("The reply, as markdown"),
+        body: z
+          .string()
+          .optional()
+          .describe(
+            "The reply, as markdown. Leave it out to resolve a thread you have already replied to."
+          ),
         resolve: z
           .boolean()
           .optional()
@@ -1850,6 +1942,23 @@ function repoSurface(
             `Read the ids for this pull request with repo_pr_threads.`
           );
 
+        // Resolve-only. The reply and the resolve are two calls, so they fail
+        // independently — and the tool that tells a caller "the reply landed,
+        // resolve it alone" has to give it a way to do that. Without this the
+        // only route back is a second reply the reviewer has already read.
+        if (body === undefined) {
+          if (resolve === false)
+            return "nothing to do: give a body to reply, or leave resolve unset to resolve the thread";
+          const only = await forgeGraphql(
+            "repo_pr_thread_reply",
+            THREAD_RESOLVE_MUTATION,
+            { id: threadId }
+          );
+          return only.ok
+            ? `resolved ${threadId}`
+            : bounded(`resolving the thread failed: ${only.message}`);
+        }
+
         const replied = await forgeGraphql(
           "repo_pr_thread_reply",
           THREAD_REPLY_MUTATION,
@@ -1884,7 +1993,8 @@ function repoSurface(
         if (!resolved.ok)
           return bounded(
             `replied: ${url}\nbut resolving the thread failed: ${resolved.message}\n` +
-              `The reply has landed — do not send it again; resolve the thread alone.`
+              `The reply has landed — do not send it again. Call repo_pr_thread_reply on the same ` +
+              `threadId with no body to resolve it on its own.`
           );
         return `replied and resolved: ${url}`;
       }
@@ -1895,13 +2005,8 @@ function repoSurface(
 }
 
 /**
- * Nothing here is held for a person's approval.
- *
- * `repo_open_pr` was, and the deployment that installed it decided a pull request
- * is not a call worth stopping for: it is the point of the work, it is reviewable
- * after the fact, and it lands on a branch. The machinery is untouched in core —
- * `AgentPlugin.mainAgentToolApproval` and `withoutToolApproval` are both still
- * there — so a fork that wants the gate back declares a rule and gets it.
+ * No tool here is held for a person's approval — see this plugin's README for
+ * why, and for what a fork that wants one does instead.
  */
 export function repo(config: RepoConfig): AgentPlugin {
   return definePlugin({

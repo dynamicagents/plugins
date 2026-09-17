@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   buildRepoTools,
+  graphqlEndpoint,
   repo,
   type RepoConfig,
   type RepoExec,
@@ -1560,11 +1561,10 @@ describe("concurrent git", () => {
 /**
  * Nothing here is held for a person.
  *
- * `repo_open_pr` was the only gated call, and the deployment that installs this
- * decided a pull request is not worth stopping for: it is the point of the work,
- * it lands on a branch, and it is reviewable after the fact. Pinned so a rule
- * re-added by accident — or carried back in by a merge — is caught here rather
- * than as a task that parks waiting for an approval nobody expects.
+ * Pinned because the failure is silent from both directions: a rule that appears
+ * parks a round waiting for an approval nobody is expecting, and one that
+ * disappears lets a gated call through unasked. The README carries which calls
+ * are gated and why.
  */
 describe("what a person approves before it runs", () => {
   it("declares no approval rules at all", () => {
@@ -1623,15 +1623,20 @@ describe("a review, and answering it", () => {
         }
       );
 
+  const comment = (login: string, body: string) => ({
+    author: { login },
+    body
+  });
+
+  /** A thread whose conversation fits, so both selections are the same comments. */
   const thread = (over: Record<string, unknown> = {}) => ({
     id: "PRRT_1",
     isResolved: false,
     isOutdated: false,
     path: "src/config.ts",
     line: 109,
-    comments: {
-      nodes: [{ author: { login: "Copilot" }, body: "validate this" }]
-    },
+    opening: { nodes: [comment("Copilot", "validate this")] },
+    latest: { totalCount: 1, nodes: [comment("Copilot", "validate this")] },
     ...over
   });
 
@@ -1718,6 +1723,57 @@ describe("a review, and answering it", () => {
       }
     });
 
+    it("does not count a draft review as finished", async () => {
+      // A PENDING review is one its author has not sent, and it is visible to
+      // whoever holds the token that wrote it. Counted as finished, it reports a
+      // review nobody has read — which a poll loop acts on by stopping.
+      const spy = forgeStub({
+        rest: {
+          "/requested_reviewers": { users: [] },
+          "/pulls/42/reviews": [
+            { user: { login: "Copilot" }, state: "PENDING" }
+          ]
+        }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).not.toContain("reviewed");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("says it does not know when the reviews it read were only the oldest", async () => {
+      // The endpoint pages oldest-first, so a match past the first page is
+      // *newer* than everything read — which is exactly the review being waited
+      // for. A truncated read cannot answer, and must not answer "waiting will
+      // not help": that is the one reply a caller ends its polling on.
+      const spy = forgeStub({
+        rest: {
+          "/requested_reviewers": { users: [] },
+          "/pulls/42/reviews": Array.from({ length: 100 }, () => ({
+            user: { login: "someone-else" },
+            state: "COMMENTED"
+          }))
+        }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).toContain("unknown");
+        expect(result).not.toContain("waiting will not change it");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("says waiting will not help when nobody was asked", async () => {
       const spy = forgeStub({
         rest: { "/requested_reviewers": { users: [] }, "/pulls/42/reviews": [] }
@@ -1794,6 +1850,54 @@ describe("a review, and answering it", () => {
         });
         expect(result).toContain("Resource not accessible");
         expect(result).not.toContain("no unresolved review threads");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("never reports clean on a review it did not finish reading", async () => {
+      // The false-clean result paging exists to prevent, at the one exit that
+      // used to skip the warning: a run that stopped early and found nothing
+      // open in what it read. The unread pages are where the newest threads are.
+      const spy = forgeStub({
+        graphql: () =>
+          threadsPage([thread({ isResolved: true })], "always-more")
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("not the whole review");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("shows both ends of a thread that grew past the window", async () => {
+      // The reviewer's point is at the top and a reply this plugin sent is at
+      // the bottom, so neither end can be the one dropped — and what is missing
+      // is named rather than silently absent.
+      const spy = forgeStub({
+        graphql: () =>
+          threadsPage([
+            thread({
+              opening: { nodes: [comment("Copilot", "the original point")] },
+              latest: {
+                totalCount: 9,
+                nodes: [comment("agent", "fixed in abc123")]
+              }
+            })
+          ])
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("the original point");
+        expect(result).toContain("fixed in abc123");
+        expect(result).toContain("7 earlier replies not shown");
       } finally {
         spy.mockRestore();
       }
@@ -1881,6 +1985,23 @@ describe("a review, and answering it", () => {
       }
     });
 
+    it("resolves on its own, which is the recovery it tells callers to use", async () => {
+      // The reply and the resolve fail independently, so a tool that says "the
+      // reply landed, resolve it alone" has to give a way to do that. Without
+      // it the only route back is a second reply the reviewer has already read.
+      const spy = forgeStub({ graphql: answer });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_thread_reply",
+          { dir: "/w/r", number: 42, threadId: "PRRT_1" }
+        );
+        expect(result).toContain("resolved PRRT_1");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("refuses a thread belonging to another repository", async () => {
       // The one input here that can name a pull request nobody checked out — a
       // node id is global. Every other tool derives the repository from the
@@ -1928,9 +2049,34 @@ describe("a review, and answering it", () => {
         );
         expect(result).toContain("discussion_r1");
         expect(result).toContain("do not send it again");
+        // Naming a recovery the API does not offer is worse than naming none.
+        expect(result).toContain("with no body");
       } finally {
         spy.mockRestore();
       }
     });
+  });
+});
+
+/**
+ * The two places a forge that is not github.com changes the answer.
+ *
+ * Both are invisible on the public API, which is what every other spec here runs
+ * against — so nothing but a case named after Enterprise catches either.
+ */
+describe("GitHub Enterprise", () => {
+  it("puts GraphQL beside the REST base, not underneath it", () => {
+    // `/api/v3/graphql` is a 404 on every Enterprise install and a URL nothing
+    // here would ever request on github.com, so the mistake survives every test
+    // written against the public API.
+    expect(graphqlEndpoint("https://ghe.example.com/api/v3")).toBe(
+      "https://ghe.example.com/api/graphql"
+    );
+    expect(graphqlEndpoint("https://ghe.example.com/api/v3/")).toBe(
+      "https://ghe.example.com/api/graphql"
+    );
+    expect(graphqlEndpoint("https://api.github.com")).toBe(
+      "https://api.github.com/graphql"
+    );
   });
 });
