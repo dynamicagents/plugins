@@ -240,15 +240,12 @@ describe("buildLaunch", () => {
   });
 
   /**
-   * There is no turn ceiling to pass, and that is the point of the assertion:
-   * the flag bounds nothing this package can see — the inner subagent tree
-   * multiplies it — while ending a long session mid-edit at a number chosen
-   * without reference to the task. `timeoutMs` is the ceiling.
+   * Handed one anyway, through a helper loose enough to accept it — otherwise
+   * this passes against an implementation that still emits the flag. The README
+   * says why the package does not offer it.
    */
   it("never passes a turn ceiling, whatever it is handed", () => {
-    expect(launch({ model: "claude-opus-5" }).command).not.toContain(
-      "--max-turns"
-    );
+    expect(launch({ maxTurns: 30 }).command).not.toContain("--max-turns");
   });
 
   /**

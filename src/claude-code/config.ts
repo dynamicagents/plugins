@@ -87,10 +87,9 @@ export interface ClaudeCodeConfig {
    *
    * Unset, the model's own default applies, which is `high` for the frontier
    * models this plugin exists to reach. Raising it buys depth at a multiple of
-   * the spend, and the client's own cost table is the place that multiple is
-   * legible: against `high`, Opus 5 prices `xhigh` at 1.6x and `max` at 1.7x.
-   * That multiplies against a subscription bucket nobody can read, so the level
-   * decides how many sessions a credential holds, not just how well one thinks.
+   * the spend, per turn — so the level decides how many sessions a credential
+   * holds, not just how well one thinks. The README's Costs section carries the
+   * multiples and the sizing they imply.
    *
    * Not to be confused with the host round loop's own reasoning effort, which
    * belongs to a different model on the Worker side. This one reaches only the
