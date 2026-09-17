@@ -2,7 +2,7 @@ import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
 import { definePlugin } from "@dynamicagents/core";
-import type { AgentPlugin, MainAgentToolApproval } from "@dynamicagents/core";
+import type { AgentPlugin } from "@dynamicagents/core";
 import {
   DEFAULT_ALLOWED_HOSTS,
   parseRepo,
@@ -334,6 +334,104 @@ const FORGE_TIMEOUT_MS = 30_000;
 const FORGE_PAGE_SIZE = 100;
 
 /**
+ * How many pages of review threads one `repo_pr_threads` call will walk.
+ *
+ * A bound rather than a full walk, for the reason {@link FORGE_PAGE_SIZE} is one
+ * — but unlike the single page everything else here takes, threads genuinely
+ * have to page: a review long enough to spill one puts its newest threads on the
+ * last page, and those are exactly the ones an agent was sent to answer. So this
+ * is high enough that a real review never reaches it and low enough that a
+ * pathological pull request cannot turn one tool call into an unbounded number of
+ * round trips.
+ */
+const MAX_THREAD_PAGES = 10;
+
+/** One review thread, as {@link REVIEW_THREADS_QUERY} selects it. */
+interface ReviewThread {
+  id: string;
+  isResolved?: boolean;
+  isOutdated?: boolean;
+  path?: string;
+  line?: number | null;
+  comments?: { nodes?: { author?: { login?: string }; body?: string }[] };
+}
+
+/** One page of them. */
+interface ThreadPage {
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+  nodes?: ReviewThread[];
+}
+
+/** What {@link THREAD_OWNER_QUERY} returns for a thread id. */
+interface ThreadOwner {
+  pullRequest?: {
+    number?: number;
+    repository?: { nameWithOwner?: string };
+  } | null;
+}
+
+/**
+ * The review threads on one pull request.
+ *
+ * `isResolved` is the field the whole workflow turns on and REST does not expose
+ * at all — which is why these three operations are GraphQL while everything else
+ * in this file is REST. One comment per thread: the first is what the reviewer
+ * said, and the rest are the conversation under it, which a model deciding what
+ * to fix does not need and which would dominate the output bound.
+ */
+const REVIEW_THREADS_QUERY = `
+  query($owner:String!,$repo:String!,$number:Int!,$after:String){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){
+        reviewThreads(first:${FORGE_PAGE_SIZE},after:$after){
+          pageInfo{hasNextPage endCursor}
+          nodes{id isResolved isOutdated path line comments(first:1){nodes{author{login} body}}}
+        }
+      }
+    }
+  }`;
+
+/** Which pull request, in which repository, a thread id names. */
+const THREAD_OWNER_QUERY = `
+  query($id:ID!){
+    node(id:$id){
+      ... on PullRequestReviewThread {
+        pullRequest{number repository{nameWithOwner}}
+      }
+    }
+  }`;
+
+const THREAD_REPLY_MUTATION = `
+  mutation($id:ID!,$body:String!){
+    addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){
+      comment{url}
+    }
+  }`;
+
+const THREAD_RESOLVE_MUTATION = `
+  mutation($id:ID!){
+    resolveReviewThread(input:{threadId:$id}){thread{isResolved}}
+  }`;
+
+/**
+ * The owner and repository as their own names, rather than as REST path segments.
+ *
+ * {@link forgeRepo} percent-encodes both, because that is what makes a path safe.
+ * A GraphQL *variable* is not a path — it is compared against the repository's
+ * actual name — so an encoded one would silently stop matching the moment a name
+ * contains a character worth encoding.
+ */
+function decoded(target: { owner: string; repo: string }): {
+  owner: string;
+  repo: string;
+} {
+  return {
+    owner: decodeURIComponent(target.owner),
+    repo: decodeURIComponent(target.repo)
+  };
+}
+
+/**
  * Middle-out truncation, so both the head of a diff and its tail survive.
  *
  * Deliberately a **copy** of the computer plugin's function of the same name,
@@ -465,15 +563,11 @@ export function buildRepoTools(
   return repoSurface(config, runtime).tools;
 }
 
-/**
- * The repo tools, and the approval rule for the one a person approves — one
- * closure, so the rule reads the checkout through the same `origin` the tool it
- * gates runs against. See {@link repoToolApproval}.
- */
+/** The repo tools, as one closure over a caller's config. */
 function repoSurface(
   config: RepoConfig,
   runtime?: unknown
-): { tools: ToolSet; approval: MainAgentToolApproval } {
+): { tools: ToolSet } {
   const workdir = config.workdir ?? DEFAULT_WORKDIR;
   const apiBase = config.apiBase ?? DEFAULT_API_BASE;
   const author = config.author ?? DEFAULT_AUTHOR;
@@ -757,6 +851,48 @@ function repoSurface(
       };
     }
     return { ok: true, data: await response.json().catch(() => ({})) };
+  };
+
+  /**
+   * One GraphQL query or mutation, over {@link forge} so the credential, the
+   * bound, the headers and the scrubbed failure log stay written once.
+   *
+   * **A failed GraphQL query answers `200`.** The errors are in the body, so
+   * `response.ok` means only that the request was understood — a caller reading
+   * `data` straight through reports a permission failure, a bad node id or a
+   * malformed query as an empty result, which reads to the model as "there is
+   * nothing there" and is acted on accordingly. That is the whole reason this
+   * wrapper exists rather than each caller posting to `/graphql` itself.
+   *
+   * Review threads are the only thing here that needs it: resolving one has no
+   * REST equivalent at all, and the threads themselves are not on the issue
+   * timeline that `repo_issue_view` reads.
+   */
+  const forgeGraphql = async (
+    tool: string,
+    query: string,
+    variables: Record<string, unknown>
+  ): Promise<{ ok: true; data: unknown } | { ok: false; message: string }> => {
+    const answered = await forge(tool, "/graphql", {
+      method: "POST",
+      body: { query, variables }
+    });
+    if (!answered.ok) return answered;
+    const body = answered.data as {
+      data?: unknown;
+      errors?: { message?: string }[];
+    };
+    if (body.errors && body.errors.length > 0) {
+      const detail = body.errors
+        .map((e) => e?.message ?? "unknown error")
+        .join("; ");
+      logFailure(tool, { stderr: detail });
+      return {
+        ok: false,
+        message: `${apiBase}/graphql refused the query: ${detail.slice(0, 500)}`
+      };
+    }
+    return { ok: true, data: body.data };
   };
 
   /**
@@ -1508,78 +1644,270 @@ function repoSurface(
         const data = posted.data as { html_url?: string };
         return data.html_url ?? `commented on #${number}`;
       }
+    }),
+
+    repo_pr_review_status: tool({
+      description:
+        "Say whether a reviewer has finished reviewing a pull request in the repository you have checked out. Use it before reading review comments: a review that has not landed has left no comments, and an empty thread list means nothing yet.",
+      inputSchema: z.object({
+        dir: z.string().describe("The checkout directory"),
+        number: z.number().int().positive().describe("Pull request number"),
+        reviewer: z
+          .string()
+          .optional()
+          .describe(
+            'The reviewer to ask about, as their login. Defaults to "Copilot".'
+          )
+      }),
+      execute: async ({ dir, number, reviewer }) => {
+        const target = await forgeRepo(dir);
+        if ("refusal" in target) return target.refusal;
+        const { owner, repo } = target;
+        const who = reviewer ?? "Copilot";
+        const login = who.toLowerCase();
+
+        // A *pending* request outranks any review already on the pull request,
+        // and that ordering is the whole logic here. GitHub clears the request
+        // when a review is submitted and writes a new one when a re-review is
+        // asked for, so "still requested" is true now and "has reviewed" is
+        // about the past. Reading them the other way round reports a re-review
+        // as finished the moment it is asked for.
+        const requested = await forge(
+          "repo_pr_review_status",
+          `/repos/${owner}/${repo}/pulls/${number}/requested_reviewers`
+        );
+        if (!requested.ok) return bounded(requested.message);
+        const waiting = requested.data as {
+          users?: { login?: string }[];
+          teams?: { slug?: string }[];
+        };
+        const pending = [
+          ...(waiting.users ?? []).map((u) => u.login),
+          ...(waiting.teams ?? []).map((t) => t.slug)
+        ].some((name) => name?.toLowerCase() === login);
+        if (pending)
+          return `${who} has been asked to review #${number} and has not finished.`;
+
+        const reviews = await forge(
+          "repo_pr_review_status",
+          `/repos/${owner}/${repo}/pulls/${number}/reviews?per_page=${FORGE_PAGE_SIZE}`
+        );
+        if (!reviews.ok) return bounded(reviews.message);
+        const submitted = (
+          reviews.data as {
+            user?: { login?: string };
+            state?: string;
+            submitted_at?: string;
+          }[]
+        ).filter((r) => r.user?.login?.toLowerCase() === login);
+
+        const theirs = submitted.at(-1);
+        if (!theirs) {
+          const crowded =
+            (reviews.data as unknown[]).length >= FORGE_PAGE_SIZE
+              ? `\n(this pull request has at least ${FORGE_PAGE_SIZE} reviews and only the first were read, so an older one from ${who} may exist)`
+              : "";
+          return bounded(
+            `#${number} has no review from ${who}, and none is pending. ` +
+              `Nobody asked them, or the request was withdrawn — waiting will not change it.${crowded}`
+          );
+        }
+        return bounded(
+          `${who} reviewed #${number}${theirs.submitted_at ? ` at ${theirs.submitted_at}` : ""}` +
+            `${theirs.state ? ` (${theirs.state.toLowerCase()})` : ""}. ` +
+            `Read what it said with repo_pr_threads — a review can finish having left no comments.`
+        );
+      }
+    }),
+
+    repo_pr_threads: tool({
+      description:
+        "Read the review threads on a pull request in the repository you have checked out — the inline comments a reviewer left on specific lines, which are not on the conversation timeline repo_issue_view reads. Unresolved ones only, unless you ask for all.",
+      inputSchema: z.object({
+        dir: z.string().describe("The checkout directory"),
+        number: z.number().int().positive().describe("Pull request number"),
+        includeResolved: z
+          .boolean()
+          .optional()
+          .describe("Include threads already resolved. Defaults to false.")
+      }),
+      execute: async ({ dir, number, includeResolved }) => {
+        const target = await forgeRepo(dir);
+        if ("refusal" in target) return target.refusal;
+        const { owner, repo } = decoded(target);
+
+        const threads: ReviewThread[] = [];
+        let after: string | null = null;
+        let truncated = false;
+        // Paged, and that is not an optimisation. A review long enough to spill a
+        // page puts its newest threads on the last one — exactly the threads the
+        // model was sent to answer — so a single page can report a busy review as
+        // clean. The page cap is what stops a pathological pull request becoming
+        // an unbounded number of round trips.
+        for (let page = 0; ; page++) {
+          if (page >= MAX_THREAD_PAGES) {
+            truncated = true;
+            break;
+          }
+          const answered:
+            { ok: true; data: unknown } | { ok: false; message: string } =
+            await forgeGraphql("repo_pr_threads", REVIEW_THREADS_QUERY, {
+              owner,
+              repo,
+              number,
+              after
+            });
+          if (!answered.ok) return bounded(answered.message);
+          const page_ = (
+            answered.data as {
+              repository?: { pullRequest?: { reviewThreads?: ThreadPage } };
+            }
+          ).repository?.pullRequest?.reviewThreads;
+          if (!page_)
+            return `#${number} is not a pull request in ${owner}/${repo}`;
+          threads.push(...(page_.nodes ?? []));
+          if (!page_.pageInfo?.hasNextPage) break;
+          after = page_.pageInfo.endCursor ?? null;
+          if (!after) break;
+        }
+
+        const shown = includeResolved
+          ? threads
+          : threads.filter((t) => !t.isResolved);
+        if (shown.length === 0)
+          return includeResolved
+            ? `#${number} has no review threads.`
+            : `#${number} has no unresolved review threads.` +
+                (threads.length > 0
+                  ? ` (${threads.length} resolved — pass includeResolved to read them.)`
+                  : "");
+
+        const rendered = shown
+          .map((t) => {
+            const first = t.comments?.nodes?.[0];
+            const where = t.path
+              ? `${t.path}${typeof t.line === "number" ? `:${t.line}` : ""}`
+              : "(no file)";
+            return [
+              `--- ${where}${t.isResolved ? " [resolved]" : ""}${t.isOutdated ? " [outdated]" : ""}`,
+              `id: ${t.id}`,
+              `${first?.author?.login ?? "unknown"}: ${first?.body ?? ""}`
+            ].join("\n");
+          })
+          .join("\n\n");
+
+        return bounded(
+          rendered +
+            (truncated
+              ? `\n\n(stopped after ${MAX_THREAD_PAGES} pages; this pull request has more threads than were read)`
+              : "")
+        );
+      }
+    }),
+
+    repo_pr_thread_reply: tool({
+      description:
+        "Answer one review thread on a pull request in the repository you have checked out, and resolve it. Reply with what you changed and where, or with why you did not — either way the thread ends resolved unless you say otherwise.",
+      inputSchema: z.object({
+        dir: z.string().describe("The checkout directory"),
+        number: z.number().int().positive().describe("Pull request number"),
+        threadId: z
+          .string()
+          .describe("The thread's id, exactly as repo_pr_threads printed it"),
+        body: z.string().describe("The reply, as markdown"),
+        resolve: z
+          .boolean()
+          .optional()
+          .describe("Resolve the thread after replying. Defaults to true.")
+      }),
+      execute: async ({ dir, number, threadId, body, resolve }) => {
+        const target = await forgeRepo(dir);
+        if ("refusal" in target) return target.refusal;
+        const { owner, repo } = decoded(target);
+
+        // A thread id is a global node id, so unlike every other tool here this
+        // one takes something that can name a pull request in a repository
+        // nobody checked out — the reach `forgeRepo` exists to prevent. Checked
+        // rather than trusted: the id came from a tool result the model read,
+        // and a model that misremembers one must not write into a stranger's
+        // review.
+        const belongs = await forgeGraphql(
+          "repo_pr_thread_reply",
+          THREAD_OWNER_QUERY,
+          { id: threadId }
+        );
+        if (!belongs.ok) return bounded(belongs.message);
+        const node = (belongs.data as { node?: ThreadOwner | null }).node;
+        if (!node?.pullRequest)
+          return `${threadId} is not a review thread — read the ids with repo_pr_threads`;
+        const at = node.pullRequest.repository?.nameWithOwner ?? "";
+        if (
+          at.toLowerCase() !== `${owner}/${repo}`.toLowerCase() ||
+          node.pullRequest.number !== number
+        )
+          return (
+            `${threadId} belongs to ${at}#${node.pullRequest.number}, not ${owner}/${repo}#${number}. ` +
+            `Read the ids for this pull request with repo_pr_threads.`
+          );
+
+        const replied = await forgeGraphql(
+          "repo_pr_thread_reply",
+          THREAD_REPLY_MUTATION,
+          { id: threadId, body }
+        );
+        if (!replied.ok)
+          // The hazard `repo_pr_comment` names, and worse here: a reply that
+          // landed and an answer that did not arrive look identical, and the
+          // retry leaves the reviewer two of them.
+          return bounded(
+            `${replied.message}\nIf this was a timeout rather than a rejection the ` +
+              `reply may exist anyway — read the thread back with repo_pr_threads before retrying.`
+          );
+        const url =
+          (
+            replied.data as {
+              addPullRequestReviewThreadReply?: { comment?: { url?: string } };
+            }
+          ).addPullRequestReviewThreadReply?.comment?.url ?? "(no url)";
+
+        if (resolve === false) return `replied: ${url} (left unresolved)`;
+
+        // Reported separately, never folded into the reply's own failure: a
+        // thread that was answered and not resolved needs resolving, and one
+        // that was never answered needs answering. Saying "it failed" covers
+        // both and tells the model to do the wrong one.
+        const resolved = await forgeGraphql(
+          "repo_pr_thread_reply",
+          THREAD_RESOLVE_MUTATION,
+          { id: threadId }
+        );
+        if (!resolved.ok)
+          return bounded(
+            `replied: ${url}\nbut resolving the thread failed: ${resolved.message}\n` +
+              `The reply has landed — do not send it again; resolve the thread alone.`
+          );
+        return `replied and resolved: ${url}`;
+      }
     })
   };
 
-  /**
-   * Where a pull request is opened, as the person approving it reads it: the
-   * host, owner and repository of the checkout's origin — what the tool resolves
-   * when it runs. Never the directory's name, which says nothing about where
-   * `.git/config` points. A checkout with no readable origin on an allowed host is
-   * named by its path, and the tool refuses it when it runs.
-   */
-  const destination = async (dir: string): Promise<string> => {
-    const { remote } = await origin(dir);
-    const parsed = remote ? parseRepo(remote.url, allowedHosts) : undefined;
-    return remote && parsed
-      ? `${remote.host}/${parsed.owner}/${parsed.repo}`
-      : `the checkout at ${approvalField(dir)}, whose origin could not be read`;
-  };
-
-  const approval: MainAgentToolApproval = {
-    repo_open_pr: async (input) => {
-      const { dir, head, base, title } = input as {
-        dir: string;
-        head: string;
-        base: string;
-        title: string;
-      };
-      return {
-        type: "user-approval",
-        reason: `Open a pull request on ${await destination(dir)} from \`${approvalField(head)}\` into \`${approvalField(base)}\`: ${approvalField(title)}`
-      };
-    }
-  };
-
-  return { tools, approval };
+  return { tools };
 }
 
 /**
- * The longest branch, title or path a person is shown in full before approving.
- * Every model-supplied field in a reason is cut to it, so no one input can bury
- * the rest of what they are deciding.
- */
-const APPROVAL_FIELD_CHARS = 200;
-
-/** One model-supplied field of an approval reason, cut to {@link APPROVAL_FIELD_CHARS}. */
-function approvalField(text: string): string {
-  return text.length <= APPROVAL_FIELD_CHARS
-    ? text
-    : `${text.slice(0, APPROVAL_FIELD_CHARS - 1)}…`;
-}
-
-/**
- * The repo tools a person approves before they run: opening a pull request, and
- * nothing else. Pushing a work branch and commenting run without asking.
+ * Nothing here is held for a person's approval.
  *
- * The reason is what the person reads beside Approve and Reject, so it says what
- * the call will do in their terms: which repository, from which branch into
- * which, and under what title. The repository is the checkout's origin, read
- * through the same lookup the tool runs, so a directory named after one
- * repository cannot present a pull request on another. The input has already
- * passed the tool's own schema. What a rule is, and whose calls it covers, is
- * core's to say — see `AgentPlugin.mainAgentToolApproval`.
+ * `repo_open_pr` was, and the deployment that installed it decided a pull request
+ * is not a call worth stopping for: it is the point of the work, it is reviewable
+ * after the fact, and it lands on a branch. The machinery is untouched in core —
+ * `AgentPlugin.mainAgentToolApproval` and `withoutToolApproval` are both still
+ * there — so a fork that wants the gate back declares a rule and gets it.
  */
-export function repoToolApproval(config: RepoConfig): MainAgentToolApproval {
-  return repoSurface(config).approval;
-}
-
 export function repo(config: RepoConfig): AgentPlugin {
   return definePlugin({
     key: "repo",
 
     mainAgentTools: () => buildRepoTools(config),
-    mainAgentToolApproval: () => repoToolApproval(config),
 
     // The runtime state goes through to `exec` untouched, so a delegated
     // subtask's git commands run in the same container its parent cloned into.
@@ -1595,6 +1923,8 @@ export function repo(config: RepoConfig): AgentPlugin {
       "- `repo_push` pushes a work branch. It refuses the default branch and other protected names, and it refuses a branch carrying no commits the default branch does not already have — that is not negotiable.",
       "- `repo_open_pr` opens the pull request and returns its URL.",
       "- `repo_issue_view` reads an issue or pull request with its comments, `repo_pr_view` shows a pull request's state and the files it touches, and `repo_pr_comment` leaves a comment. All three act on the repository you have checked out — read the issue a task refers to before guessing what it asks for.",
+      "- `repo_pr_review_status` says whether a reviewer has finished. Ask it before reading a review: one that has not landed has left nothing, so an empty list of threads means nothing yet rather than nothing to do.",
+      "- `repo_pr_threads` reads the review threads — the comments left on particular lines, which are not on the timeline `repo_issue_view` shows. `repo_pr_thread_reply` answers one and resolves it. Answer every thread: say what you changed and where, or why you did not, and resolve it either way so the record says what happened.",
       "Never push to the default branch. Finish by opening a pull request and reporting its URL."
     ].join("\n"),
 
