@@ -4,6 +4,7 @@ import type {
   WorkspaceRuntimeExecHandle
 } from "@cloudflare/computer";
 import {
+  attachRun,
   buildLaunch,
   drainRun,
   execIdFor,
@@ -678,6 +679,100 @@ describe("startRun", () => {
         timeoutMs: 1000
       })
     ).rejects.toThrow(/no container/);
+  });
+});
+
+/**
+ * Waiting out the previous window's attachment.
+ *
+ * A chunk boundary asks for the exec's stream within milliseconds of the last
+ * window returning it, and the release on the far side is asynchronous — so the
+ * container answers "already has a live subscriber" and the condition clears on
+ * its own. Left to the Workflow it costs a retry each time, out of the budget a
+ * deploy, a severed stub and a network drop also have to come from: a deployment
+ * lost a twenty-one-minute session because consecutive races used that budget up
+ * and the redeploy that followed had no attempt left.
+ *
+ * The clock and the wait are injected, so these assert the bound rather than
+ * sit through it.
+ */
+describe("attachRun", () => {
+  const subscribed = () => new Error("exec x already has a live subscriber");
+
+  /** A runtime that refuses `count` times and then hands the stream over. */
+  function releasesAfter(count: number): SessionRuntime & { looks: number } {
+    const state = { looks: 0 };
+    return {
+      get looks() {
+        return state.looks;
+      },
+      exec: async () => {
+        throw new Error("not used");
+      },
+      getExec: async () => {
+        state.looks++;
+        if (state.looks <= count) throw subscribed();
+        return fakeHandle([exit(1, 0)]);
+      },
+      killExec: async () => {}
+    } as SessionRuntime & { looks: number };
+  }
+
+  it("waits for the release rather than failing the chunk", async () => {
+    const runtime = releasesAfter(3);
+    const handle = await attachRun(runtime, FRESH, { wait: async () => {} });
+
+    expect(handle.id).toBe(EXEC);
+    expect(runtime.looks).toBe(4);
+  });
+
+  /**
+   * `EEXEC_LOST` is the container having been replaced, and `resume` turns it
+   * into a report the model can act on. Retrying it would sit on the bound
+   * learning nothing and then fail with the same error a minute later.
+   */
+  it("rethrows anything else on the first look", async () => {
+    let looks = 0;
+    const runtime: SessionRuntime = {
+      exec: async () => {
+        throw new Error("not used");
+      },
+      getExec: async () => {
+        looks++;
+        throw Object.assign(new Error("execution was lost"), {
+          code: "EEXEC_LOST"
+        });
+      },
+      killExec: async () => {}
+    };
+
+    await expect(
+      attachRun(runtime, FRESH, { wait: async () => {} })
+    ).rejects.toThrow(/execution was lost/);
+    expect(looks).toBe(1);
+  });
+
+  /**
+   * The bound is what keeps this an optimisation rather than a hang: a
+   * subscriber that is never released has to reach the Workflow, which retries
+   * the step on a fresh isolate.
+   */
+  it("gives up once the budget is gone", async () => {
+    const runtime = releasesAfter(Number.POSITIVE_INFINITY);
+    // A clock the waits drive, so the bound is reached in a few iterations
+    // rather than in real time.
+    let clock = 0;
+    await expect(
+      attachRun(runtime, FRESH, {
+        now: () => clock,
+        wait: async (ms) => {
+          clock += ms;
+        }
+      })
+    ).rejects.toThrow(/already has a live subscriber/);
+    // It did wait, repeatedly, before giving up — a bound that rethrew on the
+    // first look would pass every other assertion here.
+    expect(runtime.looks).toBeGreaterThan(5);
   });
 });
 
