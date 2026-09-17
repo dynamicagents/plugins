@@ -466,6 +466,63 @@ export function isExecLost(err: unknown): boolean {
 }
 
 /**
+ * Whether a thrown value is the *previous* window's attachment, not yet released.
+ *
+ * An exec's event stream admits one subscriber at a time. A chunk boundary asks
+ * for the next one within milliseconds of the last one returning, and the
+ * release on the far side is asynchronous and unobservable from here — the
+ * workspace client carries `Symbol.dispose`, not `Symbol.asyncDispose`, so
+ * there is nothing a caller can await to know the attachment is gone. So the
+ * boundary races the teardown every time, and {@link attachRun} answers by
+ * waiting rather than by failing.
+ *
+ * **Matched on the message, not on a code, and that is not laziness.** This one
+ * is raised inside the container image rather than by the runtime client: the
+ * string appears nowhere in the Worker bundle, and it arrives at a Workflow step
+ * as a plain `Error` with no `code` — unlike `EEXEC_BUSY` and `EEXEC_LOST`
+ * above, which the client throws and codes. The code is checked first anyway, so
+ * the day the container starts sending one this keeps working and the string
+ * test becomes the fallback it should have been.
+ */
+function isExecSubscribed(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown } | null | undefined;
+  if (e?.code === "EEXEC_SUBSCRIBED") return true;
+  return (
+    typeof e?.message === "string" &&
+    e.message.includes("already has a live subscriber")
+  );
+}
+
+/**
+ * How long {@link attachRun} waits out a subscriber that has not been released.
+ *
+ * Bounded, because what it is waiting on may not be a teardown at all: an
+ * isolate that is genuinely wedged holding the stream releases it when it dies,
+ * and nothing here can tell that apart from one that is a moment from
+ * finishing. Exceeding this rethrows, so the Workflow step retries with a fresh
+ * isolate — which is the right escalation, and the one this whole mechanism
+ * exists to stop being the *first* resort.
+ *
+ * Sized well above what the race costs in practice. The boundary normally clears
+ * on the first or second look, and a deployment where it took fifteen seconds is
+ * what this is sized to outlast.
+ */
+const ATTACH_MAX_MS = 30_000;
+
+/** The first gap between attach attempts, doubled up to {@link ATTACH_CAP_MS}. */
+const ATTACH_BACKOFF_MS = 250;
+
+/**
+ * The ceiling on that doubling.
+ *
+ * Without it the last gap before {@link ATTACH_MAX_MS} would be most of the
+ * budget, so a subscriber released early in it would still be waited out to the
+ * end. What this buys is that the wait ends soon after the release, rather than
+ * at the next power of two.
+ */
+const ATTACH_CAP_MS = 2_000;
+
+/**
  * Start a session, detached.
  *
  * **Falls back to attaching when the id is already live**, which is not a
@@ -505,17 +562,68 @@ export async function startRun(
   }
 }
 
-/** Re-attach to a session this isolate did not start. */
+/** The clock and the wait, injectable so a spec can drive the bound. */
+export interface AttachOptions {
+  now?: () => number;
+  wait?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Re-attach to a session this isolate did not start.
+ *
+ * **Waits out a subscriber the previous window has not released yet**, and that
+ * wait is the point of this function rather than a refinement of it. The
+ * alternative is not "fail fast" — it is spending a Workflow retry to discover a
+ * condition that clears on its own in a second, when a chunk step's retries are
+ * what a deploy, a severed stub and a network drop have to be covered out of.
+ * Core sizes that budget and says why; what matters here is that this must not
+ * be charged to it. A deployment lost a twenty-one-minute session exactly that
+ * way — consecutive attach races used the retries up, and the redeploy that
+ * followed had no attempt left to be retried on. See {@link isExecSubscribed}.
+ *
+ * Everything else is rethrown on the first look, `EEXEC_LOST` above all: it is
+ * the runtime saying the container was replaced, `resume` turns it into a report
+ * for the model, and a retry loop would sit on it for {@link ATTACH_MAX_MS}
+ * learning nothing.
+ */
 export async function attachRun(
   runtime: SessionRuntime,
-  cursor: DrainCursor
+  cursor: DrainCursor,
+  options: AttachOptions = {}
 ): Promise<WorkspaceRuntimeExecHandle<"utf8">> {
-  return await runtime.getExec(cursor.execId, {
-    encoding: "utf8",
-    // `0` is a legal seq and also the beginning, so a fresh cursor resumes from
-    // the start either way. Later chunks name their own place.
-    resume: cursor.seq
-  });
+  const now = options.now ?? Date.now;
+  const wait = options.wait ?? sleep;
+  const deadline = now() + ATTACH_MAX_MS;
+  let backoff = ATTACH_BACKOFF_MS;
+
+  for (;;) {
+    try {
+      return await runtime.getExec(cursor.execId, {
+        encoding: "utf8",
+        // `0` is a legal seq and also the beginning, so a fresh cursor resumes
+        // from the start either way. Later chunks name their own place.
+        resume: cursor.seq
+      });
+    } catch (err) {
+      // Rethrown rather than retried once the budget is gone, so the step still
+      // fails on a subscriber that is never coming back — just not first.
+      if (!isExecSubscribed(err) || now() >= deadline) throw err;
+      // Clamped to what is left, so the last gap lands *on* the deadline rather
+      // than past it. Uncapped, a schedule whose final doubling straddles the
+      // bound would take one more look on the far side of it — and the bound
+      // would be a number in a comment rather than one the code keeps.
+      const waitMs = Math.min(backoff, deadline - now());
+      // One line per wait, not per attempt: this is the condition whose
+      // frequency is worth watching, and it went unnamed in the logs for as
+      // long as the Workflow was absorbing it a retry at a time.
+      console.info(
+        "[claude-code] the previous window is still attached — waiting",
+        { execId: cursor.execId, waitMs }
+      );
+      await wait(waitMs);
+      backoff = Math.min(backoff * 2, ATTACH_CAP_MS);
+    }
+  }
 }
 
 /**
@@ -786,12 +894,20 @@ export async function drainRun(
    * it settles the pending read, resolves the sync outcome as `pending`, and
    * lets the next chunk's `getExec` open a fresh attachment that will run the
    * real sync when the session finally ends.
+   *
+   * **Cancels before settling the sinks, not after.** `finish` awaits every
+   * progress post this window queued — signed round trips to the gatekeeper, one
+   * per note — and holding the attachment open across them handed the next chunk
+   * a subscriber that was still live for no reason but ordering. Safe in this
+   * order because `finish` reads only what `consume` already put in local state,
+   * and takes nothing off the stream. It does not close the race that
+   * {@link attachRun} waits out — the release is still asynchronous on the far
+   * side — it just stops this end adding to it.
    */
   async function yieldWindow(): Promise<DrainOutcome> {
     absorb();
-    const outcome = await finish();
     await reader.cancel("chunk window expired").catch(() => {});
-    return outcome;
+    return await finish();
   }
 }
 

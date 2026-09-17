@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   WorkspaceRuntimeEvent,
   WorkspaceRuntimeExecHandle
 } from "@cloudflare/computer";
 import {
+  attachRun,
   buildLaunch,
   drainRun,
   execIdFor,
@@ -602,6 +603,41 @@ describe("the filesystem sync", () => {
     // And not synced: there is nothing to pull back until the session ends.
     expect(state.synced).toBe(false);
   });
+
+  /**
+   * **Cancelled before the window's progress posts are settled, not after.**
+   *
+   * Asserting cancellation once `drainRun` has resolved proves nothing about
+   * the order: a drain that settled every queued post first and cancelled on
+   * the way out passes that check identically. Each post is a signed round trip
+   * to the gatekeeper, so that order held the attachment open across all of
+   * them and handed the next chunk a subscriber still live for no reason but
+   * sequencing. So the sink is pinned open here and the cancellation asserted
+   * while it is still pending.
+   */
+  it("cancels before waiting on the window's progress posts", async () => {
+    const { handle, state } = handleWithPostPull(
+      [stdout(1, assistant("still working"))],
+      true
+    );
+    // Hand-rolled rather than `Promise.withResolvers`, which this package's lib
+    // target does not carry.
+    let release!: () => void;
+    const posted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const drained = drainRun(handle, FRESH, {
+      windowMs: 50,
+      onProgress: () => posted
+    });
+
+    // The window expires, the drain cancels — with the sink still unresolved.
+    await vi.waitFor(() => expect(state.cancelled).toBe(true));
+
+    release();
+    expect((await drained).done).toBe(false);
+  });
 });
 
 describe("one exec id per subtask", () => {
@@ -678,6 +714,103 @@ describe("startRun", () => {
         timeoutMs: 1000
       })
     ).rejects.toThrow(/no container/);
+  });
+});
+
+/**
+ * Waiting out the previous window's attachment.
+ *
+ * A chunk boundary asks for the exec's stream within milliseconds of the last
+ * window returning it, and the release on the far side is asynchronous — so the
+ * container answers "already has a live subscriber" and the condition clears on
+ * its own. Left to the Workflow it costs a retry each time, out of the budget a
+ * deploy, a severed stub and a network drop also have to come from — which is
+ * what `attachRun` in `./run.ts` exists to stop, and where that reasoning lives.
+ *
+ * The clock and the wait are injected, so these assert the bound rather than
+ * sit through it.
+ */
+describe("attachRun", () => {
+  const subscribed = () => new Error("exec x already has a live subscriber");
+
+  /** A runtime that refuses `count` times and then hands the stream over. */
+  function releasesAfter(count: number): SessionRuntime & { looks: number } {
+    const state = { looks: 0 };
+    return {
+      get looks() {
+        return state.looks;
+      },
+      exec: async () => {
+        throw new Error("not used");
+      },
+      getExec: async () => {
+        state.looks++;
+        if (state.looks <= count) throw subscribed();
+        return fakeHandle([exit(1, 0)]);
+      },
+      killExec: async () => {}
+    } as SessionRuntime & { looks: number };
+  }
+
+  it("waits for the release rather than failing the chunk", async () => {
+    const runtime = releasesAfter(3);
+    const handle = await attachRun(runtime, FRESH, { wait: async () => {} });
+
+    expect(handle.id).toBe(EXEC);
+    expect(runtime.looks).toBe(4);
+  });
+
+  /**
+   * `EEXEC_LOST` is the container having been replaced, and `resume` turns it
+   * into a report the model can act on. Retrying it would sit out the whole
+   * wait learning nothing and then fail with the error it already had.
+   */
+  it("rethrows anything else on the first look", async () => {
+    let looks = 0;
+    const runtime: SessionRuntime = {
+      exec: async () => {
+        throw new Error("not used");
+      },
+      getExec: async () => {
+        looks++;
+        throw Object.assign(new Error("execution was lost"), {
+          code: "EEXEC_LOST"
+        });
+      },
+      killExec: async () => {}
+    };
+
+    await expect(
+      attachRun(runtime, FRESH, { wait: async () => {} })
+    ).rejects.toThrow(/execution was lost/);
+    expect(looks).toBe(1);
+  });
+
+  /**
+   * The bound is what keeps this an optimisation rather than a hang: a
+   * subscriber that is never released has to reach the Workflow, which retries
+   * the step on a fresh isolate.
+   */
+  it("gives up once the budget is gone, and not a millisecond past it", async () => {
+    const runtime = releasesAfter(Number.POSITIVE_INFINITY);
+    // A clock the waits drive, so the bound is asserted exactly rather than
+    // waited out in real time.
+    let clock = 0;
+    await expect(
+      attachRun(runtime, FRESH, {
+        now: () => clock,
+        wait: async (ms) => {
+          clock += ms;
+        }
+      })
+    ).rejects.toThrow(/already has a live subscriber/);
+    // **The equality is the assertion.** A schedule whose final doubling
+    // straddles the bound overshoots it and takes one more look on the far
+    // side, which every weaker check here — that it retried at all, that it
+    // eventually threw — passes happily.
+    expect(clock).toBe(30_000);
+    // And it did wait repeatedly to get there, rather than rethrowing early.
+    expect(runtime.looks).toBeGreaterThan(5);
   });
 });
 
