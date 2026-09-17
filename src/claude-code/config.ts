@@ -126,10 +126,22 @@ export interface ClaudeCodeConfig {
   /**
    * How long one chunk blocks before checkpointing and yielding.
    *
-   * Must stay under the Workflow step timeout with room to spare, and must be
-   * long enough that a session does not exhaust its branch's chunk allowance
-   * while it is still thinking. Defaults to eight minutes, against a 30-minute
-   * step timeout and a 15-minute soft chunk budget.
+   * **A read deadline on the session's stdout stream, not a halt.** Nothing is
+   * stopped and nothing is destroyed when it expires: the host detaches, the
+   * session process inside the container never notices, and the next chunk
+   * re-attaches to the live session from the cursor. So the window is bounded
+   * against `STEP_TIMEOUT_MS` rather than against core's `CHUNK_SOFT_MS` —
+   * there is no in-flight turn to overrun, which is what sizes the recipe
+   * path's budget.
+   *
+   * What prices the headroom instead is the post-exit filesystem pull, which is
+   * deliberately unbounded because it carries whatever the session wrote,
+   * dependency trees included, and can outlast the window. The rule:
+   * `windowMs` + the unwind + a worst-case pull + step bookkeeping must fit
+   * inside the step timeout. See {@link file://./run.ts DrainOptions.windowMs}.
+   *
+   * It must also be long enough that a session does not exhaust its branch's
+   * chunk allowance while it is still thinking.
    */
   windowMs?: number;
 
@@ -147,8 +159,14 @@ export interface ClaudeCodeConfig {
   env?: Record<string, string>;
 }
 
-/** Eight minutes: comfortably inside `CHUNK_SOFT_MS`, long enough to be useful. */
-export const DEFAULT_WINDOW_MS = 8 * 60_000;
+/**
+ * Twenty minutes against a 30-minute step timeout, which leaves ~10 minutes for
+ * the post-exit filesystem pull — deliberately unbounded, because it carries
+ * whatever the session wrote, dependency trees included — and for the
+ * sub-second unwind of yielding the window. See
+ * {@link ClaudeCodeConfig.windowMs}.
+ */
+export const DEFAULT_WINDOW_MS = 20 * 60_000;
 
 /** Fifteen minutes, well under the coder workspace's 20-minute idle timer. */
 export const DEFAULT_TIMEOUT_MS = 15 * 60_000;

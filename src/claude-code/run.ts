@@ -389,10 +389,17 @@ export interface DrainOptions {
   /**
    * How long this chunk may block before checkpointing and yielding.
    *
-   * Must stay comfortably under the Workflow step timeout, and it is what stops
-   * a run burning its whole chunk allowance in seconds: a drain that returned
-   * the moment it had nothing to read would exhaust `MAX_CHUNKS_PER_BRANCH`
-   * before the session finished thinking.
+   * **This is the coder path's soft limit**, justified the same way core's
+   * `CHUNK_SOFT_MS` is — by the step timeout — but checked as a deadline on
+   * reading the session's stdout stream rather than between turns, because a
+   * `claude -p` session runs its own loop inside the container and there are no
+   * core-visible turns to stop between. The stream is the only synchronisation
+   * point there is. {@link file://./config.ts ClaudeCodeConfig.windowMs} holds
+   * the sizing rule and what the remaining headroom is for.
+   *
+   * It is also what stops a run burning its whole chunk allowance in seconds: a
+   * drain that returned the moment it had nothing to read would exhaust
+   * `MAX_CHUNKS_PER_BRANCH` before the session finished thinking.
    *
    * **It is not the reporting interval**, and reading it as one is the mistake
    * {@link DrainOptions.onProgress} exists to remove: a session that finishes
@@ -675,7 +682,7 @@ export async function drainRun(
    *
    * Called after **every** stdout event rather than once at the end. Claude
    * Code's stream carries whole tool results, so a chunk that only parsed on the
-   * way out would hold an eight-minute transcript of a noisy build in a Durable
+   * way out would hold a whole window's transcript of a noisy build in a Durable
    * Object's memory; parsing eagerly keeps only `carry`, which is at most one
    * incomplete line.
    */
