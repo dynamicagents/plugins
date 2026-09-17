@@ -608,14 +608,19 @@ export async function attachRun(
       // Rethrown rather than retried once the budget is gone, so the step still
       // fails on a subscriber that is never coming back — just not first.
       if (!isExecSubscribed(err) || now() >= deadline) throw err;
+      // Clamped to what is left, so the last gap lands *on* the deadline rather
+      // than past it. Uncapped, a schedule whose final doubling straddles the
+      // bound would take one more look on the far side of it — and the bound
+      // would be a number in a comment rather than one the code keeps.
+      const waitMs = Math.min(backoff, deadline - now());
       // One line per wait, not per attempt: this is the condition whose
       // frequency is worth watching, and it went unnamed in the logs for as
       // long as the Workflow was absorbing it a retry at a time.
       console.info(
         "[claude-code] the previous window is still attached — waiting",
-        { execId: cursor.execId, waitMs: backoff }
+        { execId: cursor.execId, waitMs }
       );
-      await wait(backoff);
+      await wait(waitMs);
       backoff = Math.min(backoff * 2, ATTACH_CAP_MS);
     }
   }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   WorkspaceRuntimeEvent,
   WorkspaceRuntimeExecHandle
@@ -603,6 +603,41 @@ describe("the filesystem sync", () => {
     // And not synced: there is nothing to pull back until the session ends.
     expect(state.synced).toBe(false);
   });
+
+  /**
+   * **Cancelled before the window's progress posts are settled, not after.**
+   *
+   * Asserting cancellation once `drainRun` has resolved proves nothing about
+   * the order: a drain that settled every queued post first and cancelled on
+   * the way out passes that check identically. Each post is a signed round trip
+   * to the gatekeeper, so that order held the attachment open across all of
+   * them and handed the next chunk a subscriber still live for no reason but
+   * sequencing. So the sink is pinned open here and the cancellation asserted
+   * while it is still pending.
+   */
+  it("cancels before waiting on the window's progress posts", async () => {
+    const { handle, state } = handleWithPostPull(
+      [stdout(1, assistant("still working"))],
+      true
+    );
+    // Hand-rolled rather than `Promise.withResolvers`, which this package's lib
+    // target does not carry.
+    let release!: () => void;
+    const posted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const drained = drainRun(handle, FRESH, {
+      windowMs: 50,
+      onProgress: () => posted
+    });
+
+    // The window expires, the drain cancels — with the sink still unresolved.
+    await vi.waitFor(() => expect(state.cancelled).toBe(true));
+
+    release();
+    expect((await drained).done).toBe(false);
+  });
 });
 
 describe("one exec id per subtask", () => {
@@ -689,9 +724,8 @@ describe("startRun", () => {
  * window returning it, and the release on the far side is asynchronous — so the
  * container answers "already has a live subscriber" and the condition clears on
  * its own. Left to the Workflow it costs a retry each time, out of the budget a
- * deploy, a severed stub and a network drop also have to come from: a deployment
- * lost a twenty-one-minute session because consecutive races used that budget up
- * and the redeploy that followed had no attempt left.
+ * deploy, a severed stub and a network drop also have to come from — which is
+ * what `attachRun` in `./run.ts` exists to stop, and where that reasoning lives.
  *
  * The clock and the wait are injected, so these assert the bound rather than
  * sit through it.
@@ -728,8 +762,8 @@ describe("attachRun", () => {
 
   /**
    * `EEXEC_LOST` is the container having been replaced, and `resume` turns it
-   * into a report the model can act on. Retrying it would sit on the bound
-   * learning nothing and then fail with the same error a minute later.
+   * into a report the model can act on. Retrying it would sit out the whole
+   * wait learning nothing and then fail with the error it already had.
    */
   it("rethrows anything else on the first look", async () => {
     let looks = 0;
@@ -757,10 +791,10 @@ describe("attachRun", () => {
    * subscriber that is never released has to reach the Workflow, which retries
    * the step on a fresh isolate.
    */
-  it("gives up once the budget is gone", async () => {
+  it("gives up once the budget is gone, and not a millisecond past it", async () => {
     const runtime = releasesAfter(Number.POSITIVE_INFINITY);
-    // A clock the waits drive, so the bound is reached in a few iterations
-    // rather than in real time.
+    // A clock the waits drive, so the bound is asserted exactly rather than
+    // waited out in real time.
     let clock = 0;
     await expect(
       attachRun(runtime, FRESH, {
@@ -770,8 +804,12 @@ describe("attachRun", () => {
         }
       })
     ).rejects.toThrow(/already has a live subscriber/);
-    // It did wait, repeatedly, before giving up — a bound that rethrew on the
-    // first look would pass every other assertion here.
+    // **The equality is the assertion.** A schedule whose final doubling
+    // straddles the bound overshoots it and takes one more look on the far
+    // side, which every weaker check here — that it retried at all, that it
+    // eventually threw — passes happily.
+    expect(clock).toBe(30_000);
+    // And it did wait repeatedly to get there, rather than rethrowing early.
     expect(runtime.looks).toBeGreaterThan(5);
   });
 });
