@@ -248,6 +248,67 @@ describe("triage()", () => {
   });
 });
 
+describe("triage() — what AI Gateway is told", () => {
+  const history = [turn("Bruno", "hey Ana, lunch?")];
+
+  /** A binding that answers every turn, and keeps the options each call sent. */
+  const recording = () => {
+    const calls: { gateway?: unknown }[] = [];
+    const ai = {
+      run: async (_model: string, _inputs: unknown, options: object) => {
+        calls.push(options);
+        return { response: JSON.stringify(verdict()) };
+      }
+    } as unknown as Ai;
+    return { ai, calls };
+  };
+
+  it("tags each classify call with the channel of the turn it judges", async () => {
+    const { ai, calls } = recording();
+    const plugin = triage({ ai, aiGatewayId: "gw", agentName: "proactive" });
+
+    await plugin.shouldHandleTurn!({ history });
+    await plugin.shouldHandleTurn!({
+      history: [
+        ...history,
+        msg(
+          "user",
+          '<turn from="Ana" id="U2" channel="C2" at="2026-07-28T10:01:00Z">and you?</turn>'
+        )
+      ]
+    });
+
+    // The provider is memoized and the model is not, so a second channel is
+    // not stamped with the first one's.
+    expect(calls.map((c) => c.gateway)).toEqual([
+      {
+        id: "gw",
+        metadata: { agent: "proactive", phase: "triage", channel: "C1" }
+      },
+      {
+        id: "gw",
+        metadata: { agent: "proactive", phase: "triage", channel: "C2" }
+      }
+    ]);
+  });
+
+  it("never sends the id of the person who wrote the turn", async () => {
+    const { ai, calls } = recording();
+    await triage({ ai, aiGatewayId: "gw" }).shouldHandleTurn!({ history });
+
+    expect(JSON.stringify(calls[0]?.gateway)).not.toContain("U1");
+  });
+
+  it("names no gateway when the host supplied none", async () => {
+    const { ai, calls } = recording();
+    await triage({ ai, agentName: "proactive" }).shouldHandleTurn!({
+      history
+    });
+
+    expect(calls[0]?.gateway).toBeUndefined();
+  });
+});
+
 describe("no_reply — declining late", () => {
   it("keeps `reason` optional", () => {
     // A required field the model omits makes the SDK mark the call invalid and
