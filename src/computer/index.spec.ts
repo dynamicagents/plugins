@@ -1737,16 +1737,11 @@ describe("cancellation before the command runs", () => {
 });
 
 /**
- * Which way each tool opens the workspace, which is a latency question rather
- * than a correctness one.
+ * Which way each tool opens the workspace — `WorkspaceHost.__getWorkspaceFsStub`
+ * in `./index.ts` holds why the two openers exist.
  *
- * `WorkspaceHost.__getWorkspaceFsStub` in `./index.ts` holds why the two
- * openers exist, and the host class it points at holds what the difference
- * costs.
- *
- * The routing is asserted per tool rather than described, because a file tool
- * that reached for the command opener would compile, pass every other test in
- * this file, and be slow only on a cold container.
+ * Asserted per tool, because one that reached for the wrong opener would
+ * compile, pass everything else here, and be slow only on a cold container.
  */
 describe("which way the workspace is opened", () => {
   /** The two openers, counted apart. Both hand back the same client. */
@@ -1800,11 +1795,9 @@ describe("which way the workspace is opened", () => {
   });
 
   /**
-   * The **fourth argument** is what is optional here, not the host method:
-   * `WorkspaceHost.__getWorkspaceFsStub` is required, for the reason the
-   * interface gives. A caller of this lower-level helper that passes one opener
-   * — every spec above, and any host wiring its tools by hand — gets the old
-   * behaviour rather than a file tool with nothing to open the workspace with.
+   * The **fourth argument** is what is optional, not the host method:
+   * `WorkspaceHost.__getWorkspaceFsStub` is required. A caller passing one
+   * opener gets the old behaviour rather than a file tool with nothing to open.
    */
   it("falls back to the one opener when a host passes only one", async () => {
     const inner = stub();

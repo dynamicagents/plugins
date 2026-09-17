@@ -227,21 +227,16 @@ export interface WorkspaceHost extends Rpc.DurableObjectBranded {
   // Durable Object class fail to satisfy this interface.
   __getWorkspaceStub(): Promise<WorkspaceStub>;
   /**
-   * The same workspace, for work that only touches the filesystem — which the
-   * host must serve **without starting a container**.
+   * The same workspace for filesystem-only work, which the host must serve
+   * **without starting a container**.
    *
-   * The two exist because the filesystem is the Durable Object's own SQLite and
-   * the container is not involved in a read of it, while the first command in a
-   * fresh container waits for the entire tree to be pushed into it. A file tool
-   * behind that push waits minutes for a local `readdir`; see
-   * `WorkspaceObjectBase.__getWorkspaceFsStub` in `./host/workspace.ts`, which
-   * holds the measurement and is the implementation every host in this train
-   * inherits.
+   * The filesystem is the Durable Object's own SQLite, while the first command
+   * in a fresh container waits for the whole tree to be pushed into it — so a
+   * file tool served the other way waits minutes for a local `readdir`. See
+   * `WorkspaceObjectBase.__getWorkspaceFsStub` in `./host/workspace.ts`.
    *
-   * Required rather than optional, for the reason {@link advisories} gives:
-   * Workers RPC types an optional method as a union nothing can call. A host
-   * with nothing to distinguish returns its own `__getWorkspaceStub()` in one
-   * line and is no worse off than before.
+   * Required rather than optional, for the reason {@link advisories} gives. A
+   * host with nothing to distinguish returns its own `__getWorkspaceStub()`.
    */
   __getWorkspaceFsStub(): Promise<WorkspaceStub>;
   /**
@@ -281,14 +276,11 @@ export function openWorkspace(
  * The same workspace, opened for filesystem work alone.
  *
  * `getWorkspace` calls exactly one method on what it is handed, so the host is
- * wrapped in an object that answers it from the other side of the seam — see
- * {@link WorkspaceHost.__getWorkspaceFsStub} for what the host does differently
- * and why. Everything past that point is identical: the same client, the same
- * `fs`, the same disposal.
+ * wrapped in an object answering it from the other side of the seam — see
+ * {@link WorkspaceHost.__getWorkspaceFsStub}. Everything past that is identical.
  *
- * **Only the file tools take this.** `sb_exec` and {@link computerExec} run
- * commands, which need the container started and its CA installed, so they open
- * the workspace the other way and wait for it.
+ * **Only the file tools take this.** `sb_exec` and {@link computerExec} need the
+ * container started and its CA installed, so they open it the other way.
  */
 export function openWorkspaceFs(
   host: DurableObjectStub<WorkspaceHost>
@@ -508,13 +500,11 @@ async function killLate(handle: {
 }
 
 /**
- * @param workspace Opens the workspace for a caller that will run a command —
- *   the container is started and its CA installed before this resolves.
- * @param fsWorkspace Opens it for the file tools, which touch nothing but this
- *   object's SQLite. Defaults to {@link workspace}, so a host with one way in
- *   behaves as it always did; a host that serves the two differently passes
- *   both, and its file tools stop waiting on a container they never use. See
- *   {@link openWorkspaceFs}.
+ * @param workspace Opens the workspace for a command: container started, CA
+ *   installed.
+ * @param fsWorkspace Opens it for the file tools, which touch nothing but the
+ *   host's SQLite. Defaults to {@link workspace}, so a host with one way in
+ *   behaves as before. See {@link openWorkspaceFs}.
  */
 export function buildComputerTools(
   workspace: () => Promise<WorkspaceClient>,
@@ -637,9 +627,8 @@ export function buildComputerTools(
    * logs, and carries an install warning through the failure path — a bespoke
    * catch saying something this cannot.
    *
-   * It is also what makes the capability sentence about these tools true: they
-   * open the workspace through `fsWorkspace`, so they answer while the container
-   * is down, restarting, or still being pushed to.
+   * It opens through `fsWorkspace`, which is what makes the capability sentence
+   * about these tools true: they answer while the container is down.
    */
   const inWorkspace = async (
     gerund: string,

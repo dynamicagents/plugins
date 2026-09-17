@@ -980,15 +980,11 @@ describe("trusting the interception CA", () => {
 });
 
 /**
- * What a file tool waits for, and what it no longer waits for.
+ * What a file tool waits for — `__getWorkspaceFsStub` in `./workspace.ts` holds
+ * why.
  *
- * `__getWorkspaceFsStub` in `./workspace.ts` holds why the two entry points
- * differ and what the difference was measured to cost.
- *
- * These run **without a container**, like the rest of this file, which is what
- * makes the distinction observable: the trust command cannot succeed here, so
- * *attempting* it is the thing that logs. The read must log nothing and the
- * alarm behind it must log something.
+ * These run **without a container**, which is what makes it observable: the
+ * trust command cannot succeed here, so *attempting* it is what logs.
  */
 describe("the filesystem stub", () => {
   /** Every outcome of the trust step logs; a skipped one logs nothing at all. */
@@ -1003,11 +999,7 @@ describe("the filesystem stub", () => {
       await runInDurableObject(stub, (_instance, state) => scheduleRows(state))
     ).filter((row) => row.callback === "containerWarm");
 
-  /**
-   * Poll until `check` holds, because the alarm is the thing under test and it
-   * fires on its own clock. Returns whether it held, so a failing assertion
-   * names the condition rather than a timeout.
-   */
+  /** Poll until `check` holds: the alarm fires on its own clock. */
   async function eventually(
     check: () => boolean,
     ms = 5_000
@@ -1024,12 +1016,11 @@ describe("the filesystem stub", () => {
     const stub = freshWorkspace("fs-no-container");
     await seedGitCheckout(stub, "/workspace/probe");
 
-    // Spied after seeding: the fixtures open the workspace the other way, and
-    // what is being counted is what *this* call does.
+    // Spied after seeding, which opens the workspace the other way.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       using ws = await openWorkspaceFs(stub);
-      // The read still answers — the point is that it answers from here.
+      // Still answers, and answers from here.
       expect(await ws.fs.readdir("/workspace")).toHaveLength(1);
       expect(trustAttempts(warn.mock.calls)).toBe(0);
     } finally {
@@ -1048,9 +1039,7 @@ describe("the filesystem stub", () => {
       using ws = await openWorkspaceFs(stub);
       void ws;
 
-      // The wake is armed for now, so the alarm carries it out on its own — and
-      // with no container to start, attempting the trust is what that looks
-      // like from here.
+      // Armed for now, so the alarm carries it out on its own.
       expect(await eventually(() => trustAttempts(warn.mock.calls) > 0)).toBe(
         true
       );
@@ -1059,11 +1048,7 @@ describe("the filesystem stub", () => {
     }
   });
 
-  /**
-   * An empty workspace has nothing to push and nothing to run in a container,
-   * so warming one would bill for a container the task may never use — which is
-   * the trade this is meant to win, not lose.
-   */
+  /** Nothing to push and nothing to run, so a warm would only bill. */
   it("warms nothing for a workspace with no checkout", async () => {
     const stub = freshWorkspace("fs-no-checkout");
 
@@ -1074,9 +1059,8 @@ describe("the filesystem stub", () => {
   });
 
   /**
-   * The same rule {@link touch} lives under, on a path that runs per tool call:
-   * a schedule is a row the scheduler mints an id for, so arming without
-   * cancelling would leave one row per file read, every one of them due.
+   * The rule {@link touch} lives under, on a path that runs per tool call: a
+   * schedule is a minted row, so arming without cancelling leaves one per read.
    */
   it("keeps one warm row however many files are read", async () => {
     const stub = freshWorkspace("fs-one-row");
