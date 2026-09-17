@@ -22,13 +22,14 @@ person who needed an answer.
 
 ## Config
 
-| Field             | Default                      |                                                                                        |
-| ----------------- | ---------------------------- | -------------------------------------------------------------------------------------- |
-| `ai`              | —                            | The `AI` binding. Read lazily, never at module scope.                                  |
-| `aiGatewayId`     | —                            | Pass your agent's value so classify calls stay correlated with chat calls.             |
-| `modelId`         | `@cf/qwen/qwen3-30b-a3b-fp8` | Small and fast. No fallback: triage fails open, so a retry buys nothing.               |
-| `historyMessages` | `12`                         | A bare message is often unclassifiable — "yes", "thanks" only resolve against context. |
-| `messageMaxChars` | `500`                        | Keeps the classify call small.                                                         |
+| Field             | Default                      |                                                                                         |
+| ----------------- | ---------------------------- | --------------------------------------------------------------------------------------- |
+| `ai`              | —                            | The `AI` binding. Read lazily, never at module scope.                                   |
+| `aiGatewayId`     | —                            | Pass your agent's value so classify calls stay correlated with chat calls.              |
+| `agentName`       | —                            | Pass your agent's value; tags each classify call with it and the judged turn's channel. |
+| `modelId`         | `@cf/qwen/qwen3-30b-a3b-fp8` | Small and fast. No fallback: triage fails open, so a retry buys nothing.                |
+| `historyMessages` | `12`                         | A bare message is often unclassifiable — "yes", "thanks" only resolve against context.  |
+| `messageMaxChars` | `500`                        | Keeps the classify call small.                                                          |
 
 ## Declining _late_
 

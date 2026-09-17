@@ -30,6 +30,7 @@ embedding path lives here.
 | `index`            | —                 | The `VECTORIZE` binding. Must be **1024-dim, cosine**.                               |
 | `namespace`        | —                 | **A thunk.** See below.                                                              |
 | `aiGatewayId`      | —                 | Pass your agent's value so embedding calls stay correlated with chat calls.          |
+| `agentName`        | —                 | Pass your agent's value; tags each embedding call with it.                           |
 | `embeddingModelId` | `@cf/baai/bge-m3` | Must match the index's dimension.                                                    |
 | `topK`             | `5`               |                                                                                      |
 | `metadataTextMax`  | `2000`            | Vectorize allows ~10 KiB of metadata per vector and the snippet is nearly all of it. |

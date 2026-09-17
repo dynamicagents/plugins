@@ -306,6 +306,36 @@ describe("recall()", () => {
     errors.mockRestore();
   });
 
+  it("tags embedding calls for AI Gateway with the agent and nothing about a person", async () => {
+    const calls: { gateway?: unknown }[] = [];
+    const ai = {
+      run: async (
+        _model: string,
+        inputs: { text: string[] },
+        options: object
+      ) => {
+        calls.push(options);
+        return { data: inputs.text.map(() => [0, 0, 0]) };
+      }
+    } as unknown as Ai;
+    const plugin = recall({
+      ai,
+      index: fakeIndex().index,
+      namespace: () => "caller:abc",
+      aiGatewayId: "gw",
+      agentName: "proactive"
+    });
+
+    await plugin.onMessagesDisplaced!([turn("m1", "Ada", "the deploy")]);
+
+    // One call embeds a whole displaced range, which can span channels, so a
+    // channel is not a fact about it.
+    expect(calls[0]?.gateway).toEqual({
+      id: "gw",
+      metadata: { agent: "proactive", phase: "embed" }
+    });
+  });
+
   it("never touches the AI binding until something is actually embedded", () => {
     // Cloudflare evaluates module scope during `wrangler deploy` and bindings
     // are not populated then; an eagerly-built provider throws "you must provide

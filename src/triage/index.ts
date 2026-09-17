@@ -4,7 +4,11 @@ import { z } from "zod";
 import { createWorkersAI } from "workers-ai-provider";
 import { definePlugin } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
-import { parseTurn, sessionText } from "@dynamicagents/core/agent";
+import {
+  gatewayLogFields,
+  parseTurn,
+  sessionText
+} from "@dynamicagents/core/agent";
 import type { SessionMessage } from "@dynamicagents/core/agent";
 
 /**
@@ -105,6 +109,11 @@ export interface TriageTuning {
    * in one gateway.
    */
   aiGatewayId?: string;
+  /**
+   * The `agent` key on the classifier's AI Gateway log rows. Pass the host's
+   * `PluginHost.agentName`, for the reason given on {@link aiGatewayId}.
+   */
+  agentName?: string;
   /** Workers-AI id for the classifier. Defaults to a small, fast model. */
   modelId?: string;
   /** Trailing messages the classifier sees. Defaults to 12. */
@@ -225,6 +234,7 @@ export function triage(config: TriageConfig): AgentPlugin {
   const {
     ai,
     aiGatewayId,
+    agentName,
     modelId = DEFAULT_TRIAGE_MODEL_ID,
     historyMessages,
     messageMaxChars
@@ -240,15 +250,25 @@ export function triage(config: TriageConfig): AgentPlugin {
    * No fallback model: triage fails open, so a second attempt on a different
    * model buys nothing a `true` does not already buy, at twice the latency in
    * front of every turn.
+   *
+   * The provider is what is memoized, not the model: the model carries the
+   * channel of the turn it judges, which differs turn to turn. The gateway goes
+   * on the model and never on the provider — see core's Workers AI runtime for
+   * why setting it on both discards the model's.
    */
-  let model: LanguageModel | undefined;
-  const classifier = (): LanguageModel =>
-    (model ??=
-      config.model ??
-      createWorkersAI({
-        binding: ai,
-        ...(aiGatewayId ? { gateway: { id: aiGatewayId } } : {})
-      })(modelId));
+  let provider: ReturnType<typeof createWorkersAI> | undefined;
+  const classifier = (history: SessionMessage[]): LanguageModel => {
+    if (config.model) return config.model;
+    provider ??= createWorkersAI({ binding: ai });
+    if (!aiGatewayId) return provider(modelId);
+    const judged = history.filter((m) => m.role === "user").at(-1);
+    const fields = gatewayLogFields({
+      agent: agentName,
+      phase: "triage",
+      channel: judged ? parseTurn(sessionText(judged))?.channel : undefined
+    });
+    return provider(modelId, { gateway: { id: aiGatewayId, ...fields } });
+  };
 
   return definePlugin({
     key: "triage",
@@ -268,7 +288,7 @@ export function triage(config: TriageConfig): AgentPlugin {
     shouldHandleTurn: async ({ history }) => {
       let model: LanguageModel;
       try {
-        model = classifier();
+        model = classifier(history);
       } catch (error) {
         console.warn("[triage] classifier unavailable, replying by default", {
           error: String(error)

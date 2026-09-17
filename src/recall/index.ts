@@ -4,7 +4,11 @@ import { z } from "zod";
 import { createWorkersAI } from "workers-ai-provider";
 import { definePlugin } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
-import { parseTurn, sessionText } from "@dynamicagents/core/agent";
+import {
+  gatewayLogFields,
+  parseTurn,
+  sessionText
+} from "@dynamicagents/core/agent";
 import type { SessionMessage } from "@dynamicagents/core/agent";
 
 /**
@@ -166,7 +170,8 @@ export async function recallSearch(
  *
  * // plugins.ts — the bindings, and the values spread
  * recall({ ai: host.env.AI, index: host.env.VECTORIZE,
- *          namespace: host.callerKey, aiGatewayId: host.aiGatewayId, ...RECALL })
+ *          namespace: host.callerKey, aiGatewayId: host.aiGatewayId,
+ *          agentName: host.agentName, ...RECALL })
  * ```
  *
  * Field-by-field re-typing is not just verbose — it silently drops any option
@@ -181,6 +186,11 @@ export interface RecallTuning {
    * override is dropped in favour of core's default.
    */
   aiGatewayId?: string;
+  /**
+   * The `agent` key on embedding calls' AI Gateway log rows. Pass the host's
+   * `PluginHost.agentName`, for the reason given on {@link aiGatewayId}.
+   */
+  agentName?: string;
   /** Workers-AI embedding model. Must match the index's dimension. */
   embeddingModelId?: string;
   /** Matches returned by a search. Defaults to 5. */
@@ -213,6 +223,7 @@ export function recall(config: RecallConfig): AgentPlugin {
     index,
     namespace,
     aiGatewayId,
+    agentName,
     embeddingModelId = DEFAULT_EMBEDDING_MODEL_ID,
     topK = DEFAULT_TOP_K,
     metadataTextMax = DEFAULT_METADATA_TEXT_MAX
@@ -223,18 +234,28 @@ export function recall(config: RecallConfig): AgentPlugin {
    * during `wrangler deploy` to validate the new version, and bindings are not
    * populated at that point — constructing eagerly makes `createWorkersAI` throw
    * "you must provide either a binding or credentials".
+   *
+   * The gateway goes on the embedding model and never on the provider — see
+   * core's Workers AI runtime for why setting it on both discards the model's.
+   * Only `agent` and `phase` are known here: one call embeds a whole displaced
+   * range, which can span channels, or a query the model wrote.
    */
   let provider: ReturnType<typeof createWorkersAI> | undefined;
+  const embeddingSettings = aiGatewayId
+    ? {
+        gateway: {
+          id: aiGatewayId,
+          ...gatewayLogFields({ agent: agentName, phase: "embed" })
+        }
+      }
+    : {};
   const embed: Embed =
     config.embed ??
     (async (texts) => {
       if (texts.length === 0) return [];
-      provider ??= createWorkersAI({
-        binding: ai,
-        ...(aiGatewayId ? { gateway: { id: aiGatewayId } } : {})
-      });
+      provider ??= createWorkersAI({ binding: ai });
       const { embeddings } = await embedMany({
-        model: provider.embedding(embeddingModelId),
+        model: provider.embedding(embeddingModelId, embeddingSettings),
         values: texts
       });
       return embeddings;
