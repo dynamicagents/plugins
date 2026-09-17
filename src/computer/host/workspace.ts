@@ -611,6 +611,15 @@ export abstract class WorkspaceObjectBase<
   #reclaimed = false;
 
   /**
+   * The start that is already happening, shared by everyone who asks for one.
+   *
+   * In memory, which is the right lifetime and the same one
+   * {@link file://./ca-trust.ts} keeps its flag at: what it refers to is a
+   * container, and an isolate that lost it asks again.
+   */
+  #readying?: Promise<void>;
+
+  /**
    * Open the workspace, and make sure the container behind it can speak TLS.
    *
    * **Every path that might start a container goes through here**, which is the
@@ -639,34 +648,24 @@ export abstract class WorkspaceObjectBase<
    * Object `protected` is a typechecker's opinion and not a runtime boundary —
    * every non-`#` method is reachable over RPC — so a helper that starts
    * containers is spelled `#`.
-   */
-  /**
-   * The start that is already happening, shared by everyone who asks for one.
    *
-   * In memory, which is the right lifetime and the same one
-   * {@link file://./ca-trust.ts} keeps its flag at: what it refers to is a
-   * container, and an isolate that lost it asks again.
+   * **One start at a time, however many callers want one.** {@link #warmIfCold}
+   * makes overlap ordinary rather than exceptional: a background warm and the
+   * first `sb_exec` routinely want the container at the same moment, as do a
+   * warm and the install alarm. Two starts in flight means two trust commands
+   * sent through a connection still being established, and the second one
+   * pushing the tree again behind the first. The shared promise is cleared on
+   * settle, so the next caller asks about the container that is there now rather
+   * than being told about one that has since gone.
    */
-  #readying?: Promise<void>;
-
   async #ready(): Promise<void> {
-    /**
-     * Deduped, because {@link #warmIfCold} makes overlap ordinary rather than
-     * exceptional: a background warm and the first `sb_exec` routinely want the
-     * container at the same moment, as do a warm and the install alarm. Two
-     * starts in flight means two trust commands sent through a connection still
-     * being established, and the second one pushing the tree again behind the
-     * first.
-     *
-     * Cleared on settle, so the next caller asks about the container that is
-     * there now rather than being told about one that has since gone.
-     */
     this.#readying ??= this.#readyNow().finally(() => {
       this.#readying = undefined;
     });
     return this.#readying;
   }
 
+  /** One start, run for whoever got there first — see {@link #ready}. */
   async #readyNow(): Promise<void> {
     if (!this.ctx.container?.running) {
       this.#trust.forget();

@@ -1740,16 +1740,13 @@ describe("cancellation before the command runs", () => {
  * Which way each tool opens the workspace, which is a latency question rather
  * than a correctness one.
  *
- * The filesystem is the host object's own SQLite, so a file tool needs nothing
- * from the container — but a host serves the command path by starting one and
- * running the trust command in it, and the first command in a fresh container
- * waits for the whole tree to be pushed across. A file tool opened that way
- * waits with it: 3 m 37 s in front of a bare `sb_ls /workspace`, in the
- * production trace this split comes from.
+ * `WorkspaceHost.__getWorkspaceFsStub` in `./index.ts` holds why the two
+ * openers exist, and the host class it points at holds what the difference
+ * costs.
  *
- * So the routing is the contract, and it is asserted per tool rather than
- * described: a file tool that reached for the command opener would compile,
- * pass every other test in this file, and be slow only on a cold container.
+ * The routing is asserted per tool rather than described, because a file tool
+ * that reached for the command opener would compile, pass every other test in
+ * this file, and be slow only on a cold container.
  */
 describe("which way the workspace is opened", () => {
   /** The two openers, counted apart. Both hand back the same client. */
@@ -1803,9 +1800,11 @@ describe("which way the workspace is opened", () => {
   });
 
   /**
-   * A host with one way in is the default, and it has to keep working: the
-   * second opener is an optimisation a host opts into by serving the two
-   * differently, not a method every implementation of the interface has.
+   * The **fourth argument** is what is optional here, not the host method:
+   * `WorkspaceHost.__getWorkspaceFsStub` is required, for the reason the
+   * interface gives. A caller of this lower-level helper that passes one opener
+   * — every spec above, and any host wiring its tools by hand — gets the old
+   * behaviour rather than a file tool with nothing to open the workspace with.
    */
   it("falls back to the one opener when a host passes only one", async () => {
     const inner = stub();

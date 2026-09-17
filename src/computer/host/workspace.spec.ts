@@ -982,12 +982,8 @@ describe("trusting the interception CA", () => {
 /**
  * What a file tool waits for, and what it no longer waits for.
  *
- * The filesystem is this object's own SQLite, so a read of it needs no
- * container — but every tool used to arrive through `__getWorkspaceStub`, which
- * starts one and runs the trust command in it, and the first command in a fresh
- * container waits for the whole tree to be pushed across. In production that put
- * 3 m 37 s in front of a bare `sb_ls /workspace`, on a task that then never ran
- * a command at all.
+ * `__getWorkspaceFsStub` in `./workspace.ts` holds why the two entry points
+ * differ and what the difference was measured to cost.
  *
  * These run **without a container**, like the rest of this file, which is what
  * makes the distinction observable: the trust command cannot succeed here, so
