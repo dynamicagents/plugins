@@ -107,7 +107,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     prompt,
     dir,
     ...(config.model ? { model: config.model } : {}),
-    ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }),
+    ...(config.effort ? { effort: config.effort } : {}),
     ...(config.maxSubagentDepth === undefined
       ? {}
       : { maxSubagentDepth: config.maxSubagentDepth }),
@@ -358,4 +358,8 @@ export {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_WINDOW_MS
 } from "./config.js";
-export type { ClaudeCodeConfig, PermissionMode } from "./config.js";
+export type {
+  ClaudeCodeConfig,
+  EffortLevel,
+  PermissionMode
+} from "./config.js";

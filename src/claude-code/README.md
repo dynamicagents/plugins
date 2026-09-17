@@ -460,9 +460,9 @@ picking something other than the default a decision rather than a surprise.
 
 ## Costs
 
-Two numbers drive the sizing here — not a spend cap, which this package
-deliberately does not have, but `timeoutMs`, `maxSubtasks` and how large a brief
-is worth writing.
+What drives the sizing here is not a spend cap — this package deliberately does
+not have one — but `timeoutMs`, `maxSubtasks`, `effort`, and how large a brief is
+worth writing.
 
 **The harness prefix is ~18.7-27k cached tokens per invocation.** A ten-call
 burst billed **twenty** raw input tokens against 187,130 cache reads. On anything
@@ -474,6 +474,14 @@ interactive session bucket, so agent work competes with whoever is using Claude
 Code at their desk — expect about one substantial round per window, per
 credential in the pool. Rotation does not create allowance; it moves to the next
 bucket when one runs out, and then stops cleanly.
+
+**`effort` multiplies all of that.** The level is per turn, so it compounds over
+a session rather than being paid once, and the client's own cost table is where
+the multiple is legible: against `high`, which is what the frontier models
+default to, Opus 5 prices `xhigh` at 1.6x and `max` at 1.7x. Set against a bucket
+nobody can read, that is a choice about how many sessions a credential holds.
+Depth is usually the right thing to buy here — a coding subtask that finishes is
+worth more than two that half-finish — but it is bought, not free.
 
 ## What this deliberately does not do
 
@@ -488,6 +496,12 @@ bucket when one runs out, and then stops cleanly.
   claude.ai login or subscription rate limits for their products.
 - **No metering in the gateway.** Spend estimates were tried and removed; the
   bucket says when it is empty, and rotation acts on that. See above.
+- **No `--max-turns`.** A ceiling on the outer session's turns bounds nothing
+  the package can see: Claude Code's own subagent tree is invisible to Dynamic
+  Agents' scheduler and multiplies whatever the flag says. What it does instead
+  is stop a long session mid-edit at a number picked without reference to the
+  task, leaving a half-finished checkout that costs more to read than the turns
+  saved. `timeoutMs` is the ceiling, and the container runtime enforces it.
 
 > A deployment-wide subscription token means one person's plan backs everyone
 > using that deployment. That is fine for a single-operator fork and it is the
