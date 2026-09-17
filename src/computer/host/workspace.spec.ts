@@ -6,7 +6,7 @@ import {
   workspaceNamespace
 } from "../../../test/computer/do.js";
 import { DEFAULT_INSTALL_PLAN, type InstallState } from "../install.js";
-import { openWorkspace } from "../index.js";
+import { openWorkspace, openWorkspaceFs } from "../index.js";
 import { DEFAULT_SCRATCH_DIR } from "../../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
 
@@ -976,6 +976,124 @@ describe("trusting the interception CA", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+/**
+ * What a file tool waits for, and what it no longer waits for.
+ *
+ * The filesystem is this object's own SQLite, so a read of it needs no
+ * container — but every tool used to arrive through `__getWorkspaceStub`, which
+ * starts one and runs the trust command in it, and the first command in a fresh
+ * container waits for the whole tree to be pushed across. In production that put
+ * 3 m 37 s in front of a bare `sb_ls /workspace`, on a task that then never ran
+ * a command at all.
+ *
+ * These run **without a container**, like the rest of this file, which is what
+ * makes the distinction observable: the trust command cannot succeed here, so
+ * *attempting* it is the thing that logs. The read must log nothing and the
+ * alarm behind it must log something.
+ */
+describe("the filesystem stub", () => {
+  /** Every outcome of the trust step logs; a skipped one logs nothing at all. */
+  function trustAttempts(calls: unknown[][]): number {
+    return calls.filter(([msg]) =>
+      String(msg).includes("trust the interception CA")
+    ).length;
+  }
+
+  const warmRows = async (stub: DurableObjectStub<TestWorkspaceDO>) =>
+    (
+      await runInDurableObject(stub, (_instance, state) => scheduleRows(state))
+    ).filter((row) => row.callback === "containerWarm");
+
+  /**
+   * Poll until `check` holds, because the alarm is the thing under test and it
+   * fires on its own clock. Returns whether it held, so a failing assertion
+   * names the condition rather than a timeout.
+   */
+  async function eventually(
+    check: () => boolean,
+    ms = 5_000
+  ): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (!check()) {
+      if (Date.now() > deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return true;
+  }
+
+  it("reads the workspace without starting a container", async () => {
+    const stub = freshWorkspace("fs-no-container");
+    await seedGitCheckout(stub, "/workspace/probe");
+
+    // Spied after seeding: the fixtures open the workspace the other way, and
+    // what is being counted is what *this* call does.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      using ws = await openWorkspaceFs(stub);
+      // The read still answers — the point is that it answers from here.
+      expect(await ws.fs.readdir("/workspace")).toHaveLength(1);
+      expect(trustAttempts(warn.mock.calls)).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("asks the alarm to start the container it did not wait for", async () => {
+    const stub = freshWorkspace("fs-warms");
+    const dir = "/workspace/probe";
+    await seedGitCheckout(stub, dir);
+    await stub.noteCheckout({ dir, kind: "repo", repo: "acme/spike" });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      using ws = await openWorkspaceFs(stub);
+      void ws;
+
+      // The wake is armed for now, so the alarm carries it out on its own — and
+      // with no container to start, attempting the trust is what that looks
+      // like from here.
+      expect(await eventually(() => trustAttempts(warn.mock.calls) > 0)).toBe(
+        true
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * An empty workspace has nothing to push and nothing to run in a container,
+   * so warming one would bill for a container the task may never use — which is
+   * the trade this is meant to win, not lose.
+   */
+  it("warms nothing for a workspace with no checkout", async () => {
+    const stub = freshWorkspace("fs-no-checkout");
+
+    using ws = await openWorkspaceFs(stub);
+    void ws;
+
+    expect(await warmRows(stub)).toHaveLength(0);
+  });
+
+  /**
+   * The same rule {@link touch} lives under, on a path that runs per tool call:
+   * a schedule is a row the scheduler mints an id for, so arming without
+   * cancelling would leave one row per file read, every one of them due.
+   */
+  it("keeps one warm row however many files are read", async () => {
+    const stub = freshWorkspace("fs-one-row");
+    const dir = "/workspace/probe";
+    await seedGitCheckout(stub, dir);
+    await stub.noteCheckout({ dir, kind: "repo", repo: "acme/spike" });
+
+    for (let i = 0; i < 3; i++) {
+      using ws = await openWorkspaceFs(stub);
+      await ws.fs.readdir("/workspace");
+    }
+
+    expect((await warmRows(stub)).length).toBeLessThanOrEqual(1);
   });
 });
 

@@ -227,6 +227,24 @@ export interface WorkspaceHost extends Rpc.DurableObjectBranded {
   // Durable Object class fail to satisfy this interface.
   __getWorkspaceStub(): Promise<WorkspaceStub>;
   /**
+   * The same workspace, for work that only touches the filesystem — which the
+   * host must serve **without starting a container**.
+   *
+   * The two exist because the filesystem is the Durable Object's own SQLite and
+   * the container is not involved in a read of it, while the first command in a
+   * fresh container waits for the entire tree to be pushed into it. A file tool
+   * behind that push waits minutes for a local `readdir`; see
+   * `WorkspaceObjectBase.__getWorkspaceFsStub` in `./host/workspace.ts`, which
+   * holds the measurement and is the implementation every host in this train
+   * inherits.
+   *
+   * Required rather than optional, for the reason {@link advisories} gives:
+   * Workers RPC types an optional method as a union nothing can call. A host
+   * with nothing to distinguish returns its own `__getWorkspaceStub()` in one
+   * line and is no worse off than before.
+   */
+  __getWorkspaceFsStub(): Promise<WorkspaceStub>;
+  /**
    * Everything currently true about the workspace that a caller must not assume
    * away — see {@link file://./advisory.ts}. An empty array is the good case.
    *
@@ -257,6 +275,27 @@ export function openWorkspace(
   host: DurableObjectStub<WorkspaceHost>
 ): Promise<WorkspaceClient> {
   return getWorkspace(host as unknown as Parameters<typeof getWorkspace>[0]);
+}
+
+/**
+ * The same workspace, opened for filesystem work alone.
+ *
+ * `getWorkspace` calls exactly one method on what it is handed, so the host is
+ * wrapped in an object that answers it from the other side of the seam — see
+ * {@link WorkspaceHost.__getWorkspaceFsStub} for what the host does differently
+ * and why. Everything past that point is identical: the same client, the same
+ * `fs`, the same disposal.
+ *
+ * **Only the file tools take this.** `sb_exec` and {@link computerExec} run
+ * commands, which need the container started and its CA installed, so they open
+ * the workspace the other way and wait for it.
+ */
+export function openWorkspaceFs(
+  host: DurableObjectStub<WorkspaceHost>
+): Promise<WorkspaceClient> {
+  return getWorkspace({
+    __getWorkspaceStub: () => host.__getWorkspaceFsStub()
+  } as unknown as Parameters<typeof getWorkspace>[0]);
 }
 
 /**
@@ -468,10 +507,20 @@ async function killLate(handle: {
   }
 }
 
+/**
+ * @param workspace Opens the workspace for a caller that will run a command —
+ *   the container is started and its CA installed before this resolves.
+ * @param fsWorkspace Opens it for the file tools, which touch nothing but this
+ *   object's SQLite. Defaults to {@link workspace}, so a host with one way in
+ *   behaves as it always did; a host that serves the two differently passes
+ *   both, and its file tools stop waiting on a container they never use. See
+ *   {@link openWorkspaceFs}.
+ */
 export function buildComputerTools(
   workspace: () => Promise<WorkspaceClient>,
   config: ComputerConfig,
-  advisories?: () => Promise<readonly WorkspaceAdvisory[]>
+  advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
+  fsWorkspace: () => Promise<WorkspaceClient> = workspace
 ): ToolSet {
   const cwd = config.cwd ?? DEFAULT_CWD;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -587,6 +636,10 @@ export function buildComputerTools(
    * `sb_exec` deliberately does not use it. That one recognises `EEXEC_LOST`,
    * logs, and carries an install warning through the failure path — a bespoke
    * catch saying something this cannot.
+   *
+   * It is also what makes the capability sentence about these tools true: they
+   * open the workspace through `fsWorkspace`, so they answer while the container
+   * is down, restarting, or still being pushed to.
    */
   const inWorkspace = async (
     gerund: string,
@@ -594,7 +647,7 @@ export function buildComputerTools(
     body: (fs: WorkspaceClient["fs"]) => Promise<string>
   ): Promise<string> => {
     try {
-      using ws = await workspace();
+      using ws = await fsWorkspace();
       return await body(ws.fs);
     } catch (err) {
       return `error ${gerund} ${subject}: ${String(err)}`;
@@ -1248,7 +1301,8 @@ export function computer(config: ComputerConfig): AgentPlugin {
       // No try/catch here: `buildComputerTools` fails the gate open itself, so
       // wrapping again would only make it look like the guarantee lives in two
       // places.
-      () => host(runtime).advisories()
+      () => host(runtime).advisories(),
+      () => openWorkspaceFs(host(runtime))
     );
 
   return definePlugin({

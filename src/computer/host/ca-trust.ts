@@ -156,6 +156,17 @@ export class ContainerTrust {
   async ensure(): Promise<void> {
     this.#watch();
     if (this.#trusted) return;
+    /**
+     * What the container cost to reach, which is almost never this command.
+     *
+     * A `runtime.exec` connects, reconciles watermarks and pushes the workspace
+     * before it spawns anything, and a container that just started is empty — so
+     * the push cursor resets and the whole tree crosses first. This is the first
+     * command in every new container, which makes it the one that pays, and
+     * {@link TRUST_TIMEOUT_MS} does not reach any of it: the timeout is the
+     * spawned process's.
+     */
+    const startedAt = Date.now();
     try {
       using handle = await this.deps
         .workspace()
@@ -193,6 +204,13 @@ export class ContainerTrust {
         id: this.deps.id(),
         exitCode: result.exitCode,
         trusted: this.#trusted,
+        // The two numbers that say where a cold workspace's minutes went, on the
+        // line that is already logged once per container. Without them a first
+        // command that took four minutes and one that took four seconds produce
+        // the same line, and the difference has to be reconstructed from AI
+        // Gateway timings and span counts.
+        pushed: result.pushed,
+        ms: Date.now() - startedAt,
         output
       });
     } catch (err) {
@@ -224,6 +242,11 @@ export class ContainerTrust {
       }
       console.warn(`[${this.deps.tag()}] could not trust the interception CA`, {
         id: this.deps.id(),
+        // How long it took to fail separates a container that refused at once
+        // from one that was pushed to for minutes and then dropped — the same
+        // question the success line's `ms` answers, and the failing case is
+        // where it is harder to get any other way.
+        ms: Date.now() - startedAt,
         err: String(err)
       });
     }

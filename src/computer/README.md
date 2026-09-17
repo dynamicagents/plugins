@@ -93,9 +93,19 @@ git — and a host subclasses it and answers a short config. [The host](#the-hos
 has that. What follows is the interface this plugin _requires_, which is what a host
 bringing its own object must satisfy instead.
 
-`binding` points at a class that owns the workspace and exposes two methods:
+`binding` points at a class that owns the workspace and exposes:
 
 - `__getWorkspaceStub()` — what `withWorkspace` from `@cloudflare/computer` installs.
+  The command tools take this one, so a host serves it by making the container ready
+  to run something: started, and with the egress CA installed.
+- `__getWorkspaceFsStub()` — the same workspace for the file tools, served **without
+  starting a container**. The filesystem is the object's own SQLite, so a read of it
+  needs nothing from a container — while the first command in a _fresh_ one waits for
+  the whole tree to be pushed across, which on a checkout carrying `node_modules` is
+  minutes. A host that served both the same way would put that wait in front of
+  `sb_read`, and `WorkspaceObjectBase` is where the measurement behind that is
+  written down. A host with nothing to distinguish returns `__getWorkspaceStub()`;
+  required rather than optional for the reason `advisories` gives below.
 - `advisories(): Promise<readonly WorkspaceAdvisory[]>` — everything currently true
   about the workspace that a caller must not assume away, or `[]`. Required rather
   than optional: a host that forgets to expose it would otherwise get an `sb_exec`
