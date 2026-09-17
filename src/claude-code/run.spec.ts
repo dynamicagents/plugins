@@ -232,11 +232,42 @@ describe("buildLaunch", () => {
     );
   });
 
-  it("adds the model and turn ceiling only when given", () => {
+  it("adds the model only when given", () => {
     expect(launch().command).not.toContain("--model");
-    expect(launch({ model: "claude-opus-5", maxTurns: 30 }).command).toContain(
-      "--model claude-opus-5 --max-turns 30"
+    expect(launch({ model: "claude-opus-5" }).command).toContain(
+      "--model claude-opus-5"
     );
+  });
+
+  /**
+   * Handed one anyway, through a helper loose enough to accept it — otherwise
+   * this passes against an implementation that still emits the flag. The README
+   * says why the package does not offer it.
+   */
+  it("never passes a turn ceiling, whatever it is handed", () => {
+    expect(launch({ maxTurns: 30 }).command).not.toContain("--max-turns");
+  });
+
+  /**
+   * Unset has to mean *absent*, not a level this package chose. An unrecognised
+   * or unsupported effort is warned about on stderr and then ignored, so a
+   * wrong default here would be indistinguishable from no default at all —
+   * see `ClaudeCodeConfig.effort`.
+   */
+  describe("the effort level", () => {
+    it("is omitted entirely when unset, leaving the model's own default", () => {
+      expect(launch().command).not.toContain("--effort");
+    });
+
+    it("carries a host's level through", () => {
+      expect(launch({ effort: "xhigh" }).command).toContain("--effort xhigh");
+    });
+
+    it("passes the level unquoted, as the flag's own enum", () => {
+      expect(
+        launch({ model: "claude-opus-5", effort: "max" }).command
+      ).toContain("--model claude-opus-5 --effort max");
+    });
   });
 
   it("lets a host add environment, merged last", () => {

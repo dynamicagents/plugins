@@ -13,7 +13,11 @@ import {
   type ClaudeCodeResult,
   type RateLimitInfo
 } from "./events.js";
-import { DEFAULT_PERMISSION_MODE, type PermissionMode } from "./config.js";
+import {
+  DEFAULT_PERMISSION_MODE,
+  type EffortLevel,
+  type PermissionMode
+} from "./config.js";
 
 /**
  * Launching Claude Code in the workspace container, and draining it in windows.
@@ -122,8 +126,13 @@ export interface LaunchOptions {
   /** Where the checkout is. The session runs with this as its cwd. */
   dir: string;
   model?: string;
-  /** Ceiling on the *outer* session's turns. Advisory; the budget gate is not. */
-  maxTurns?: number;
+  /**
+   * How hard the model thinks, per turn. Unset, the model's own default.
+   *
+   * See {@link file://./config.ts ClaudeCodeConfig.effort} for what a level
+   * costs, and why an unrecognised one is worse here than a rejected one.
+   */
+  effort?: EffortLevel;
   /**
    * Caps on Claude Code's own subagent tree.
    *
@@ -237,8 +246,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
   argv.push("--output-format", "stream-json", "--verbose");
   argv.push("--permission-mode", permissionMode);
   if (options.model) argv.push("--model", shellQuote(options.model));
-  if (options.maxTurns !== undefined)
-    argv.push("--max-turns", String(options.maxTurns));
+  if (options.effort) argv.push("--effort", options.effort);
 
   const env: Record<string, string> = {
     // Pinned image; an autoupdate would move the wire shape the gateway and the

@@ -28,6 +28,22 @@ export type PermissionMode =
  */
 export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 
+/**
+ * The effort levels `claude --effort` accepts.
+ *
+ * Spelled out for a sharper reason than {@link PermissionMode}: an unrecognised
+ * permission mode exits 1, but an unrecognised effort is **warned about on
+ * stderr and then ignored**, leaving the session at the model's default. A typo
+ * here does not fail, it quietly buys nothing — and stderr from a headless
+ * session reaches an operator far less reliably than a type error reaches a
+ * developer.
+ *
+ * A model that does not carry a level is the same silence: the CLI clamps down
+ * to `high` rather than refusing, so asking for more than a model offers is
+ * indistinguishable from asking for `high`.
+ */
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface ClaudeCodeConfig {
   /**
    * The credential pool, in priority order — index 0 is tried first.
@@ -67,15 +83,29 @@ export interface ClaudeCodeConfig {
   model?: string;
 
   /**
-   * Ceiling on the *outer* session's turns.
+   * How hard the session's model thinks, per turn.
    *
-   * Advisory. Claude Code's own subagent tree multiplies whatever this says, and
-   * the tree is invisible to Dynamic Agents' scheduler. {@link timeoutMs} is
-   * the ceiling that actually holds, because the container runtime enforces it.
+   * Unset, the model's own default applies, which is `high` for the frontier
+   * models this plugin exists to reach. Raising it buys depth at a multiple of
+   * the spend, per turn — so the level decides how many sessions a credential
+   * holds, not just how well one thinks. The README's Costs section carries the
+   * multiples and the sizing they imply.
+   *
+   * Not to be confused with the host round loop's own reasoning effort, which
+   * belongs to a different model on the Worker side. This one reaches only the
+   * CLI in the container.
    */
-  maxTurns?: number;
+  effort?: EffortLevel;
 
-  /** Caps on Claude Code's own subagent tree. Advisory, like `maxTurns`. */
+  /**
+   * Caps on Claude Code's own subagent tree.
+   *
+   * Advisory, and the distinction is the reason there is no turn ceiling beside
+   * them — see the README on what this package deliberately does not do. That
+   * tree is invisible to Dynamic Agents' scheduler, so it multiplies whatever
+   * these say; {@link timeoutMs} is the ceiling that actually holds, because the
+   * container runtime enforces it.
+   */
   maxSubagentDepth?: number;
   maxConcurrentSubagents?: number;
 
