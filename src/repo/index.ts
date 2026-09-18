@@ -1570,11 +1570,17 @@ function repoSurface(
         // One may be open already: a call abandoned before its answer arrived
         // still opened it, and the retry that follows is the ordinary case.
         // Best-effort — a lookup that fails leaves the POST to answer for itself.
+        // The filter wants `owner:branch`; a fork's head already says whose.
+        const filter = new URLSearchParams({
+          state: "open",
+          head: head.includes(":")
+            ? head
+            : `${decodeURIComponent(owner)}:${head}`,
+          base
+        });
         const existing = await forge(
           "repo_open_pr",
-          `/repos/${owner}/${repo}/pulls?state=open` +
-            `&head=${owner}:${encodeURIComponent(head)}` +
-            `&base=${encodeURIComponent(base)}`
+          `/repos/${owner}/${repo}/pulls?${filter}`
         );
         const open =
           existing.ok && Array.isArray(existing.data)

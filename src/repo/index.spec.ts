@@ -845,6 +845,27 @@ describe("talking to the forge", () => {
     }
   });
 
+  it("looks a fork's head up under the fork's owner", async () => {
+    const spy = api({ "/pulls": [] });
+    try {
+      const { exec } = recorder({
+        "remote get-url origin": { stdout: "https://github.com/o/r" }
+      });
+      await run(tools(exec), "repo_open_pr", {
+        dir: "/w/r",
+        head: "fork:coder/x",
+        base: "main",
+        title: "t",
+        body: "b"
+      });
+
+      const lookup = new URL(String(spy.mock.calls[0]![0])).searchParams;
+      expect(lookup.get("head")).toBe("fork:coder/x");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("refuses to open a pull request for a checkout with no allowed origin", async () => {
     const spy = api({});
     try {
