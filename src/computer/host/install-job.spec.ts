@@ -6,12 +6,8 @@ import { InstallJob } from "./install-job.js";
 import type { Workspace } from "@cloudflare/computer";
 
 /**
- * What an install is allowed to certify, against real Durable Object storage.
- *
- * Driven directly rather than through the workspace object, because the path
- * under test needs a drain that reports `complete` — and with no container a
- * drain can only report `unavailable`. The storage is real; everything the job
- * reaches for on this path is `ctx.storage`.
+ * The install job against real Durable Object storage, driven directly: with no
+ * container, the workspace object can never report a tree installed.
  */
 
 /**
@@ -66,17 +62,16 @@ function jobOn(
     touch: async () => {},
     ready: async () => {},
     waitUntil: () => {},
-    armSync: async () => {},
-    forgetTrust: () => {},
+    containerGone: async () => {},
     tag: () => "spec",
     id: () => "spec-id"
   });
 }
 
-/** An install that finished, whose tree may or may not be believed to be coming. */
+/** An install that finished, and whether the running container holds its tree. */
 async function seedFinishedInstall(
   storage: DurableObjectStorage,
-  options: { inFlight: boolean }
+  options: { tree: boolean }
 ) {
   await storage.put("install", {
     state: "done",
@@ -91,55 +86,50 @@ async function seedFinishedInstall(
     command: "npm ci --no-audit --no-fund",
     startedAt: Date.now() - 140_000
   });
-  if (options.inFlight)
-    await storage.put("install:syncing", { at: Date.now() });
+  if (options.tree)
+    await storage.put("install:tree", {
+      dir: "/workspace/probe",
+      fingerprint: "the-lockfile",
+      at: Date.now()
+    });
 }
 
-describe("what a completed pull is allowed to certify", () => {
-  it("records the tree when it finished the pull that was outstanding", async () => {
-    const stub = freshWorkspace("promote-with-marker");
-    const landed = await runInDurableObject(stub, async (_instance, state) => {
-      await seedFinishedInstall(state.storage, { inFlight: true });
-      await jobOn(state.storage).onSyncComplete();
-      return state.storage.get<{ fingerprint: string }>("install:completed");
+describe("the tree belongs to the container", () => {
+  it("arms nothing while this container holds the tree", async () => {
+    const stub = freshWorkspace("tree-held");
+    const state = await runInDurableObject(stub, async (_instance, ctx) => {
+      await seedFinishedInstall(ctx.storage, { tree: true });
+      await jobOn(ctx.storage).armIfTreeMissing();
+      return (await ctx.storage.get<InstallState>("install"))?.state;
     });
-    expect(landed?.fingerprint).toBe("the-lockfile");
+    expect(state).toBe("done");
   });
 
-  it("records nothing when there was no pull to finish", async () => {
-    /**
-     * A drain answers `complete` for an empty pull exactly as for one that moved
-     * a tree — to the cursor, "nothing outstanding" and "everything arrived" are
-     * the same answer. The case that makes the difference matter is a container
-     * replaced after the install: its writes are unreachable, and the first pull
-     * from the replacement finds a clean filesystem and completes at once.
-     *
-     * Promoting there would record a tree that never crossed, and the skip
-     * condition would then decline to reinstall it — the one outcome a missing
-     * dependency tree must not have.
-     */
-    const stub = freshWorkspace("promote-without-marker");
-    const landed = await runInDurableObject(stub, async (_instance, state) => {
-      await seedFinishedInstall(state.storage, { inFlight: false });
-      await jobOn(state.storage).onSyncComplete();
-      return state.storage.get("install:completed");
+  it("arms an install once the container is gone", async () => {
+    const stub = freshWorkspace("tree-gone");
+    const state = await runInDurableObject(stub, async (_instance, ctx) => {
+      await seedFinishedInstall(ctx.storage, { tree: true });
+      const job = jobOn(ctx.storage);
+      await job.containerGone();
+      await job.armIfTreeMissing();
+      return (await ctx.storage.get<InstallState>("install"))?.state;
     });
-    expect(landed).toBeUndefined();
+    expect(state).toBe("running");
   });
 
-  it("clears the marker when the tree turns out to be unreachable", async () => {
-    const stub = freshWorkspace("unrecoverable-clears-marker");
-    const after = await runInDurableObject(stub, async (_instance, state) => {
-      await seedFinishedInstall(state.storage, { inFlight: true });
-      await jobOn(state.storage).onSyncUnrecoverable();
-      return {
-        marker: await state.storage.get("install:syncing"),
-        completed: await state.storage.get("install:completed")
-      };
+  /** A replacement started inside `connect()` is seen only through its marker. */
+  it("drops a record the container's marker contradicts, and keeps one it confirms", async () => {
+    const stub = freshWorkspace("tree-reconcile");
+    const after = await runInDurableObject(stub, async (_instance, ctx) => {
+      await seedFinishedInstall(ctx.storage, { tree: true });
+      const job = jobOn(ctx.storage);
+      await job.reconcile("the-lockfile");
+      const kept = await ctx.storage.get("install:tree");
+      await job.reconcile(null);
+      return { kept, dropped: await ctx.storage.get("install:tree") };
     });
-    // The wait is over, and deliberately without a fingerprint: the next access
-    // should find a missing tree and arm an install rather than skip one.
-    expect(after).toEqual({ marker: undefined, completed: undefined });
+    expect(after.kept).toBeDefined();
+    expect(after.dropped).toBeUndefined();
   });
 });
 

@@ -51,6 +51,8 @@ export interface ContainerTrustDeps {
   /** Log prefix and object id, for the one line an operator can see. */
   tag: () => string;
   id: () => string;
+  /** Told when the watched container exits, for what else it described. */
+  onExit?: () => void;
 }
 
 /**
@@ -128,6 +130,7 @@ export class ContainerTrust {
       const done = (): void => {
         this.#watching = false;
         this.forget();
+        this.deps.onExit?.();
       };
       container.monitor().then(done, done);
       this.#watching = true;

@@ -252,8 +252,10 @@ export async function pathExists(
   fs: WorkspaceClient["fs"],
   path: string
 ): Promise<boolean> {
-  const probe = (fs as { exists?: (p: string) => Promise<boolean> }).exists;
-  if (typeof probe === "function") return probe.call(fs, path);
+  // Called as a method, never through `.call`: on an RPC stub `.call` is read as
+  // a remote method, and the stub it would pass as `this` cannot be serialised.
+  const remote = fs as { exists?: (p: string) => Promise<boolean> };
+  if (typeof remote.exists === "function") return remote.exists(path);
   return fs.stat(path).then(
     () => true,
     () => false

@@ -5,7 +5,7 @@ import { definePlugin, withAbort } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
 import { getWorkspace, shellQuote } from "@cloudflare/computer";
 import type { WorkspaceClient, WorkspaceStub } from "@cloudflare/computer";
-import { guardPath, isSkipped, skipNames, walkSkips } from "./paths.js";
+import { guardPath, isSkipped, skipNames, WALK_SKIPS } from "./paths.js";
 import { withFileLock } from "./file-lock.js";
 import {
   cancelledNote,
@@ -37,17 +37,13 @@ import type { WorkspaceAdvisory } from "./advisory.js";
  * filesystem plugin — an agent holding two gives the model no way to know which
  * one a path refers to.
  *
- * ## The dependency tree is in the workspace too
+ * ## The dependency tree is not in the workspace
  *
- * The one thing to internalise before reading further. `computerd` syncs
- * `node_modules` along with everything else, so an install survives its
- * container: a replacement is handed the tree back rather than rebuilding it,
- * and the file tools read inside it like anywhere else.
- *
- * What that costs is attention rather than correctness: a real tree is 22,470
- * files and sorts before `src`, so a walk that showed it would spend its whole
- * page there. `paths.ts` owns what walks drop and what a path may be, including
- * the one opt-in.
+ * The one thing to internalise before reading further. Every `node_modules` is
+ * a bind mount of the container's disk, so installs never sync, and a new
+ * container reinstalls — see `./host/container-deps.ts`. The file tools read
+ * the workspace, so they refuse it; `sb_exec` reaches it. `paths.ts` owns what a
+ * path may be and what walks drop.
  *
  * Requires the Workers **Paid** plan (containers) and a Durable Object binding
  * whose class owns the workspace — see the README for the wrangler block.
@@ -81,7 +77,7 @@ export {
  * `verify:exports` treats `./computer` as one realm, and everything below stays
  * inside `dist/computer/`.
  */
-export { isGitInternal, walkSkips } from "./paths.js";
+export { isGitInternal, WALK_SKIPS } from "./paths.js";
 export {
   cancelledNote,
   packBlocks,
@@ -838,7 +834,7 @@ export function buildComputerTools(
         "Read a file from the workspace. Returns the file's text, or a note if it does not exist. " +
         "A large file comes back with its middle removed and a marker giving the `offset` that reaches the missing part. " +
         "Pass `offset` (and optionally `length`) to read a specific byte window instead — the result states the window it returned and how many bytes follow, so you can page through a file. Byte offsets, not lines: to see the lines around a match, use sb_grep with `context`. " +
-        "Files under node_modules read like any other — the dependency tree is part of the workspace.",
+        "Files under node_modules are not in the workspace — read them with sb_exec.",
       inputSchema: z.object({
         path: z
           .string()
@@ -962,7 +958,7 @@ export function buildComputerTools(
       description:
         "List files in a workspace directory, or find files by name. Without `pattern` it lists one level: directories with a trailing slash, files with their size — check that before reading a large one, since sb_read truncates. " +
         "`pattern` is a glob matched against paths relative to `path`, and searches the whole subtree: `*` stays within one path segment, `**/` crosses directories, `?` matches one character. So `*.ts` finds top-level TypeScript files and `**/*.ts` finds them at any depth. " +
-        "A cut listing reports the `offset` that continues it. Subtree listings leave out `.git` and `node_modules` — point `path` at node_modules to list inside it.",
+        "A cut listing reports the `offset` that continues it. Subtree listings leave out `.git` and `node_modules`.",
       inputSchema: z.object({
         path: z.string().describe("Absolute directory path"),
         recursive: z
@@ -1001,7 +997,7 @@ export function buildComputerTools(
             const entries = await fs.find(path, pattern, {
               limit: DEFAULT_MAX_ENTRIES + 1,
               offset: from,
-              exclude: walkSkips(path).map((segment) => `**/${segment}`)
+              exclude: WALK_SKIPS.map((segment) => `**/${segment}`)
             });
             if (entries.length === 0)
               return pattern
@@ -1071,7 +1067,7 @@ export function buildComputerTools(
         "The query is matched literally — set `regex` to interpret it as a regular expression. " +
         "Pass `include` to limit which files are searched, e.g. '**/*.ts' — without it every file under `path` is read, which is slower and rarely what you meant. " +
         "A cut result reports the `offset` that continues it. Use `context` to see the lines around a match. " +
-        "Results from `.git` and `node_modules` are left out — pass a `path` inside node_modules to search it.",
+        "Results from `.git` and `node_modules` are left out — search node_modules with sb_exec.",
       inputSchema: z.object({
         query: z.string().describe("Text to find, e.g. 'buildComputerTools'"),
         path: z
@@ -1121,7 +1117,7 @@ export function buildComputerTools(
           // it already looked at. `.git` rarely floods a page here — its bulk is
           // compressed objects, which a text query does not match — where
           // `node_modules` is source and matches like any other.
-          const skips = walkSkips(target);
+          const skips = WALK_SKIPS;
           const page = await collectVisible(
             (at, limit) =>
               fs.grep(query, target, {
@@ -1326,7 +1322,7 @@ export function computer(config: ComputerConfig): AgentPlugin {
       // is why they are stated together rather than left for the model to work
       // out from a confusing result.
       "The checkout is durable: it survives between tasks and is still there after the container restarts, so it may already contain work from an earlier task — check before assuming it is empty.",
-      "`node_modules` is durable too, so an install survives a container restart. Reading a file in it works like anywhere else, but searches and recursive listings leave it out, since a dependency tree is tens of thousands of files and would fill a page on its own — point `path` at it to search inside it.",
+      "`node_modules` is not durable: it lives on the container's disk, so a new container reinstalls it, and the file tools cannot see inside it — use `sb_exec` there.",
       // Stated up front rather than left to a refusal, so the model does not spend
       // a turn discovering it. The destination matters as much as the rule: a
       // prohibition with nowhere to go gets worked around.
