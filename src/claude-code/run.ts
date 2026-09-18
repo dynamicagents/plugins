@@ -397,10 +397,18 @@ export interface DrainOptions {
   /**
    * How long this chunk may block before checkpointing and yielding.
    *
-   * Must stay comfortably under the Workflow step timeout, and it is what stops
-   * a run burning its whole chunk allowance in seconds: a drain that returned
-   * the moment it had nothing to read would exhaust `MAX_CHUNKS_PER_BRANCH`
-   * before the session finished thinking.
+   * **This is the coder path's soft limit**, justified the same way core's
+   * `CHUNK_SOFT_MS` is — by the step timeout — but checked as a deadline on
+   * reading the session's stdout stream rather than between turns, because a
+   * `claude -p` session runs its own loop inside the container and there are no
+   * core-visible turns to stop between. The stream is the only synchronisation
+   * point there is. {@link file://./config.ts ClaudeCodeConfig.windowMs} holds
+   * how the default is sized against that timeout, what the headroom it leaves
+   * is for, and why that headroom is an expectation rather than a guarantee.
+   *
+   * It is also what stops a run burning its whole chunk allowance in seconds: a
+   * drain that returned the moment it had nothing to read would exhaust
+   * `MAX_CHUNKS_PER_BRANCH` before the session finished thinking.
    *
    * **It is not the reporting interval**, and reading it as one is the mistake
    * {@link DrainOptions.onProgress} exists to remove: a session that finishes
@@ -683,7 +691,7 @@ export async function drainRun(
    *
    * Called after **every** stdout event rather than once at the end. Claude
    * Code's stream carries whole tool results, so a chunk that only parsed on the
-   * way out would hold an eight-minute transcript of a noisy build in a Durable
+   * way out would hold a whole window's transcript of a noisy build in a Durable
    * Object's memory; parsing eagerly keeps only `carry`, which is at most one
    * incomplete line.
    */
@@ -838,8 +846,13 @@ export async function drainRun(
        *
        * It is also unbounded, deliberately: the pull carries whatever the
        * session wrote, an install's dependency tree included, so this last read
-       * can outlast the window that was left. Cutting it short to keep the
-       * window would trade a late chunk for edits that never land.
+       * can outlast the window that was left — and the step with it. Cutting it
+       * short to keep the window would trade a late chunk for edits that never
+       * land, and that trade is not close: a step killed with the pull still in
+       * flight is retried, and the sync resumes from the blocks it has already
+       * committed. A pull that *fails* is the case above, and nothing retries
+       * that. See {@link file://./config.ts ClaudeCodeConfig.windowMs} for how
+       * the window is sized around an unbounded tail.
        */
       if (exitCode !== undefined) {
         const next = await reader.read();
