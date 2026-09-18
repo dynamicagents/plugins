@@ -507,7 +507,7 @@ async function killLate(handle: {
  *   host's SQLite. Defaults to {@link workspace}, so a host with one way in
  *   behaves as before. See {@link openWorkspaceFs}.
  * @param lockScope Names the workspace a write locks within — see
- *   `./file-lock.ts`. Defaults to this tool set alone.
+ *   {@link file://./file-lock.ts}. Defaults to this tool set alone.
  */
 export function buildComputerTools(
   workspace: () => Promise<WorkspaceClient>,
@@ -522,7 +522,7 @@ export function buildComputerTools(
   const gateMs = config.installGateMs ?? 90_000;
   const env = config.env;
   const ownScope = crypto.randomUUID();
-  const lockKey = (path: string) => `${lockScope?.() ?? ownScope}\0${path}`;
+  const scope = () => lockScope?.() ?? ownScope;
 
   /**
    * Wait out anything transient, up to the gate, and report whatever is left.
@@ -892,7 +892,7 @@ export function buildComputerTools(
         const lost = await refuseWrite();
         if (lost) return lost;
         return inWorkspace("writing", path, (fs) =>
-          withFileLock(lockKey(path), async () => {
+          withFileLock(scope(), path, async () => {
             const dir = path.slice(0, path.lastIndexOf("/"));
             if (dir) await fs.mkdir(dir, { recursive: true });
             await fs.writeFile(path, content);
@@ -932,7 +932,7 @@ export function buildComputerTools(
         const lost = await refuseWrite();
         if (lost) return lost;
         return inWorkspace("editing", path, (fs) =>
-          withFileLock(lockKey(path), async () => {
+          withFileLock(scope(), path, async () => {
             const content = await fs.readFile(path, "utf8");
             const occurrences = content.split(find).length - 1;
             // Refusing an ambiguous edit is the whole value of this tool over
@@ -1117,11 +1117,10 @@ export function buildComputerTools(
         if (refusal) return refusal;
         const from = offset ?? 0;
         return inWorkspace("searching", target, async (fs) => {
-          // Two rounds, not four: a `grep` retry re-reads and re-scans every file
-          // it already looked at, where the `find` retry in `sb_ls` only re-walks
-          // dirents. `.git` is also far less likely to flood a page here — its
-          // bulk is compressed objects, which a text query does not match —
-          // where `node_modules` is source and matches like any other.
+          // Two rounds, because a `grep` retry re-reads and re-scans every file
+          // it already looked at. `.git` rarely floods a page here — its bulk is
+          // compressed objects, which a text query does not match — where
+          // `node_modules` is source and matches like any other.
           const skips = walkSkips(target);
           const page = await collectVisible(
             (at, limit) =>

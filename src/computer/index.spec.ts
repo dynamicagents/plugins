@@ -468,6 +468,34 @@ describe("sb_edit", () => {
     expect(files.get(path)).toBe("const a = 2;\nconst b = 2;\n");
   });
 
+  /** A parent and a subagent hold separate tool sets over one workspace. */
+  it("keeps both edits across tool sets that share a workspace", async () => {
+    const { workspace, files } = stub({
+      [path]: "const a = 1;\nconst b = 1;\n"
+    });
+    const scope = () => "caller|owner/repo";
+    const parent = buildComputerTools(
+      workspace,
+      config,
+      undefined,
+      workspace,
+      scope
+    );
+    const child = buildComputerTools(
+      workspace,
+      config,
+      undefined,
+      workspace,
+      scope
+    );
+
+    await Promise.all([
+      run(parent, "sb_edit", { path, find: "a = 1", replace: "a = 2" }),
+      run(child, "sb_edit", { path, find: "b = 1", replace: "b = 2" })
+    ]);
+    expect(files.get(path)).toBe("const a = 2;\nconst b = 2;\n");
+  });
+
   /**
    * The replacement is written byte-for-byte, `$` and all.
    *
@@ -955,10 +983,10 @@ describe("paths inside .git", () => {
 /**
  * Paging, and the bookkeeping that keeps it honest.
  *
- * `offset` counts items at the *source*, while what the model sees is filtered and
- * then trimmed to a byte budget. So the obvious `offset + shown` is wrong exactly
- * when `.git` was dropped — and wrong silently, repeating or skipping with nothing
- * to indicate it.
+ * `sb_ls` gets pages the store has already pruned, so its next offset is plain
+ * `offset + shown`. `sb_grep` filters after the fetch, so its offset has to stay a
+ * source coordinate — `offset + shown` would repeat or skip exactly when something
+ * was dropped, and silently.
  */
 describe("offsets that survive filtering", () => {
   const root = "/workspace/repo";

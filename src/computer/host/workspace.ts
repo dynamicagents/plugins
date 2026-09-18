@@ -1054,7 +1054,8 @@ export abstract class WorkspaceObjectBase<
   async #stopContainer(reason: "idle" | "reclaim"): Promise<void> {
     console.info(`[${this.#tag}] stopping the container`, {
       id: this.ctx.id.toString(),
-      reason
+      reason,
+      running: this.ctx.container?.running ?? false
     });
     try {
       await this.ctx.container?.destroy();

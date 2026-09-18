@@ -31,10 +31,10 @@ tree back rather than rebuilding it, and the file tools read inside it like anyw
 else.
 
 What it costs is attention, not correctness. A real tree is 22,470 files and sorts
-before `src`, so `sb_grep` and recursive `sb_ls` leave those results out — and say so
-when a page falls entirely inside one. Pointing `path` at `node_modules` searches it,
-which is what keeps that a default rather than a wall; `.git` has no such opt-in,
-because the guard below refuses it as a path at all.
+before `src`, so `sb_grep` and recursive `sb_ls` leave those results out. Pointing
+`path` at `node_modules` searches it, which is what keeps that a default rather than
+a wall; `.git` has no such opt-in, because the guard below refuses it as a path at
+all.
 
 `sb_ls` passes both as `find` exclusions, so the store never walks them. `grep` takes
 no exclusion, so `sb_grep` filters its results: it still pays to traverse what it
