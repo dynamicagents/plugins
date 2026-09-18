@@ -89,7 +89,7 @@
     "prepare": "husky || true && npm run build"
   },
   "peerDependencies": {
-    "@cloudflare/computer": "^0.3.0",
+    "@cloudflare/computer": "^0.3.1",
     "@cloudflare/shell": "^0.4.3",
     "@dynamicagents/core": ">=0.11.0 <0.12.0",
     "@platformatic/vfs": "^0.4.0",

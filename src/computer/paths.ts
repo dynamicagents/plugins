@@ -58,13 +58,10 @@ const SKIPPED_UNLESS_NAMED = ["node_modules"] as const;
 /**
  * What a walk rooted at `root` steps over.
  *
- * Filtering happens on the results rather than in the traversal, because the
- * workspace filesystem takes no exclusion — `find` offers a limit and an offset,
- * `grep` a positive `include` glob, and neither can be told to stay out of a
- * directory. So a walk still *pays* for what it skips, and a page landing
- * entirely inside one reports itself as crowded rather than as empty; the cheap
- * answer to that is a narrower `path`, `pattern` or `include`, which is what
- * those messages offer.
+ * `find` takes these as exclusions and prunes them in the store. `grep` takes
+ * no exclusion, so `sb_grep` filters its results instead: it still pays for what
+ * it skips, and a page landing entirely inside one reports itself as crowded
+ * rather than as empty.
  */
 export function walkSkips(root: string): readonly string[] {
   return [

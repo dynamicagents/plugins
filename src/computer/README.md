@@ -36,11 +36,9 @@ when a page falls entirely inside one. Pointing `path` at `node_modules` searche
 which is what keeps that a default rather than a wall; `.git` has no such opt-in,
 because the guard below refuses it as a path at all.
 
-The filtering is on the results. The workspace filesystem takes no exclusion — `find`
-has a limit and an offset, `grep` a positive `include` glob — so a walk still pays to
-traverse what it drops, and a page landing wholly inside one comes back reporting
-that rather than reporting nothing. A narrower `path`, `pattern` or `include` is the
-cheap answer, and the message says so.
+`sb_ls` passes both as `find` exclusions, so the store never walks them. `grep` takes
+no exclusion, so `sb_grep` filters its results: it still pays to traverse what it
+drops, and a page landing wholly inside one says so rather than reporting nothing.
 
 ## `.git` is off limits
 
