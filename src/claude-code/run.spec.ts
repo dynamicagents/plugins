@@ -353,6 +353,29 @@ describe("drainRun", () => {
   });
 
   /**
+   * A drain that ends early must not leave the window armed: a pending timer
+   * holds the facet's `executeChunk` open until the window runs out, so a
+   * session that finished in seconds still cost the whole window.
+   */
+  it("leaves no timer behind when the session ends inside the window", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const handle = fakeHandle([
+        stdout(1, assistant("working")),
+        stdout(2, RESULT_LINE),
+        exit(3, 0)
+      ]);
+
+      const outcome = await drainRun(handle, FRESH, { windowMs: 20 * 60_000 });
+
+      expect(outcome.done).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * The pacing rule. A session legitimately runs longer than one chunk, and a
    * drain that returned the moment it had nothing to read would exhaust the
    * branch's forty chunks in seconds without the run ever failing.

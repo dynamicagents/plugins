@@ -624,6 +624,38 @@ function unreachableNote(err: unknown): string {
  */
 const gitQueues = new WeakMap<RepoConfig, { tail: Promise<unknown> }>();
 
+/**
+ * How long one command may hold its checkout's queue.
+ *
+ * A command whose container or host never answers — a workspace object that
+ * reset under it — would otherwise hold every git command behind it for the life
+ * of the isolate, each abandoned in turn at core's per-call limit. Past this the
+ * command is reported unreachable and the queue moves on. It may still be
+ * running; a later command that meets its `index.lock` fails fast and says so.
+ * Under that per-call limit, so the tool answers for itself rather than being
+ * abandoned, and far longer than any git command here takes.
+ */
+const GIT_SLOT_MS = 8 * 60_000;
+
+/** `work`, rejected once {@link GIT_SLOT_MS} passes without it settling. */
+function withinSlot<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `no answer within ${GIT_SLOT_MS / 60_000} minutes, and it may still be running`
+          )
+        ),
+      GIT_SLOT_MS
+    );
+  });
+  // The loser still settles, and a rejection nobody holds fails the request.
+  work.catch(() => {});
+  return Promise.race([work, expired]).finally(() => clearTimeout(timer));
+}
+
 export function buildRepoTools(
   config: RepoConfig,
   /** Forwarded to every `exec`; see {@link RepoExec}'s `runtime` option. */
@@ -758,7 +790,7 @@ function repoSurface(
   ): Promise<RunResult> =>
     serialised(async () => {
       try {
-        return await config.exec(command, options());
+        return await withinSlot(config.exec(command, options()));
       } catch (err) {
         // Logged here as well as by the tool's own failure branch: the two say
         // different things, and this is the one that names the command. The
@@ -834,7 +866,7 @@ function repoSurface(
   const runGit = (op: () => Promise<RepoGitResult>): Promise<RunResult> =>
     serialised(async () => {
       try {
-        const result = await op();
+        const result = await withinSlot(op());
         return result.ok
           ? { success: true, stdout: result.detail, stderr: "", exitCode: 0 }
           : { success: false, stdout: "", stderr: result.message, exitCode: 1 };
@@ -1320,7 +1352,13 @@ function repoSurface(
         // `$(…)`. Expanded from the environment inside the container, all of
         // that is inert; interpolated into the command string, none of it is.
         const result = await plain(`commit -m "$GIT_COMMIT_MESSAGE"`, dir, {
-          GIT_COMMIT_MESSAGE: message
+          GIT_COMMIT_MESSAGE: message,
+          // On the commit as well as in the checkout's config, which only a
+          // checkout `repo_clone` made has: without it git refuses to commit.
+          GIT_AUTHOR_NAME: author.name,
+          GIT_AUTHOR_EMAIL: author.email,
+          GIT_COMMITTER_NAME: author.name,
+          GIT_COMMITTER_EMAIL: author.email
         });
         if (!result.success && /nothing to commit/i.test(result.stdout))
           return "nothing to commit — the working tree is clean";
@@ -1528,6 +1566,22 @@ function repoSurface(
         const target = await forgeRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
+
+        // One may be open already: a call abandoned before its answer arrived
+        // still opened it, and the retry that follows is the ordinary case.
+        // Best-effort — a lookup that fails leaves the POST to answer for itself.
+        const existing = await forge(
+          "repo_open_pr",
+          `/repos/${owner}/${repo}/pulls?state=open` +
+            `&head=${owner}:${encodeURIComponent(head)}` +
+            `&base=${encodeURIComponent(base)}`
+        );
+        const open =
+          existing.ok && Array.isArray(existing.data)
+            ? (existing.data[0] as { html_url?: string } | undefined)
+            : undefined;
+        if (open?.html_url)
+          return `already open, nothing new was created: ${open.html_url}`;
 
         const opened = await forge(
           "repo_open_pr",

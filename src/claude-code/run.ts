@@ -864,10 +864,10 @@ export async function drainRun(
       const remaining = deadline - now();
       if (remaining <= 0) return await yieldWindow();
 
-      const next = await Promise.race([
-        reader.read(),
-        sleep(remaining).then((): typeof WINDOW_EXPIRED => WINDOW_EXPIRED)
-      ]);
+      const timer = windowTimer(remaining);
+      const next = await Promise.race([reader.read(), timer.expired]).finally(
+        timer.clear
+      );
 
       if (next === WINDOW_EXPIRED) return await yieldWindow();
       if (next.done) {
@@ -934,6 +934,24 @@ export async function drainRun(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * What's left of the window, as a race a read can win.
+ *
+ * Cleared by the caller whichever side wins: one is armed per read, and a timer
+ * left pending holds the facet's `executeChunk` open until the window's end, so
+ * a session that finishes in seconds would still cost the whole window.
+ */
+function windowTimer(ms: number): {
+  expired: Promise<typeof WINDOW_EXPIRED>;
+  clear: () => void;
+} {
+  let id: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<typeof WINDOW_EXPIRED>((resolve) => {
+    id = setTimeout(() => resolve(WINDOW_EXPIRED), ms);
+  });
+  return { expired, clear: () => clearTimeout(id) };
 }
 
 /** How much stderr is worth carrying, in characters. */
