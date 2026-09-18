@@ -21,6 +21,7 @@ import {
 import { createGitClient } from "@cloudflare/computer/git";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
 import { ContainerTrust } from "./ca-trust.js";
+import { ContainerDeps } from "./container-deps.js";
 import { InstallJob } from "./install-job.js";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 import { WorkspaceGitHost } from "./git-host.js";
@@ -229,6 +230,12 @@ const SYNC_DRAIN_ID = "sync-drain-id";
  * indefinitely — so this is the wall on that, measured from the last use.
  */
 const SYNC_DRAIN_GRACE_MS = 30 * 60_000;
+
+/**
+ * Set once the synced dependency trees are gone from this object's storage —
+ * see {@link WorkspaceObjectBase.#purgeSyncedTrees}.
+ */
+const SYNCED_TREES_PURGED_KEY = "deps:purged";
 
 // --- the object -------------------------------------------------------------
 
@@ -518,8 +525,7 @@ export abstract class WorkspaceObjectBase<
     touch: () => this.#touch(),
     ready: () => this.#ready(),
     waitUntil: (promise) => this.ctx.waitUntil(promise),
-    armSync: () => this.#sync.arm(),
-    forgetTrust: () => this.#trust.forget(),
+    containerGone: () => this.#containerGone(),
     tag: () => this.#tag,
     id: () => this.ctx.id.toString()
   });
@@ -599,8 +605,24 @@ export abstract class WorkspaceObjectBase<
     workspace: () => this.#workspace,
     container: () => this.ctx.container,
     tag: () => this.#tag,
+    id: () => this.ctx.id.toString(),
+    onExit: () => void this.#containerGone()
+  });
+
+  /** Where installs write — see `./container-deps.ts`. */
+  readonly #deps = new ContainerDeps({
+    workspace: () => this.#workspace,
+    workspaceDir: WORKSPACE_DIR,
+    tag: () => this.#tag,
     id: () => this.ctx.id.toString()
   });
+
+  /** Everything believed about a container, dropped when it goes. */
+  async #containerGone(): Promise<void> {
+    this.#trust.forget();
+    this.#deps.forget();
+    await this.#install.containerGone();
+  }
 
   /**
    * Set once {@link reclaimIfIdle} has emptied storage, until the alarm it armed
@@ -618,7 +640,8 @@ export abstract class WorkspaceObjectBase<
   #readying?: Promise<void>;
 
   /**
-   * Open the workspace, and make sure the container behind it can speak TLS.
+   * Open the workspace, and make sure the container behind it can speak TLS and
+   * installs onto its own disk.
    *
    * **Every path that might start a container goes through here**, which is the
    * fix for a real gap rather than tidiness. The CA install used to hang off
@@ -663,25 +686,54 @@ export abstract class WorkspaceObjectBase<
 
   /** One start, run for whoever got there first — see {@link #ready}. */
   async #readyNow(): Promise<void> {
-    if (!this.ctx.container?.running) {
-      this.#trust.forget();
-      /**
-       * Whatever the last container still held, it is not coming.
-       *
-       * `ready()` below starts a replacement, and once it has there is nothing
-       * left to distinguish "the tree never crossed" from "the tree is here":
-       * the first pull from a fresh container finds a clean filesystem and
-       * reports itself complete. Said before that happens, while the absence is
-       * still knowable.
-       *
-       * Without it the marker outlives the container it described —
-       * `armIfTreeMissing` keeps deferring to a pull that cannot arrive, and the
-       * workspace never reinstalls the dependencies it is missing.
-       */
-      await this.#install.onSyncUnrecoverable();
-    }
+    // Read **before** `ready()`, which starts a stopped container.
+    if (!this.ctx.container?.running) await this.#containerGone();
     await this.#workspace.ready();
+    // Before the first exec, which pushes the whole tree into a new container.
+    await this.#purgeSyncedTrees();
     await this.#trust.ensure();
+    const found = await this.#deps.ensure(await this.#install.dir());
+    if (found) await this.#install.reconcile(found.marker);
+  }
+
+  /**
+   * Delete every `node_modules` that was synced into this object, once.
+   *
+   * Left in place, each is pushed into every new container — where the bind
+   * mount hides it but computerd still holds it in memory.
+   */
+  async #purgeSyncedTrees(): Promise<void> {
+    if (await this.ctx.storage.get(SYNCED_TREES_PURGED_KEY)) return;
+    const startedAt = Date.now();
+    const fs = this.#workspace.fs;
+    try {
+      const trees = await fs
+        .find(WORKSPACE_DIR, "**/node_modules", {
+          exclude: ["**/.git", "**/node_modules/*"]
+        })
+        // No workspace directory yet, so nothing was ever synced.
+        .catch((err: { code?: string }) => {
+          if (err?.code === "ENOENT") return [];
+          throw err;
+        });
+      for (const tree of trees) {
+        if (tree.type === "dir") await fs.rm(tree.path, { recursive: true });
+      }
+      await this.ctx.storage.put(SYNCED_TREES_PURGED_KEY, Date.now());
+      if (trees.length > 0)
+        console.info(`[${this.#tag}] purged synced dependency trees`, {
+          id: this.ctx.id.toString(),
+          trees: trees.map((t) => t.path),
+          ms: Date.now() - startedAt
+        });
+    } catch (err) {
+      // Left unmarked, so the next start tries again; a command must not fail
+      // for it.
+      console.warn(`[${this.#tag}] could not purge synced dependency trees`, {
+        id: this.ctx.id.toString(),
+        err: String(err)
+      });
+    }
   }
 
   #workspaceOptions(): WorkspaceOptions {
@@ -694,8 +746,7 @@ export abstract class WorkspaceObjectBase<
       backends: [this.backend],
       // One line per committed sync block and one per finished operation, into
       // the same Workers Observability view as the spans below — blocks,
-      // entries, bytes, and the CPU headroom each block left, which is what a
-      // dependency tree crossing into this object's SQLite makes worth having.
+      // entries, bytes, and the CPU headroom each block left.
       //
       // **It covers the syncs this object drives, not the ones a command drives
       // for itself.** `pull()` and `push()` log; the push a `runtime.exec` does
@@ -772,8 +823,8 @@ export abstract class WorkspaceObjectBase<
     // idle clock and the alarm honest.
     await this.#touch();
     await this.#repairAlarm();
-    await this.#install.armIfTreeMissing();
     await this.#ready();
+    await this.#install.armIfTreeMissing();
     return this.#workspace.stub();
   }
 
@@ -784,9 +835,8 @@ export abstract class WorkspaceObjectBase<
    * filesystem is this object's own SQLite, so a read or write of it needs no
    * container and an absent one cannot block it. {@link __getWorkspaceStub} adds
    * `#ready()`, and the first command in a fresh container re-pushes the whole
-   * tree before it runs — minutes, on a checkout carrying `node_modules`, with
-   * `timeoutMs` reaching the spawned process and nothing earlier. That wait used
-   * to sit in front of every file tool.
+   * tree before it runs, with `timeoutMs` reaching the spawned process and
+   * nothing earlier.
    *
    * A stub cannot enforce what the caller does with it: `runtime.exec` on this
    * one would run against a container with no CA. The exec paths take the other
@@ -795,7 +845,6 @@ export abstract class WorkspaceObjectBase<
   async __getWorkspaceFsStub(): Promise<WorkspaceStub> {
     await this.#touch();
     await this.#repairAlarm();
-    await this.#install.armIfTreeMissing();
     await this.#warmIfCold();
     // Indexes mounts and nothing else — no backend connects here, which is what
     // makes this cheap enough to sit in front of every file tool.
@@ -898,9 +947,7 @@ export abstract class WorkspaceObjectBase<
      * replacement first and the drain can no longer tell: `pull()` reconnects to
      * whatever is running now, finds a filesystem that matches this object
      * because the workspace just pushed it there, and reports a clean
-     * completion — for writes that are gone. That answer is worse than no
-     * answer, because `complete` is the branch that promotes the fingerprint,
-     * so a tree that never arrived would be recorded as having landed.
+     * completion — for writes that are gone.
      *
      * Asked while the old container is still the only one there, the same call
      * either moves the writes or says plainly there is nothing to move them
@@ -930,7 +977,6 @@ export abstract class WorkspaceObjectBase<
           "again in a moment."
       };
     }
-    if (synced === "complete") await this.#install.onSyncComplete();
 
     await this.#ready();
     return undefined;
@@ -1067,6 +1113,7 @@ export abstract class WorkspaceObjectBase<
         err: String(err)
       });
     }
+    await this.#containerGone();
   }
 
   /**
@@ -1224,12 +1271,14 @@ export abstract class WorkspaceObjectBase<
    * drain outlives its owner, dies mid-`npm ci` with "WritableStream RPC stub
    * was disposed without calling close()", and leaves a half-written tree.
    *
-   * Detecting a missing dependency tree happens once, on the way in, off a read
-   * of this object's own storage rather than a container round trip — and the
-   * install it arms runs in the alarm, which owns no request and outlives every
-   * RPC.
+   * A missing dependency tree arms an install here, which runs in the alarm,
+   * which owns no request and outlives every RPC. Here because a command reads
+   * this before its `#ready()` starts a container, so the gate holds it for the
+   * install rather than letting it outrun one.
    */
   async advisories(): Promise<readonly WorkspaceAdvisory[]> {
+    if (!this.ctx.container?.running) await this.#containerGone();
+    await this.#install.armIfTreeMissing();
     const install = await this.#install.state();
     const storage = this.#storageHeadroom();
     // Only when the record says failed: it is the one state whose reading a
@@ -1316,8 +1365,7 @@ export abstract class WorkspaceObjectBase<
    * failure backs off, carrying its own count in the schedule's payload — the
    * object does not survive between wake-ups, so there is nowhere else to keep
    * it. Nothing reachable ends the attempt: a container that is gone took the
-   * unpulled writes with it, so the install's record of a tree still in flight
-   * is cleared and the next access can arm a fresh install.
+   * unpulled writes with it.
    */
   async #onSyncDrain(payload?: SyncDrainIntent): Promise<void> {
     const outcome = await this.#sync.drain(SYNC_DRAIN_BUDGET_MS);
@@ -1327,10 +1375,7 @@ export abstract class WorkspaceObjectBase<
     }
     if (outcome === "failed") {
       await this.#sync.arm((payload?.attempt ?? 0) + 1);
-      return;
     }
-    if (outcome === "complete") await this.#install.onSyncComplete();
-    else await this.#install.onSyncUnrecoverable();
   }
 
   /** The idle-reclaim deadline came due. */
@@ -1361,6 +1406,7 @@ export abstract class WorkspaceObjectBase<
     if (this.ctx.container?.running) return;
     try {
       await this.#ready();
+      await this.#install.armIfTreeMissing();
     } catch (err) {
       console.warn(`[${this.#tag}] could not warm the container`, {
         id: this.ctx.id.toString(),
@@ -1417,13 +1463,6 @@ export abstract class WorkspaceObjectBase<
   /**
    * Whether the idle deadline deferred to let an outstanding pull finish.
    *
-   * Every path that ends the wait tells the install so, and that is not
-   * bookkeeping: an install whose tree is still crossing suppresses the next
-   * reinstall while it believes one is on its way. Once this returns `false` the
-   * container is destroyed, and the tree is not on its way any more — so leaving
-   * that belief standing would skip the install for as long as the marker lasts,
-   * on a workspace whose dependencies are the thing that is missing.
-   *
    * `attempt` is how many times the drain has failed in a row, carried on the
    * schedule because nothing in memory survives a wake-up.
    */
@@ -1432,15 +1471,7 @@ export abstract class WorkspaceObjectBase<
     attempt: number
   ): Promise<boolean> {
     const outcome = await this.#sync.drain(SYNC_DRAIN_BUDGET_MS);
-    if (outcome === "complete") {
-      await this.#install.onSyncComplete();
-      return false;
-    }
-    // Nothing to pull from, so nothing is still on its way.
-    if (outcome === "unavailable") {
-      await this.#install.onSyncUnrecoverable();
-      return false;
-    }
+    if (outcome === "complete" || outcome === "unavailable") return false;
 
     if (Date.now() - lastUsedAt > this.#containerIdleMs + SYNC_DRAIN_GRACE_MS) {
       console.error(
@@ -1451,7 +1482,6 @@ export abstract class WorkspaceObjectBase<
           graceMinutes: Math.round(SYNC_DRAIN_GRACE_MS / 60_000)
         }
       );
-      await this.#install.onSyncUnrecoverable();
       return false;
     }
 

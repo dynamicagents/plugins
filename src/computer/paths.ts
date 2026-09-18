@@ -1,12 +1,11 @@
 /**
  * Which paths these tools act on, and the sentence a refused one gets.
  *
- * Two questions that look alike and are not. **Refusal** is about access, and
- * only `.git` is refused — policy, decided here, because a model that edits
- * `.git/HEAD` corrupts a checkout in a way that surfaces much later. **Skipping**
- * is about attention: a recursive walk that spends its page on a dependency tree
- * shows the model nothing it asked for, so the walk steps over those directories
- * while every one of their files stays readable by name.
+ * Both refused directories are also skipped by every walk. `.git` is refused as
+ * policy: a model that edits `.git/HEAD` corrupts a checkout in a way that
+ * surfaces much later. `node_modules` is refused as a fact: it lives on the
+ * container's disk (see `./host/container-deps.ts`), so these tools, which read
+ * the workspace, would find it empty.
  *
  * Everything here is a string comparison: no filesystem, no `await`, which is
  * what lets {@link guardPath} run before a tool opens the workspace at all.
@@ -31,44 +30,10 @@ export function isGitInternal(path: string): boolean {
 }
 
 /**
- * Skipped by every walk, whatever it was pointed at.
- *
- * `.git` only, and it is the same answer {@link guardPath} gives: a walk cannot
- * be rooted there either, because every file tool guards its path first. Listed
- * separately from the directory below precisely so the two are not confused —
- * one is policy the model cannot opt out of, the other is a default it can.
+ * What every walk steps over. `find` prunes these in the store; `grep` takes no
+ * exclusion, so `sb_grep` filters its results instead.
  */
-const ALWAYS_SKIPPED = [".git"] as const;
-
-/**
- * Skipped by a walk unless the caller names it.
- *
- * The dependency tree is *present and readable* — the workspace holds it the
- * same way it holds the source — so this is about what a walk is for rather than
- * about access. A real tree runs to tens of thousands of files and sorts before
- * `src`, so a walk that descended into it would spend its page there.
- *
- * Naming it as the root is the opt-in, and it has to exist: a search pointed at
- * a dependency that then skipped that dependency would match nothing and report
- * everything skipped, which is the kind of answer that sends a model looking for
- * a bug that is not there.
- */
-const SKIPPED_UNLESS_NAMED = ["node_modules"] as const;
-
-/**
- * What a walk rooted at `root` steps over.
- *
- * `find` takes these as exclusions and prunes them in the store. `grep` takes
- * no exclusion, so `sb_grep` filters its results instead: it still pays for what
- * it skips, and a page landing entirely inside one reports itself as crowded
- * rather than as empty.
- */
-export function walkSkips(root: string): readonly string[] {
-  return [
-    ...ALWAYS_SKIPPED,
-    ...SKIPPED_UNLESS_NAMED.filter((segment) => !hasSegment(root, segment))
-  ];
-}
+export const WALK_SKIPS = [".git", "node_modules"] as const;
 
 /** Whether a walk carrying `skips` steps over `path`. */
 export function isSkipped(skips: readonly string[], path: string): boolean {
@@ -81,6 +46,15 @@ export function skipNames(skips: readonly string[]): string {
   return quoted.length > 1
     ? `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`
     : (quoted[0] ?? "");
+}
+
+/** The sentence a `node_modules` path gets. */
+function dependencyTreeNote(path: string, verb: string): string {
+  return (
+    `${path} is inside node_modules, which lives on the container's disk rather ` +
+    `than in the workspace ${verb} works on. Use sb_exec there — ` +
+    `\`cat\`, \`ls\`, \`rg\`.`
+  );
 }
 
 /**
@@ -137,5 +111,6 @@ function gitInternalNote(path: string, verb: string): string {
  */
 export function guardPath(path: string, verb: string): string | undefined {
   if (isGitInternal(path)) return gitInternalNote(path, verb);
+  if (hasSegment(path, "node_modules")) return dependencyTreeNote(path, verb);
   return undefined;
 }

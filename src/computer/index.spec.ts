@@ -373,58 +373,37 @@ describe("the dependency tree", () => {
   const dep = "/workspace/repo/node_modules/zod/index.ts";
 
   /**
-   * The load-bearing one, and it used to assert the opposite. The tree is synced
-   * into the workspace, so a dependency reads like any other file — and a plugin
-   * that refused it would be describing a filesystem that is no longer there,
-   * sending the model to `sb_exec` for something the file tools can serve.
+   * The tree is on the container's disk, so the workspace these tools read has
+   * nothing there. Each file tool refuses it and names `sb_exec`, which reaches
+   * it; a write would land in the workspace, where nothing would ever read it.
    */
-  it("reads a dependency like any other file", async () => {
-    const { workspace } = stub({ [dep]: "export const z = 1;\n" });
+  it("refuses it in every file tool, routing to sb_exec", async () => {
+    const { workspace, files } = stub({ [dep]: "export const z = 1;\n" });
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_read", { path: dep });
-    expect(out).toContain("export const z = 1;");
-    expect(out).not.toContain("only in the container");
+    for (const [name, input] of [
+      ["sb_read", { path: dep }],
+      ["sb_write", { path: dep, content: "x" }],
+      ["sb_edit", { path: dep, find: "z", replace: "y" }],
+      ["sb_ls", { path: "/workspace/repo/node_modules" }],
+      ["sb_grep", { query: "z", path: "/workspace/repo/node_modules" }],
+      ["sb_exists", { path: dep }]
+    ] as const) {
+      expect(await run(tools, name, input)).toContain("sb_exec");
+    }
+    expect(files.get(dep)).toBe("export const z = 1;\n");
   });
 
-  it("writes into it rather than pretending it cannot", async () => {
-    const { workspace, files } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    await run(tools, "sb_write", { path: dep, content: "x" });
-    expect(files.get(dep)).toBe("x");
-  });
-
-  /**
-   * Skipping is about attention rather than access: a tree of tens of thousands
-   * of files sorts before `src` and would spend the whole page. The two halves
-   * are asserted together because either alone is a bug — a walk that descends
-   * shows nothing useful, and one that cannot be pointed at a dependency at all
-   * is a wall wearing a default's clothes.
-   */
-  it("steps over it in a search, and searches it when named", async () => {
-    const seed = {
+  it("steps over it in a search", async () => {
+    const { workspace } = stub({
       "/workspace/repo/src/a.ts": "const marker = 1;\n",
       [dep]: "const marker = 2;\n"
-    };
-
-    const { workspace } = stub(seed);
-    const skipped = await run(
-      buildComputerTools(workspace, config),
-      "sb_grep",
-      {
-        query: "marker"
-      }
-    );
-    expect(skipped).toContain("/workspace/repo/src/a.ts");
-    expect(skipped).not.toContain("node_modules");
-
-    const { workspace: named } = stub(seed);
-    const searched = await run(buildComputerTools(named, config), "sb_grep", {
-      query: "marker",
-      path: "/workspace/repo/node_modules"
     });
-    expect(searched).toContain(dep);
+    const out = await run(buildComputerTools(workspace, config), "sb_grep", {
+      query: "marker"
+    });
+    expect(out).toContain("/workspace/repo/src/a.ts");
+    expect(out).not.toContain("node_modules");
   });
 
   it("steps over it in a recursive listing", async () => {
@@ -949,18 +928,13 @@ describe("paths inside .git", () => {
     expect(out).not.toContain("/.git/");
   });
 
-  it("has the store prune .git and node_modules, unless the walk starts inside one", async () => {
+  it("has the store prune .git and node_modules", async () => {
     const { workspace, finds } = stub();
     const tools = buildComputerTools(workspace, config);
 
     await run(tools, "sb_ls", { path: "/workspace/repo", recursive: true });
-    await run(tools, "sb_ls", {
-      path: "/workspace/repo/node_modules",
-      recursive: true
-    });
 
     expect(finds[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
-    expect(finds[1]?.exclude).toEqual(["**/.git"]);
   });
 
   /**

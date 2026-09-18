@@ -23,28 +23,33 @@ Install exactly one filesystem plugin. An agent holding this and
 [`/workspace`](../workspace/) gives the model no way to know which one a path refers
 to.
 
-## `node_modules` is in the workspace too
+## `node_modules` is on the container's disk
 
-The one thing to internalise. `computerd` syncs the dependency tree along with
-everything else, so an install outlives its container: a replacement is handed the
-tree back rather than rebuilding it, and the file tools read inside it like anywhere
-else.
+The one thing to internalise. When `npm`, `npx`, `pnpm`, `yarn`, `corepack`, `bun`
+or `bunx` runs under the workspace, the `node_modules` of the package root it runs in
+— or is pointed at with `--prefix`, `--cwd`, `--dir` or `-C` — becomes a bind mount
+of the container's own disk. So an install never syncs: it runs at disk speed, and
+the tree never crosses into the Durable Object, or back into every fresh container
+before its first command runs. Workspace members are not mounted; an install at the
+root puts the bulk of the tree there.
 
-What it costs is attention, not correctness. A real tree is 22,470 files and sorts
-before `src`, so `sb_grep` and recursive `sb_ls` leave those results out. Pointing
-`path` at `node_modules` searches it, which is what keeps that a default rather than
-a wall; `.git` has no such opt-in, because the guard below refuses it as a path at
-all.
+A mount point cannot be removed, so `rm -rf node_modules` empties it and then fails.
+`npm ci` clears it itself.
 
-`sb_ls` passes both as `find` exclusions, so the store never walks them. `grep` takes
-no exclusion, so `sb_grep` filters its results: it still pays to traverse what it
-drops, and a page landing wholly inside one says so rather than reporting nothing.
+The cost is that a new container reinstalls. Container directory snapshots are
+the intended fix: restored at start, they would bring the tree back without a
+reinstall.
+
+The file tools read the workspace, so they refuse `node_modules` paths and route to
+`sb_exec`. Walks skip it with `.git`: `sb_ls` passes both to `find` as exclusions,
+so the store never walks them, and `sb_grep`, whose `grep` takes no exclusion,
+filters its results.
 
 ## `.git` is off limits
 
-Present in the workspace, refused by the file tools anyway, and skipped by walks like
-the dependency tree above. Reading it tells the model less than [`/repo`](../repo/) does,
-and writing it corrupts the checkout. Repository work goes through the repo tools.
+Present in the workspace, refused by the file tools anyway, and skipped by walks.
+Reading it tells the model less than [`/repo`](../repo/) does, and writing it
+corrupts the checkout. Repository work goes through the repo tools.
 
 ## Searching
 
@@ -98,9 +103,8 @@ bringing its own object must satisfy instead.
   egress CA installed.
 - `__getWorkspaceFsStub()` — the same workspace for the file tools, served **without
   starting a container**. The filesystem is the object's own SQLite, while the first
-  command in a _fresh_ container waits for the whole tree to be pushed across —
-  minutes, on a checkout carrying `node_modules`. Serving both the same way puts that
-  wait in front of `sb_read`. A host with nothing to distinguish returns
+  command in a _fresh_ container waits for the whole tree to be pushed across.
+  Serving both the same way puts that wait in front of `sb_read`. A host with nothing to distinguish returns
   `__getWorkspaceStub()`; required for the reason `advisories` gives below.
 - `advisories(): Promise<readonly WorkspaceAdvisory[]>` — everything currently true
   about the workspace that a caller must not assume away, or `[]`. Required rather
@@ -115,10 +119,9 @@ bringing its own object must satisfy instead.
   that renders its own wording is re-deriving severity from an error string, which
   is what this replaced.
 
-  `dependencyTreePresent` is existence only — is there a `node_modules` directory in
-  the workspace — and is reported to the reader rather than acted on, because an
-  `npm ci` that died partway leaves the directory behind. It qualifies a failure; it
-  never cancels one.
+  `dependencyTreePresent` is whether the running container holds a finished tree. It
+  is reported to the reader rather than acted on: it qualifies a failure, and never
+  cancels one.
 
   `sb_exec` and the write tools consult this. `sb_exec` waits out anything transient and warns about the
   rest; `sb_write` and `sb_edit` **refuse** when an advisory says writes do not
@@ -209,8 +212,8 @@ object, so renaming one is a storage migration rather than a refactor.
 | -------------------------------------------------------- | ------------------------------------------------------------ |
 | `install`                                                | the install record — the state the gate above reads          |
 | `install:armed`, `install:last-armed`, `install:context` | core's `JobLifecycle` bookkeeping, derived from the id above |
-| `install:syncing`                                        | an install whose tree has not finished crossing              |
-| `install:completed`                                      | the fingerprint of a tree that landed in full                |
+| `install:tree`                                           | the tree the running container holds, by directory and lock  |
+| `deps:purged`                                            | synced `node_modules` trees have been deleted from storage   |
 | `checkout`                                               | where the work is, and whether it is a clone or a scratchpad |
 | `lastUsedAt`                                             | what the idle clock measures                                 |
 | `idle-reclaim-id`, `container-idle-id`, `sync-drain-id`  | the schedule row each deadline currently stands as           |
@@ -273,4 +276,7 @@ npm install @cloudflare/computer @platformatic/vfs
 ```
 
 The image is `@cloudflare/computer`'s contract rather than this one's — it runs
-`computerd`, and the shell named in `ComputerConfig` has to exist in it.
+`computerd`, and the shell named in `ComputerConfig` has to exist in it. This plugin
+also needs `mount`, `mountpoint` and `sha256sum` in the image, `/usr/local/sbin`
+ahead of the package managers on `PATH`, and a container allowed to bind-mount,
+which Cloudflare Containers are.

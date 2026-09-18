@@ -4,7 +4,7 @@ import {
   isGitInternal,
   isSkipped,
   skipNames,
-  walkSkips
+  WALK_SKIPS
 } from "./paths.js";
 
 /**
@@ -30,7 +30,7 @@ describe("segments, not substrings", () => {
   });
 
   it("skips node_modules as a whole segment, not as a substring", () => {
-    const skips = walkSkips("/workspace/repo");
+    const skips = WALK_SKIPS;
     expect(isSkipped(skips, "/workspace/repo/node_modules/zod/index.js")).toBe(
       true
     );
@@ -44,45 +44,9 @@ describe("segments, not substrings", () => {
   });
 });
 
-/**
- * A walk skips the big directories *unless the caller named one*, which is the
- * half that keeps the skip from becoming a wall: a search rooted inside a
- * dependency that skipped that dependency would match nothing and report that
- * everything was skipped, sending the model after a bug that is not there.
- */
-describe("walkSkips", () => {
-  it("skips both by default", () => {
-    expect([...walkSkips("/workspace/repo")]).toEqual([".git", "node_modules"]);
-  });
-
-  it("stops skipping the dependency tree when the caller names it", () => {
-    expect([...walkSkips("/workspace/repo/node_modules/zod")]).toEqual([
-      ".git"
-    ]);
-  });
-
-  /**
-   * `.git` has no opt-in, and the two halves of that agree: a walk rooted inside
-   * it is refused by `guardPath` before it starts, and a walk that merely passes
-   * through it still drops those results. Naming it cannot turn the policy off.
-   */
-  it("keeps skipping .git even when it is named", () => {
-    expect([...walkSkips("/workspace/repo/.git")]).toContain(".git");
-    expect(guardPath("/workspace/repo/.git", "sb_grep")).toBeDefined();
-  });
-
-  it("searches a named directory rather than reporting it skipped", () => {
-    const skips = walkSkips("/workspace/repo/node_modules/zod");
-    expect(isSkipped(skips, "/workspace/repo/node_modules/zod/index.js")).toBe(
-      false
-    );
-  });
-
+describe("WALK_SKIPS", () => {
   it("names what it skipped, for the sentence that reports a crowded page", () => {
-    expect(skipNames(walkSkips("/workspace/repo"))).toBe(
-      "`.git` and `node_modules`"
-    );
-    expect(skipNames(walkSkips("/workspace/repo/node_modules"))).toBe("`.git`");
+    expect(skipNames(WALK_SKIPS)).toBe("`.git` and `node_modules`");
   });
 });
 
@@ -92,14 +56,17 @@ describe("guardPath", () => {
   });
 
   /**
-   * The dependency tree is part of the workspace, so a read of one is an
-   * ordinary read. Refusing it would be the plugin describing a filesystem that
-   * is no longer there, and the model would route around the refusal into
-   * `sb_exec` for a file the file tools can serve.
+   * The tree is on the container's disk, so the workspace these tools read has
+   * nothing there. Unlike `.git`, `sb_exec` is the right route.
    */
-  it("clears a path inside the dependency tree", () => {
+  it("routes a node_modules path to sb_exec", () => {
+    const note = guardPath(
+      "/workspace/repo/node_modules/zod/index.js",
+      "sb_read"
+    )!;
+    expect(note).toContain("sb_exec");
     expect(
-      guardPath("/workspace/repo/node_modules/zod/index.js", "sb_read")
+      guardPath("/workspace/repo/src/node_modules_old/a.ts", "sb_read")
     ).toBeUndefined();
   });
 

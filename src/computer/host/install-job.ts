@@ -1,4 +1,4 @@
-import type { Workspace } from "@cloudflare/computer";
+import { shellQuote, type Workspace } from "@cloudflare/computer";
 import type { WorkspaceRuntimeExecHandle } from "@cloudflare/computer";
 import type { Scheduler } from "@dynamicagents/core/alarm";
 import { JobLifecycle, type JobContext } from "@dynamicagents/core/job";
@@ -15,6 +15,7 @@ import {
 } from "../install.js";
 import { pathExists } from "../read.js";
 import { deploymentFault } from "./container-fault.js";
+import { INSTALLED_MARKER } from "./container-deps.js";
 import { truncateOutput } from "../render.js";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 
@@ -47,10 +48,9 @@ function execWasLost(err: unknown): boolean {
  *
  * ## What decides that an install is needed
  *
- * The dependency tree is synced into the workspace like everything else, so a
- * container that went away takes none of it with it and a replacement is handed
- * it back. The signal is therefore the **tree**, not the container, and it is a
- * read of the object's own storage rather than a round trip.
+ * The tree lives on the container's disk (see `./container-deps.ts`), so it goes
+ * with the container. {@link CONTAINER_TREE_KEY} records a successful install and
+ * is cleared whenever that container is seen gone.
  */
 
 /**
@@ -106,40 +106,19 @@ interface InstallContext extends JobContext {
 }
 
 /**
- * Where an install records that its tree has not finished arriving.
- *
- * An install ends when its command exits, and the tree it wrote reaches this
- * object on the pull that follows — which can still be in flight, or waiting on
- * a drain, well after the record says `done`. Between those two moments the
- * workspace looks exactly like one that never installed anything: the record is
- * terminal and there is no `node_modules` to find.
- *
- * Without this marker the arming check reads that as a missing tree and starts a
- * second install *while the first one's tree is still crossing* — which deletes
- * the tree the pull is delivering and installs it again.
+ * What the running container holds: the tree a host install finished, for which
+ * directory and lockfile. Written on exit 0, deleted when the container goes.
  */
-const TREE_IN_FLIGHT_KEY = "install:syncing";
+const CONTAINER_TREE_KEY = "install:tree";
 
-/**
- * Where an install records that its tree is here in full.
- *
- * Written only by a pull that completed, which is what makes it the answer to
- * "does this object hold the tree that install produced" — see
- * {@link InstallJob.onSyncComplete}.
- */
-const INSTALL_COMPLETED_KEY = "install:completed";
+/** Records a deployed object may still hold, deleted on the next install. */
+const RETIRED_KEYS = ["install:syncing", "install:completed"];
 
-/**
- * How long a tree may be in flight before the marker stops being believed.
- *
- * The marker is cleared by the drain, on the pull completing or on the container
- * turning out to be gone. This is the bound for the case where neither happens —
- * an isolate that died between the install and the drain, say — because a marker
- * nothing clears would suppress every future install for the life of the
- * workspace. Generous, since what it is waiting on is a dependency tree crossing
- * the wire in blocks.
- */
-const TREE_IN_FLIGHT_STALE_MS = 30 * 60_000;
+interface ContainerTree {
+  dir: string;
+  fingerprint: string | null;
+  at: number;
+}
 
 /**
  * The exec id an install runs under.
@@ -166,10 +145,8 @@ export interface InstallJobDeps {
   ready: () => Promise<void>;
   /** Hand a drain to the invocation, for the caller that can hold one. */
   waitUntil: (promise: Promise<unknown>) => void;
-  /** Ask the host to finish a pull this install could not. */
-  armSync: () => Promise<void>;
   /** A container was replaced, so nothing believed about it still holds. */
-  forgetTrust: () => void;
+  containerGone: () => Promise<void>;
   tag: () => string;
   id: () => string;
 }
@@ -221,18 +198,13 @@ export class InstallJob {
   /**
    * Start a dependency install the moment we can see one will be needed.
    *
-   * The signal is the **tree**, not the container: `node_modules` is synced into
-   * this object's storage like everything else, so a container that went away
-   * takes no dependencies with it and a replacement is handed them back. What is
-   * left to detect is the case where the workspace genuinely has no tree — a
-   * checkout whose install never ran, one whose pull never finished, or one
-   * written before the tree was synced at all — and that is a local read of this
-   * object's own SQLite rather than a round trip to a container.
+   * The signal is {@link CONTAINER_TREE_KEY}: a local read, true only while the
+   * container that ran the install is the one running.
    *
-   * Armed from `__getWorkspaceStub()`, before any command runs, because the
-   * model's first minute is README-reading and `git status` — an install armed
-   * there runs *through* that minute, where one armed on the first `npm` command
-   * charges its full 85 seconds to that command.
+   * Armed as soon as a container is up or a command is about to start one,
+   * because the model's first minute is README-reading and `git status` — an
+   * install armed there runs *through* that minute, where one armed on the first
+   * `npm` command charges its full time to that command.
    *
    * It writes `running` before anything is running: the alarm has not fired yet,
    * and a `done` record would let an `npm` command through against a tree that
@@ -247,18 +219,10 @@ export class InstallJob {
     const context = await this.#job.context();
     if (!context?.dir) return;
 
-    // The branch that runs on almost every call, and it costs one local read —
-    // paired with the record that says the read means what it looks like.
-    if (
-      (await this.treePresent(context.dir)) &&
-      (await this.#treeLanded(context))
-    )
+    // The branch that runs on almost every call, and it costs one local read.
+    const tree = await this.#tree();
+    if (tree?.dir === context.dir && tree.fingerprint === context.fingerprint)
       return;
-
-    // A tree that is on its way is not a missing one. Installing again here
-    // would delete what the pull is in the middle of delivering and rebuild it,
-    // and both halves of that cross the wire a second time.
-    if (await this.#treeInFlight()) return;
 
     /**
      * `done` **or** `failed`, matching core's `isRearmable`, and narrowed to the
@@ -307,130 +271,37 @@ export class InstallJob {
     };
   }
 
+  async #tree(): Promise<ContainerTree | undefined> {
+    return await this.deps.storage.get<ContainerTree>(CONTAINER_TREE_KEY);
+  }
+
+  /** Where the last install ran, for the container setup's marker read. */
+  async dir(): Promise<string | undefined> {
+    return (await this.#job.context())?.dir;
+  }
+
+  /** The container went away, and its tree with it. */
+  async containerGone(): Promise<void> {
+    await this.deps.storage.delete(CONTAINER_TREE_KEY);
+  }
+
   /**
-   * Is this checkout's dependency tree in the workspace?
+   * Check the record against the marker a new isolate's setup read.
    *
-   * Asked of the **workspace**, which is a read of this object's own SQLite: no
-   * container, no round trip, and an answer while a container is starting or
-   * gone. That is what lets the busiest path in the object consult it, and what
-   * lets an install be armed for a workspace whose container has not run yet.
-   *
-   * Existence only. A pull that stopped halfway leaves a directory holding part
-   * of a tree, and nothing here can tell that from a whole one — which is why
-   * the fingerprint is written only once its pull completed, and why the
-   * advisory that carries this says which way the ambiguity runs.
+   * The record can outlive its container in an isolate that did not watch it
+   * exit; the marker cannot.
    */
-  async treePresent(dir: string): Promise<boolean> {
-    try {
-      return await pathExists(this.deps.workspace().fs, `${dir}/node_modules`);
-    } catch (err) {
-      // A read of local SQLite that threw says nothing about the tree. Treat it
-      // as absent: a redundant install costs time, a skipped one costs a
-      // confusing failure.
-      console.warn(`[${this.deps.tag()}] could not probe the dependency tree`, {
+  async reconcile(marker: string | null): Promise<void> {
+    const tree = await this.#tree();
+    if (!tree || (tree.fingerprint ?? "none") === marker) return;
+    console.warn(
+      `[${this.deps.tag()}] the container does not hold the recorded tree`,
+      {
         id: this.deps.id(),
-        dir,
-        err: String(err)
-      });
-      return false;
-    }
-  }
-
-  /**
-   * Did the tree this install produced actually finish arriving?
-   *
-   * The pair, rather than the directory alone, and for the same reason the skip
-   * condition in `#beginInstall` asks both: a pull that was abandoned part-way
-   * leaves a directory holding *some* of a tree, and nothing in the filesystem
-   * tells that from a whole one. The fingerprint is the record that a pull
-   * finished, so it is what distinguishes them — and without it here, a partial
-   * tree suppresses the reinstall that would replace it, permanently and
-   * silently, which is the one outcome a missing dependency tree must not have.
-   *
-   * No fingerprint means nothing can vouch either way — a checkout whose
-   * resolver found no lockfile installs without one. The directory is then all
-   * the evidence there is, so it is taken at face value.
-   */
-  async #treeLanded(context: InstallContext): Promise<boolean> {
-    if (!context.fingerprint) return true;
-    const completed = await this.deps.storage.get<{ fingerprint: string }>(
-      INSTALL_COMPLETED_KEY
+        dir: tree.dir
+      }
     );
-    return completed?.fingerprint === context.fingerprint;
-  }
-
-  /**
-   * Note that this install's tree is still crossing, and suppress arming until
-   * it lands or is given up on.
-   */
-  async #markTreeInFlight(): Promise<void> {
-    await this.deps.storage.put(TREE_IN_FLIGHT_KEY, { at: Date.now() });
-  }
-
-  /** Whether a tree is still believed to be on its way. */
-  async #treeInFlight(): Promise<boolean> {
-    const marker = await this.deps.storage.get<{ at: number }>(
-      TREE_IN_FLIGHT_KEY
-    );
-    if (!marker) return false;
-    if (Date.now() - marker.at < TREE_IN_FLIGHT_STALE_MS) return true;
-    // Past the bound, and what it means is that nobody came back to clear it.
-    // Dropping it here is what lets the next access arm an install rather than
-    // wait forever on a pull that is not coming.
-    console.warn(`[${this.deps.tag()}] a tree never finished arriving`, {
-      id: this.deps.id(),
-      minutes: Math.round((Date.now() - marker.at) / 60_000)
-    });
-    await this.deps.storage.delete(TREE_IN_FLIGHT_KEY);
-    return false;
-  }
-
-  /**
-   * A drain finished the pull: the tree is here, so record what produced it.
-   *
-   * The fingerprint is written **here** rather than when the install exited,
-   * because what the skip condition needs to know is that this object holds the
-   * tree — see {@link InstallJob.onSyncComplete}.
-   *
-   * **The pair is the point, and it is why the promotion is private.** A caller
-   * that promoted the fingerprint on its own would record the tree as landed and
-   * leave the marker saying one is still on its way — and the marker outlives
-   * the moment, suppressing the next install for as long as it stands. There is
-   * one way to say a pull finished, and it says both halves.
-   */
-  async onSyncComplete(): Promise<void> {
-    /**
-     * Promoted only if something was actually in flight.
-     *
-     * A drain reports `complete` for an empty pull as readily as for one that
-     * moved a tree — "nothing outstanding" and "everything arrived" are the same
-     * answer from the cursor's point of view. So `complete` on its own says
-     * nothing about whether *this* object holds the tree: a container replaced
-     * after the install left its writes unreachable, and the first pull from the
-     * replacement finds a clean filesystem and completes immediately.
-     *
-     * The marker is what distinguishes them. It is written only by an install
-     * whose own bracket reported the sync incomplete, so a drain that finds it
-     * standing is the drain that finished that pull. Absent, there was nothing to
-     * finish and there is nothing to certify.
-     */
-    const inFlight = await this.deps.storage.get<{ at: number }>(
-      TREE_IN_FLIGHT_KEY
-    );
-    if (!inFlight) return;
-    await this.deps.storage.delete(TREE_IN_FLIGHT_KEY);
-    await this.#promoteFingerprint();
-  }
-
-  /**
-   * A drain found nothing to pull from: whatever had not arrived is gone.
-   *
-   * The marker goes, and deliberately without a fingerprint — the tree this
-   * install produced is not here and never will be, so the next access should
-   * find a missing tree and arm an install rather than skip one.
-   */
-  async onSyncUnrecoverable(): Promise<void> {
-    await this.deps.storage.delete(TREE_IN_FLIGHT_KEY);
+    await this.containerGone();
   }
 
   /**
@@ -604,25 +475,12 @@ export class InstallJob {
 
     const fingerprint = await installFingerprint(probe, req.dir, resolution);
 
-    /**
-     * The skip condition, and **both halves are required**.
-     *
-     * A matching fingerprint says the same install would produce the same tree.
-     * It does not say the tree is here: the two are written at different moments
-     * — the fingerprint when an install's pull completes, the tree as that pull
-     * lands — and a workspace can hold one without the other, either because it
-     * predates the install or because a pull stopped partway. Skipping on the
-     * fingerprint alone would skip exactly the install a missing tree needs
-     * most, and the symptom is a subagent whose first `import` fails for no
-     * visible reason.
-     */
-    const previous = await this.deps.storage.get<{ fingerprint: string }>(
-      INSTALL_COMPLETED_KEY
-    );
+    // Skipped only for this container's own tree, for this lockfile.
+    const tree = await this.#tree();
     if (
       fingerprint &&
-      previous?.fingerprint === fingerprint &&
-      (await this.treePresent(req.dir))
+      tree?.dir === req.dir &&
+      tree.fingerprint === fingerprint
     ) {
       const state: InstallState = {
         state: "done",
@@ -630,26 +488,14 @@ export class InstallJob {
         exitCode: 0,
         finishedAt: Date.now(),
         ms: 0,
-        tail: "dependencies already installed for this lockfile"
+        tail: "dependencies already installed in this container for this lockfile"
       };
       await this.#job.write(state);
       return state;
     }
 
-    /**
-     * The previous completion goes **before** this install starts, and the hole
-     * it closes is the one the skip condition above is built to avoid.
-     *
-     * Reaching here with a matching fingerprint means the tree is not present —
-     * the skip already returned for the case where it is. If that marker were
-     * left standing and this install's pull then became unrecoverable after
-     * writing part of a tree, `armIfTreeMissing` would find a directory *and* a
-     * fingerprint that agrees with it, conclude the tree landed, and never
-     * repair it. The marker means "this object holds the tree that lockfile
-     * produces", and from the moment an install starts that is not known again
-     * until its pull completes and {@link InstallJob.onSyncComplete} says so.
-     */
-    await this.deps.storage.delete(INSTALL_COMPLETED_KEY);
+    // The tree is rebuilt from here, so nothing vouches for it until exit 0.
+    await this.deps.storage.delete([CONTAINER_TREE_KEY, ...RETIRED_KEYS]);
 
     const startedAt = Date.now();
     const state: InstallState = {
@@ -687,7 +533,12 @@ export class InstallJob {
 
     let handle: WorkspaceRuntimeExecHandle<"utf8">;
     try {
-      handle = await this.deps.workspace().runtime.exec(resolution.command, {
+      // The marker lets a new isolate check {@link CONTAINER_TREE_KEY} against
+      // the container; see `reconcile`.
+      const marked =
+        `${resolution.command} && printf %s ` +
+        `${shellQuote(fingerprint ?? "none")} > node_modules/${INSTALLED_MARKER}`;
+      handle = await this.deps.workspace().runtime.exec(marked, {
         id: INSTALL_EXEC_ID,
         cwd: req.dir,
         encoding: "utf8",
@@ -736,22 +587,13 @@ export class InstallJob {
   }
 
   /**
-   * The dependency-tree probe, run only when its answer changes anything.
-   *
-   * It qualifies a `deps-broken` advisory and nothing else (see
-   * `deriveAdvisories`), so outside that state there is nothing to learn and the
-   * question is not asked. A failed record is a necessary condition and not a
-   * sufficient one — a reinstall queued behind it reads as `deps-building`
-   * instead — so the caller narrows it further before asking; see
-   * `WorkspaceObjectBase.advisories`. It needs no cache of its own: the probe is
-   * a read of this object's storage, and memoising a SQL lookup would only buy
-   * the chance of being wrong for a window.
+   * Whether this container holds a finished tree, asked only when it qualifies a
+   * `deps-broken` advisory (see `deriveAdvisories`).
    */
   async treePresentIfItMatters(install: InstallState): Promise<boolean> {
     if (install.state !== "failed") return false;
-    const dir = (await this.#job.context())?.dir;
-    if (!dir) return false;
-    return await this.treePresent(dir);
+    const dir = await this.dir();
+    return dir !== undefined && (await this.#tree())?.dir === dir;
   }
 
   /**
@@ -892,35 +734,17 @@ export class InstallJob {
       if (!(await stillMine())) return;
 
       if (result.exitCode === 0) {
-        /**
-         * Recorded on success **and** only once the tree has crossed.
-         *
-         * A failed install must not leave a fingerprint behind, or the next
-         * checkout would decide the tree it never built is already good — and
-         * an install whose pull is still outstanding is the same hazard wearing
-         * a zero exit code. `sync.status` is the runtime saying which of those
-         * this was; `pending` hands the write to the drain that finishes the
-         * pull. See {@link InstallJob.onSyncComplete}.
-         */
-        const landed = result.sync.status === "complete";
-        if (context?.fingerprint && landed) {
-          await this.deps.storage.put(INSTALL_COMPLETED_KEY, {
+        if (context?.dir) {
+          const tree: ContainerTree = {
+            dir: context.dir,
             fingerprint: context.fingerprint,
             at: Date.now()
-          });
-        }
-        // An install writes more than any other command — a dependency tree is
-        // tens of thousands of files — so this is the pull most likely to need
-        // more than its own bracket, and the one whose absence is felt by every
-        // container that is handed the tree afterwards.
-        if (!landed) {
-          await this.#markTreeInFlight();
-          await this.deps.armSync();
+          };
+          await this.deps.storage.put(CONTAINER_TREE_KEY, tree);
         }
         console.info(`[${this.deps.tag()}] install finished`, {
           id: this.deps.id(),
           command,
-          synced: landed,
           seconds: Math.round((Date.now() - startedAt) / 1000)
         });
         await this.#job.write({
@@ -964,7 +788,7 @@ export class InstallJob {
       // the logs, because this one says nothing about the repository.
       //
       // If it went away, nothing this isolate believes about it holds any more.
-      if (execWasLost(err)) this.deps.forgetTrust();
+      if (execWasLost(err)) await this.deps.containerGone();
       console.error(`[${this.deps.tag()}] install drain failed`, {
         id: this.deps.id(),
         command,
@@ -1009,7 +833,7 @@ export class InstallJob {
       // The exec is gone entirely — the container was replaced under it. Say so
       // rather than leaving the gate closed forever; the next checkout starts a
       // new install, and `sb_exec` can run in the meantime.
-      if (execWasLost(err)) this.deps.forgetTrust();
+      if (execWasLost(err)) await this.deps.containerGone();
       // Same split as the spawn path: a replaced container is worth re-running
       // into, a deployment fault is not, and only one of them is the container's
       // own doing.
@@ -1040,34 +864,6 @@ export class InstallJob {
       });
       await this.#job.clearWatch();
     }
-  }
-
-  /**
-   * Record the fingerprint of an install whose tree has now landed.
-   *
-   * The skip condition reads this, and what it has to mean is "this object holds
-   * the tree that lockfile produces" — not "an install exited 0 somewhere". The
-   * two are written at different moments: the install ends when the command
-   * exits, the tree arrives when its pull completes. Writing the fingerprint at
-   * the first moment would let a later checkout skip the install on the
-   * strength of a tree that never finished crossing.
-   *
-   * So the install writes it only when its own bracket reported the sync
-   * complete, and a drain that finishes the job writes it here instead.
-   */
-  async #promoteFingerprint(): Promise<void> {
-    const state = await this.#job.read();
-    if (state.state !== "done") return;
-    const context = await this.#job.context();
-    if (!context?.fingerprint) return;
-    const previous = await this.deps.storage.get<{ fingerprint: string }>(
-      INSTALL_COMPLETED_KEY
-    );
-    if (previous?.fingerprint === context.fingerprint) return;
-    await this.deps.storage.put(INSTALL_COMPLETED_KEY, {
-      fingerprint: context.fingerprint,
-      at: Date.now()
-    });
   }
 
   /**

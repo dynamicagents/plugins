@@ -22,8 +22,8 @@ import { renderAdvisory, shapeOf, type WorkspaceAdvisory } from "./advisory.js";
  *
  * What it needs is two facts: nothing ran to completion, and the workspace
  * survived because the filesystem is the Durable Object's rather than the
- * container's. So re-run it. The replacement container is handed the tree back,
- * dependencies included, which is why this note no longer warns about an install.
+ * container's. So re-run it. `node_modules` is the container's, so the note
+ * says the replacement reinstalls it.
  *
  * Matched on `code` rather than the message — the property the package sets
  * deliberately, and the one that survives a reworded string.
@@ -35,8 +35,8 @@ export function execLostNote(err: unknown): string | undefined {
     "the container was replaced while this command was running, so it was lost — " +
     "nothing ran to completion and no output survived. This is infrastructure, " +
     "not your command: re-run it. The workspace is durable and is exactly as you " +
-    "left it, dependencies included, though the first command in a replacement " +
-    "container waits while the tree is handed back to it."
+    "left it. `node_modules` is not: the replacement reinstalls it, and a " +
+    "command that needs it waits for that."
   );
 }
 

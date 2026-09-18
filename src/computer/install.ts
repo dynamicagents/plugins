@@ -325,8 +325,7 @@ async function firstPresent(
  *
  * Content, not mtime: a `git fetch && reset --hard` onto a new commit rewrites
  * these files whether or not their dependencies changed, and re-installing on
- * every commit would throw away a tree that is already correct — and, since the
- * tree is durable, one the next container is handed as well.
+ * every commit would throw away a tree that is already correct.
  *
  * ## Both files, not just the lockfile
  *
@@ -372,13 +371,9 @@ async function firstPresent(
  * ## This is only half of the skip condition
  *
  * A matching fingerprint means "the same install would produce the same tree".
- * It does **not** mean the tree is there. The two are written at different
- * moments and by different things — the fingerprint when an install resolves,
- * the tree when the container's writes reach the workspace — so a pull that
- * never finished, or a workspace predating the install, leaves a fingerprint
- * standing over a tree that is absent or partial. The caller must also confirm
- * `node_modules` is actually present, and should record the fingerprint only
- * once the tree it describes has landed.
+ * It does **not** mean the tree is there: it is on the container's disk, and
+ * goes with the container. The caller also needs a record that this container
+ * finished it — see `./host/install-job.ts`.
  */
 export async function installFingerprint(
   fs: InstallProbe,
