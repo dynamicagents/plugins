@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   buildRepoTools,
+  graphqlEndpoint,
   repo,
-  repoToolApproval,
   type RepoConfig,
   type RepoExec,
   type RepoGit,
@@ -1559,127 +1559,524 @@ describe("concurrent git", () => {
 });
 
 /**
- * The calls a person approves before they run.
+ * Nothing here is held for a person.
  *
- * What matters about a rule is what it makes the person read: an approval worded
- * vaguely is one a person clicks without knowing what they allowed.
+ * Pinned because the failure is silent from both directions: a rule that appears
+ * parks a round waiting for an approval nobody is expecting, and one that
+ * disappears lets a gated call through unasked. The README carries which calls
+ * are gated and why.
  */
 describe("what a person approves before it runs", () => {
-  /** The rules for a checkout whose origin git reports as `results` say. */
-  const rulesFor = (results: Stubbed = {}) =>
-    repoToolApproval({
-      exec: recorder(results).exec,
-      git: gitRecorder().git,
-      token: () => TOKEN
-    } as RepoConfig);
-
-  const rules = rulesFor({
-    "remote get-url origin": { stdout: "https://github.com/acme/web" }
-  });
-
-  const verdictOf = async (
-    set: ReturnType<typeof repoToolApproval>,
-    name: string,
-    input: unknown
-  ) => {
-    const rule = set[name];
-    return typeof rule === "function"
-      ? await rule(input, { toolCallId: "call-1", messages: [] })
-      : rule;
-  };
-
-  const pullRequest = {
-    dir: "/workspace/web",
-    head: "coder/fix-login",
-    base: "main",
-    title: "Fix the login redirect",
-    body: "What changed and why."
-  };
-
-  it("holds a pull request, naming where it goes and what it is called", async () => {
-    const held = await verdictOf(rules, "repo_open_pr", pullRequest);
-
-    expect(held).toMatchObject({ type: "user-approval" });
-    for (const part of [
-      "github.com/acme/web",
-      "coder/fix-login",
-      "main",
-      "Fix the login redirect"
-    ])
-      expect(JSON.stringify(held)).toContain(part);
-  });
-
-  it("names the repository the origin points at, not the directory's name", async () => {
-    // The tool opens the pull request on the origin, and `.git/config` can point
-    // anywhere the host allows; a prompt reading the path would name the wrong
-    // repository.
-    const held = (await verdictOf(
-      rulesFor({
-        "remote get-url origin": { stdout: "https://github.com/acme/api" }
-      }),
-      "repo_open_pr",
-      pullRequest
-    )) as { reason: string };
-
-    expect(held.reason).toContain("github.com/acme/api");
-    expect(held.reason).not.toContain("web");
-  });
-
-  it("still asks, naming the checkout's path, when its origin cannot be read", async () => {
-    const held = (await verdictOf(
-      rulesFor({ "remote get-url origin": { success: false } }),
-      "repo_open_pr",
-      pullRequest
-    )) as { type: string; reason: string };
-
-    expect(held.type).toBe("user-approval");
-    expect(held.reason).toContain("/workspace/web");
-    expect(held.reason).toContain("could not be read");
-  });
-
-  it("keeps every model-supplied field short enough to read before approving", async () => {
-    const long = "x".repeat(20_000);
-    const held = (await verdictOf(rules, "repo_open_pr", {
-      dir: long,
-      head: long,
-      base: long,
-      title: long,
-      body: long
-    })) as { reason: string };
-
-    expect(held.reason.length).toBeLessThan(1_000);
-  });
-
-  it("gates only opening a pull request, a tool the plugin offers", () => {
-    // At runtime a rule for a name no tool has is dropped with a log line; a
-    // rename that did that is caught here instead.
-    const offered = Object.keys(tools(recorder().exec));
-
-    expect(Object.keys(rules)).toEqual(["repo_open_pr"]);
-    expect(offered).toContain("repo_open_pr");
-  });
-
-  it("lets every other tool run without asking", () => {
-    for (const name of [
-      "repo_clone",
-      "repo_status",
-      "repo_diff",
-      "repo_commit",
-      "repo_push",
-      "repo_issue_view",
-      "repo_pr_view",
-      "repo_pr_comment"
-    ])
-      expect(rules[name]).toBeUndefined();
-  });
-
-  it("installs the rules with the plugin", () => {
+  it("declares no approval rules at all", () => {
     const plugin = repo({
       exec: recorder().exec,
       git: gitRecorder().git,
       token: () => TOKEN
     } as RepoConfig);
 
-    expect(plugin.mainAgentToolApproval).toBeDefined();
+    expect(plugin.mainAgentToolApproval).toBeUndefined();
+  });
+});
+
+/**
+ * Reading a review and answering it.
+ *
+ * Review threads are the one thing here that REST cannot serve — `isResolved` is
+ * not exposed and resolving has no endpoint at all — so these three tools are
+ * GraphQL while everything else in this file is REST. That brings its own hazard,
+ * pinned below: a failed GraphQL query answers `200`.
+ */
+describe("a review, and answering it", () => {
+  /**
+   * The forge, answering REST by path suffix and GraphQL by what the query says.
+   *
+   * GraphQL cannot be keyed on the path — every operation posts to `/graphql` —
+   * so `graphql` is handed the query text and returns the whole envelope,
+   * `errors` included, which is what lets the 200-with-errors case be written at
+   * all.
+   */
+  const forgeStub = (opts: {
+    rest?: Record<string, unknown>;
+    graphql?: (query: string, variables: Record<string, unknown>) => unknown;
+  }) =>
+    vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input)).pathname;
+          if (url.endsWith("/graphql")) {
+            const sent = JSON.parse(String(init?.body ?? "{}")) as {
+              query: string;
+              variables: Record<string, unknown>;
+            };
+            const answer = opts.graphql?.(sent.query, sent.variables ?? {});
+            return new Response(JSON.stringify(answer ?? { data: {} }), {
+              status: 200
+            });
+          }
+          const hit = Object.entries(opts.rest ?? {}).find(([path]) =>
+            url.endsWith(path)
+          )?.[1];
+          return new Response(JSON.stringify(hit ?? {}), {
+            status: hit === undefined ? 404 : 200
+          });
+        }
+      );
+
+  const comment = (login: string, body: string) => ({
+    author: { login },
+    body
+  });
+
+  /** A thread whose conversation fits, so both selections are the same comments. */
+  const thread = (over: Record<string, unknown> = {}) => ({
+    id: "PRRT_1",
+    isResolved: false,
+    isOutdated: false,
+    path: "src/config.ts",
+    line: 109,
+    opening: { nodes: [comment("Copilot", "validate this")] },
+    latest: { totalCount: 1, nodes: [comment("Copilot", "validate this")] },
+    ...over
+  });
+
+  const threadsPage = (nodes: unknown[], next?: string) => ({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: Boolean(next), endCursor: next ?? null },
+            nodes
+          }
+        }
+      }
+    }
+  });
+
+  describe("repo_pr_review_status", () => {
+    it("reports a review still running", async () => {
+      const spy = forgeStub({
+        rest: { "/requested_reviewers": { users: [{ login: "Copilot" }] } }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).toContain("has not finished");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("reports a review that finished", async () => {
+      const spy = forgeStub({
+        rest: {
+          "/requested_reviewers": { users: [] },
+          "/pulls/42/reviews": [
+            {
+              user: { login: "Copilot" },
+              state: "COMMENTED",
+              submitted_at: "2026-09-17T10:00:00Z"
+            }
+          ]
+        }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).toContain("reviewed");
+        expect(result).toContain("2026-09-17T10:00:00Z");
+        // A review can finish having left nothing, so "finished" is never the
+        // same answer as "had something to say".
+        expect(result).toContain("repo_pr_threads");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("lets a pending request outrank a review already on the pull request", async () => {
+      // The ordering that makes a *re-review* read correctly. GitHub clears the
+      // request when a review lands and writes a new one when another is asked
+      // for, so both present means the old review is not the answer.
+      const spy = forgeStub({
+        rest: {
+          "/requested_reviewers": { users: [{ login: "Copilot" }] },
+          "/pulls/42/reviews": [
+            { user: { login: "Copilot" }, state: "COMMENTED" }
+          ]
+        }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).toContain("has not finished");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("does not count a draft review as finished", async () => {
+      // A PENDING review is one its author has not sent, and it is visible to
+      // whoever holds the token that wrote it. Counted as finished, it reports a
+      // review nobody has read — which a poll loop acts on by stopping.
+      const spy = forgeStub({
+        rest: {
+          "/requested_reviewers": { users: [] },
+          "/pulls/42/reviews": [
+            { user: { login: "Copilot" }, state: "PENDING" }
+          ]
+        }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).not.toContain("reviewed");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("says it does not know when the reviews it read were only the oldest", async () => {
+      // The endpoint pages oldest-first, so a match past the first page is
+      // *newer* than everything read — which is exactly the review being waited
+      // for. A truncated read cannot answer, and must not answer "waiting will
+      // not help": that is the one reply a caller ends its polling on.
+      const spy = forgeStub({
+        rest: {
+          "/requested_reviewers": { users: [] },
+          "/pulls/42/reviews": Array.from({ length: 100 }, () => ({
+            user: { login: "someone-else" },
+            state: "COMMENTED"
+          }))
+        }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).toContain("unknown");
+        expect(result).not.toContain("waiting will not change it");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("says waiting will not help when nobody was asked", async () => {
+      const spy = forgeStub({
+        rest: { "/requested_reviewers": { users: [] }, "/pulls/42/reviews": [] }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        // The one answer a poll loop must not read as "not yet".
+        expect(result).toContain("waiting will not change it");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  describe("repo_pr_threads", () => {
+    it("reads unresolved threads, with the id needed to answer one", async () => {
+      const spy = forgeStub({
+        graphql: () => threadsPage([thread()])
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("src/config.ts:109");
+        expect(result).toContain("PRRT_1");
+        expect(result).toContain("validate this");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("leaves resolved threads out unless asked for them", async () => {
+      const nodes = [thread(), thread({ id: "PRRT_2", isResolved: true })];
+      const spy = forgeStub({ graphql: () => threadsPage(nodes) });
+      try {
+        const set = tools(recorder().exec);
+        const open = await run(set, "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(open).not.toContain("PRRT_2");
+
+        const all = await run(set, "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42,
+          includeResolved: true
+        });
+        expect(all).toContain("PRRT_2");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("reports a refused query as a failure, not as an empty review", async () => {
+      // The hazard the GraphQL wrapper exists for. A failed query answers 200
+      // with the errors in the body, so a caller reading `data` straight through
+      // reports a permission failure as "no threads" — and an agent told a review
+      // is clean stops looking.
+      const spy = forgeStub({
+        graphql: () => ({
+          data: null,
+          errors: [{ message: "Resource not accessible by integration" }]
+        })
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("Resource not accessible");
+        expect(result).not.toContain("no unresolved review threads");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("never reports clean on a review it did not finish reading", async () => {
+      // The false-clean result paging exists to prevent, at the one exit that
+      // used to skip the warning: a run that stopped early and found nothing
+      // open in what it read. The unread pages are where the newest threads are.
+      const spy = forgeStub({
+        graphql: () =>
+          threadsPage([thread({ isResolved: true })], "always-more")
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("not the whole review");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("shows both ends of a thread that grew past the window", async () => {
+      // The reviewer's point is at the top and a reply this plugin sent is at
+      // the bottom, so neither end can be the one dropped — and what is missing
+      // is named rather than silently absent.
+      const spy = forgeStub({
+        graphql: () =>
+          threadsPage([
+            thread({
+              opening: { nodes: [comment("Copilot", "the original point")] },
+              latest: {
+                totalCount: 9,
+                nodes: [comment("agent", "fixed in abc123")]
+              }
+            })
+          ])
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("the original point");
+        expect(result).toContain("fixed in abc123");
+        expect(result).toContain("7 earlier replies not shown");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("walks every page, because the newest threads are on the last one", async () => {
+      const spy = forgeStub({
+        graphql: (_query, variables) =>
+          variables.after
+            ? threadsPage([thread({ id: "PRRT_LAST", path: "src/late.ts" })])
+            : threadsPage([thread()], "cursor-1")
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("PRRT_LAST");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  describe("repo_pr_thread_reply", () => {
+    const owner = (nameWithOwner = "o/r", number = 42) => ({
+      data: { node: { pullRequest: { number, repository: { nameWithOwner } } } }
+    });
+
+    const answer = (query: string, variables: Record<string, unknown>) => {
+      if (query.includes("addPullRequestReviewThreadReply"))
+        return {
+          data: {
+            addPullRequestReviewThreadReply: {
+              comment: { url: "https://github.com/o/r/pull/42#discussion_r1" }
+            }
+          }
+        };
+      if (query.includes("resolveReviewThread"))
+        return {
+          data: { resolveReviewThread: { thread: { isResolved: true } } }
+        };
+      return owner(
+        String(variables.id) === "PRRT_ELSEWHERE" ? "other/repo" : "o/r"
+      );
+    };
+
+    it("replies and resolves in one call", async () => {
+      const spy = forgeStub({ graphql: answer });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_thread_reply",
+          {
+            dir: "/w/r",
+            number: 42,
+            threadId: "PRRT_1",
+            body: "fixed in abc123"
+          }
+        );
+        expect(result).toContain("replied and resolved");
+        expect(result).toContain("discussion_r1");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("leaves the thread open when asked to", async () => {
+      const spy = forgeStub({ graphql: answer });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_thread_reply",
+          {
+            dir: "/w/r",
+            number: 42,
+            threadId: "PRRT_1",
+            body: "still looking",
+            resolve: false
+          }
+        );
+        expect(result).toContain("left unresolved");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("resolves on its own, which is the recovery it tells callers to use", async () => {
+      // The reply and the resolve fail independently, so a tool that says "the
+      // reply landed, resolve it alone" has to give a way to do that. Without
+      // it the only route back is a second reply the reviewer has already read.
+      const spy = forgeStub({ graphql: answer });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_thread_reply",
+          { dir: "/w/r", number: 42, threadId: "PRRT_1" }
+        );
+        expect(result).toContain("resolved PRRT_1");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("refuses a thread belonging to another repository", async () => {
+      // The one input here that can name a pull request nobody checked out — a
+      // node id is global. Every other tool derives the repository from the
+      // checkout's own origin and has nothing to validate; this one has to ask.
+      const spy = forgeStub({ graphql: answer });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_thread_reply",
+          {
+            dir: "/w/r",
+            number: 42,
+            threadId: "PRRT_ELSEWHERE",
+            body: "wrong place"
+          }
+        );
+        expect(result).toContain("belongs to other/repo");
+        expect(result).not.toContain("replied");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("says the reply landed when only resolving failed", async () => {
+      // Two outcomes, never folded into one. A thread answered but not resolved
+      // needs resolving; one never answered needs answering. "It failed" covers
+      // both and sends the model to do the wrong one — here, to send the reply
+      // the reviewer already has.
+      const spy = forgeStub({
+        graphql: (query, variables) =>
+          query.includes("resolveReviewThread")
+            ? { data: null, errors: [{ message: "resolve is not permitted" }] }
+            : answer(query, variables)
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_thread_reply",
+          {
+            dir: "/w/r",
+            number: 42,
+            threadId: "PRRT_1",
+            body: "fixed in abc123"
+          }
+        );
+        expect(result).toContain("discussion_r1");
+        expect(result).toContain("do not send it again");
+        // Naming a recovery the API does not offer is worse than naming none.
+        expect(result).toContain("with no body");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+});
+
+/**
+ * The two places a forge that is not github.com changes the answer.
+ *
+ * Both are invisible on the public API, which is what every other spec here runs
+ * against — so nothing but a case named after Enterprise catches either.
+ */
+describe("GitHub Enterprise", () => {
+  it("puts GraphQL beside the REST base, not underneath it", () => {
+    // `/api/v3/graphql` is a 404 on every Enterprise install and a URL nothing
+    // here would ever request on github.com, so the mistake survives every test
+    // written against the public API.
+    expect(graphqlEndpoint("https://ghe.example.com/api/v3")).toBe(
+      "https://ghe.example.com/api/graphql"
+    );
+    expect(graphqlEndpoint("https://ghe.example.com/api/v3/")).toBe(
+      "https://ghe.example.com/api/graphql"
+    );
+    expect(graphqlEndpoint("https://api.github.com")).toBe(
+      "https://api.github.com/graphql"
+    );
   });
 });

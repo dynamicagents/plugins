@@ -20,14 +20,41 @@ repo({
 ```
 
 Tools: `repo_clone`, `repo_status`, `repo_diff`, `repo_commit`, `repo_push`,
-`repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment`.
+`repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment`,
+`repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`.
 
-The last three are the ones a model reaches for `gh` to do — read an issue, check
-a pull request, leave a comment. They are here rather than in the container for
-the same reason `repo_open_pr` is: installing a CLI and giving it a token would
-hand that token to the shell the model drives. They resolve the repository from
-the checkout's own origin, so they add no new model input to validate and no new
-way to point the credential somewhere nobody asked about.
+Everything past `repo_open_pr` is what a model reaches for `gh` to do — read an
+issue, check a pull request, leave a comment, answer a review. They are here
+rather than in the container because a _credentialed_ CLI there would hand its
+token to the shell the model drives; an uncredentialed one can read a public
+repository and nothing else. They resolve the repository from the checkout's own
+origin, so they add no new model input to validate and no new way to point the
+credential somewhere nobody asked about.
+
+**Answering a review is GraphQL, and the rest is REST.** Not a preference:
+`isResolved` is not on any REST representation of a review comment, and resolving
+a thread has no REST endpoint at all. That brings one hazard worth knowing before
+editing `forgeGraphql` — **a failed GraphQL query answers `200`**, with the
+errors in the body, so a caller that reads `data` straight through reports a
+permission failure as an empty review. An agent told a review is clean stops
+looking.
+
+`repo_pr_thread_reply` is also the only tool here that takes something able to
+name another repository: a thread id is a global node id, not a path segment
+derived from the checkout. It asks which pull request the id belongs to and
+refuses a mismatch, which is the same reach `forgeRepo` denies everywhere else.
+
+## Nothing is held for approval
+
+No tool here declares a `mainAgentToolApproval` rule, opening a pull request
+included. A pull request is the point of the work, it lands on a branch, and it is
+reviewable after the fact — so stopping a round to ask about one buys nothing that
+the review itself does not.
+
+That is a judgement about these calls, not a limitation of the plugin contract. A
+fork that wants a gate declares a rule on the tools it cares about; a host that
+wants one dropped without touching this package wraps the plugin in core's
+`withoutToolApproval`.
 
 Two injected dependencies, and the line between them is the trust boundary rather
 than a matter of taste. `exec` is anything that runs a command in the container —
