@@ -134,12 +134,11 @@ export async function readWindow(
  * involved. Keeping each survivor's source index means the next page starts exactly
  * after the last one the model actually saw.
  *
- * Retries because a skipped directory can outnumber a whole page on its own: at a
- * repo root `.git` is walked *first* (`.` sorts before alphanumerics) and holds
- * thousands of objects, and a dependency tree runs to tens of thousands of files, so
- * one fetch can come back entirely excluded. `maxRounds` is the caller's, and the
- * asymmetry is deliberate — a `find` retry re-walks dirents, which is cheap SQLite
- * reads, while a `grep` retry re-reads and re-scans every file it already looked at.
+ * Retries because a skipped directory can outnumber a whole page on its own — a
+ * dependency tree runs to tens of thousands of files — so one fetch can come back
+ * entirely excluded. `maxRounds` is the caller's: a retry re-reads and re-scans
+ * every file the last one looked at. For a walk the store can prune instead, see
+ * `sb_ls`, which passes exclusions to `find` and needs none of this.
  *
  * Deliberately no slicing to `want`: the caller needs the extra item to know a next
  * page exists, and its index to say where.

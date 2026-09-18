@@ -65,7 +65,7 @@ function stub(
   workspace: () => Promise<WorkspaceClient>;
   execs: Array<{ command: string; options?: unknown }>;
   readdirs: Page[];
-  finds: Array<{ dir: string; pattern?: string } & Page>;
+  finds: Array<{ dir: string; pattern?: string; exclude?: string[] } & Page>;
   greps: Array<{ query: string; path: string } & GrepOptions>;
   /** Mutable, so a test can assert `ls` was never reached. */
   calls: { ls: number };
@@ -73,7 +73,9 @@ function stub(
 } {
   const execs: Array<{ command: string; options?: unknown }> = [];
   const readdirs: Page[] = [];
-  const finds: Array<{ dir: string; pattern?: string } & Page> = [];
+  const finds: Array<
+    { dir: string; pattern?: string; exclude?: string[] } & Page
+  > = [];
   const greps: Array<{ query: string; path: string } & GrepOptions> = [];
   const calls = { ls: 0 };
   const files = new Map(Object.entries(seed));
@@ -139,7 +141,11 @@ function stub(
        * so both branches are reachable, since a pattern that matches nothing has
        * its own message.
        */
-      find: async (dir: string, pattern?: string, options?: Page) => {
+      find: async (
+        dir: string,
+        pattern?: string,
+        options?: Page & { exclude?: string[] }
+      ) => {
         finds.push({ dir, pattern, ...options });
         const entries = findEntries ?? [
           { path: `${dir}/.git`, type: "dir" as const },
@@ -151,8 +157,20 @@ function stub(
           { path: `${dir}/package.json`, type: "file" as const }
         ];
         const suffix = pattern?.replace(/^.*\*/, "");
+        // Only the `**/<segment>` form the tools send, pruned before paging as
+        // dofs does — so an offset counts what survived exclusion.
+        const pruned = (options?.exclude ?? []).map((glob) =>
+          glob.replace(/^\*\*\//, "")
+        );
+        const kept = entries.filter(
+          (e) =>
+            !e.path
+              .slice(dir.length + 1)
+              .split("/")
+              .some((segment) => pruned.includes(segment))
+        );
         return page(
-          suffix ? entries.filter((e) => e.path.endsWith(suffix)) : entries,
+          suffix ? kept.filter((e) => e.path.endsWith(suffix)) : kept,
           options
         );
       },
@@ -434,6 +452,48 @@ describe("sb_edit", () => {
       `edited ${path}`
     );
     expect(files.get(path)).toBe("const a = 2;\n");
+  });
+
+  /** The AI SDK runs one step's tool calls concurrently. */
+  it("keeps both of two edits made to one file at once", async () => {
+    const { workspace, files } = stub({
+      [path]: "const a = 1;\nconst b = 1;\n"
+    });
+    const tools = buildComputerTools(workspace, config);
+
+    await Promise.all([
+      run(tools, "sb_edit", { path, find: "a = 1", replace: "a = 2" }),
+      run(tools, "sb_edit", { path, find: "b = 1", replace: "b = 2" })
+    ]);
+    expect(files.get(path)).toBe("const a = 2;\nconst b = 2;\n");
+  });
+
+  /** A parent and a subagent hold separate tool sets over one workspace. */
+  it("keeps both edits across tool sets that share a workspace", async () => {
+    const { workspace, files } = stub({
+      [path]: "const a = 1;\nconst b = 1;\n"
+    });
+    const scope = () => "caller|owner/repo";
+    const parent = buildComputerTools(
+      workspace,
+      config,
+      undefined,
+      workspace,
+      scope
+    );
+    const child = buildComputerTools(
+      workspace,
+      config,
+      undefined,
+      workspace,
+      scope
+    );
+
+    await Promise.all([
+      run(parent, "sb_edit", { path, find: "a = 1", replace: "a = 2" }),
+      run(child, "sb_edit", { path, find: "b = 1", replace: "b = 2" })
+    ]);
+    expect(files.get(path)).toBe("const a = 2;\nconst b = 2;\n");
   });
 
   /**
@@ -889,23 +949,18 @@ describe("paths inside .git", () => {
     expect(out).not.toContain("/.git/");
   });
 
-  it("says so when a page is nothing but .git, rather than reporting an empty tree", async () => {
-    const root = "/workspace/repo";
-    const { workspace } = stub(
-      {},
-      undefined,
-      Array.from({ length: 9_000 }, (_, i) => ({
-        path: `${root}/.git/objects/${i}`,
-        type: "file" as const
-      }))
-    );
+  it("has the store prune .git and node_modules, unless the walk starts inside one", async () => {
+    const { workspace, finds } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_ls", { path: root, recursive: true });
-    // Bounded retries, so this terminates — and explains itself instead of
-    // looking like an empty directory.
-    expect(out).toContain(".git");
-    expect(out).not.toContain("is empty");
+    await run(tools, "sb_ls", { path: "/workspace/repo", recursive: true });
+    await run(tools, "sb_ls", {
+      path: "/workspace/repo/node_modules",
+      recursive: true
+    });
+
+    expect(finds[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
+    expect(finds[1]?.exclude).toEqual(["**/.git"]);
   });
 
   /**
@@ -928,16 +983,16 @@ describe("paths inside .git", () => {
 /**
  * Paging, and the bookkeeping that keeps it honest.
  *
- * `offset` counts items at the *source*, while what the model sees is filtered and
- * then trimmed to a byte budget. So the obvious `offset + shown` is wrong exactly
- * when `.git` was dropped — and wrong silently, repeating or skipping with nothing
- * to indicate it.
+ * `sb_ls` gets pages the store has already pruned, so its next offset is plain
+ * `offset + shown`. `sb_grep` filters after the fetch, so its offset has to stay a
+ * source coordinate — `offset + shown` would repeat or skip exactly when something
+ * was dropped, and silently.
  */
 describe("offsets that survive filtering", () => {
   const root = "/workspace/repo";
 
-  it("reports the source offset of the first entry it did not show", async () => {
-    // Two .git entries first, so a naive `offset + shown` would drift by two.
+  it("reports the offset of the first entry it did not show", async () => {
+    // Pruned by the store, so the offset counts what survived exclusion.
     const entries = [
       { path: `${root}/.git/HEAD`, type: "file" as const },
       { path: `${root}/.git/config`, type: "file" as const },
@@ -953,9 +1008,8 @@ describe("offsets that survive filtering", () => {
     const next = /offset: (\d+)/.exec(out)?.[1];
     expect(next).toBeDefined();
 
-    // The reported offset must land on the first unseen entry at the source.
     const shown = out.split("\n").filter((l) => l.includes("/src/f")).length;
-    expect(Number(next)).toBe(shown + 2);
+    expect(Number(next)).toBe(shown);
   });
 
   it("continues exactly where the previous page stopped", async () => {

@@ -1016,7 +1016,7 @@ export abstract class WorkspaceObjectBase<
       bytes
     });
 
-    await this.#stopContainer();
+    await this.#stopContainer("reclaim");
     // `deleteAll` does not take the alarm with it, so the alarm goes first —
     // otherwise a reclaimed object wakes once more into empty storage.
     await this.ctx.storage.deleteAlarm();
@@ -1044,8 +1044,19 @@ export abstract class WorkspaceObjectBase<
     return { reclaimed: true, idleMs, bytes };
   }
 
-  /** Stop the container, keeping nothing. The workspace is what persists. */
-  async #stopContainer(): Promise<void> {
+  /**
+   * Stop the container, keeping nothing. The workspace is what persists.
+   *
+   * Logged first because `@cloudflare/computer` reports this exit as
+   * `expected: false`: its own stop is not public, so a raw `destroy()` reads
+   * as a crash in its log.
+   */
+  async #stopContainer(reason: "idle" | "reclaim"): Promise<void> {
+    console.info(`[${this.#tag}] stopping the container`, {
+      id: this.ctx.id.toString(),
+      reason,
+      running: this.ctx.container?.running ?? false
+    });
     try {
       await this.ctx.container?.destroy();
     } catch (err) {
@@ -1400,7 +1411,7 @@ export abstract class WorkspaceObjectBase<
      */
     if (await this.#drainBeforeStop(lastUsedAt, payload?.attempt ?? 0)) return;
 
-    await this.#stopContainer();
+    await this.#stopContainer("idle");
   }
 
   /**

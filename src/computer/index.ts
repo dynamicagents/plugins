@@ -6,6 +6,7 @@ import type { AgentPlugin } from "@dynamicagents/core";
 import { getWorkspace, shellQuote } from "@cloudflare/computer";
 import type { WorkspaceClient, WorkspaceStub } from "@cloudflare/computer";
 import { guardPath, isSkipped, skipNames, walkSkips } from "./paths.js";
+import { withFileLock } from "./file-lock.js";
 import {
   cancelledNote,
   humanBytes,
@@ -505,18 +506,23 @@ async function killLate(handle: {
  * @param fsWorkspace Opens it for the file tools, which touch nothing but the
  *   host's SQLite. Defaults to {@link workspace}, so a host with one way in
  *   behaves as before. See {@link openWorkspaceFs}.
+ * @param lockScope Names the workspace a write locks within — see
+ *   {@link file://./file-lock.ts}. Defaults to this tool set alone.
  */
 export function buildComputerTools(
   workspace: () => Promise<WorkspaceClient>,
   config: ComputerConfig,
   advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
-  fsWorkspace: () => Promise<WorkspaceClient> = workspace
+  fsWorkspace: () => Promise<WorkspaceClient> = workspace,
+  lockScope?: () => string
 ): ToolSet {
   const cwd = config.cwd ?? DEFAULT_CWD;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxChars = config.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
   const gateMs = config.installGateMs ?? 90_000;
   const env = config.env;
+  const ownScope = crypto.randomUUID();
+  const scope = () => lockScope?.() ?? ownScope;
 
   /**
    * Wait out anything transient, up to the gate, and report whatever is left.
@@ -885,19 +891,21 @@ export function buildComputerTools(
         // did not happen.
         const lost = await refuseWrite();
         if (lost) return lost;
-        return inWorkspace("writing", path, async (fs) => {
-          const dir = path.slice(0, path.lastIndexOf("/"));
-          if (dir) await fs.mkdir(dir, { recursive: true });
-          await fs.writeFile(path, content);
-          // Characters, not bytes. `String.length` counts UTF-16 code units — the
-          // distinction `readBounded` documents at length — so calling them bytes
-          // was simply wrong for anything outside ASCII. The exact byte count
-          // would cost a `TextEncoder` pass over the whole content for a number
-          // nobody does arithmetic with, and "characters" is already this module's
-          // word for the same count in `truncateOutput`'s omission marker.
-          const written = content.length;
-          return `wrote ${path} (${written} character${written === 1 ? "" : "s"})`;
-        });
+        return inWorkspace("writing", path, (fs) =>
+          withFileLock(scope(), path, async () => {
+            const dir = path.slice(0, path.lastIndexOf("/"));
+            if (dir) await fs.mkdir(dir, { recursive: true });
+            await fs.writeFile(path, content);
+            // Characters, not bytes. `String.length` counts UTF-16 code units — the
+            // distinction `readBounded` documents at length — so calling them bytes
+            // was simply wrong for anything outside ASCII. The exact byte count
+            // would cost a `TextEncoder` pass over the whole content for a number
+            // nobody does arithmetic with, and "characters" is already this module's
+            // word for the same count in `truncateOutput`'s omission marker.
+            const written = content.length;
+            return `wrote ${path} (${written} character${written === 1 ? "" : "s"})`;
+          })
+        );
       }
     }),
 
@@ -923,28 +931,30 @@ export function buildComputerTools(
         if (refusal) return refusal;
         const lost = await refuseWrite();
         if (lost) return lost;
-        return inWorkspace("editing", path, async (fs) => {
-          const content = await fs.readFile(path, "utf8");
-          const occurrences = content.split(find).length - 1;
-          // Refusing an ambiguous edit is the whole value of this tool over
-          // sb_write: a silent first-match replace corrupts the file in a way
-          // that surfaces much later, usually as a confusing test failure.
-          if (occurrences === 0) return `no match for that text in ${path}`;
-          if (occurrences > 1)
-            return `that text appears ${occurrences} times in ${path} — add surrounding context to make it unique`;
-          // A replacer function, not the string itself. `String.replace`
-          // interprets `$$`, `$&`, `` $` `` and `$'` in a *string* replacement
-          // even when the pattern is a plain string, so the text written is not
-          // the text the model sent: `echo $$` becomes `echo $`, and `$'` splices
-          // in everything before the match. Those two are not exotic — `$$`
-          // escapes a dollar in a Makefile and reads a PID in shell, and `$'…'`
-          // is bash ANSI-C quoting. A function's return value is used verbatim.
-          await fs.writeFile(
-            path,
-            content.replace(find, () => replace)
-          );
-          return `edited ${path}`;
-        });
+        return inWorkspace("editing", path, (fs) =>
+          withFileLock(scope(), path, async () => {
+            const content = await fs.readFile(path, "utf8");
+            const occurrences = content.split(find).length - 1;
+            // Refusing an ambiguous edit is the whole value of this tool over
+            // sb_write: a silent first-match replace corrupts the file in a way
+            // that surfaces much later, usually as a confusing test failure.
+            if (occurrences === 0) return `no match for that text in ${path}`;
+            if (occurrences > 1)
+              return `that text appears ${occurrences} times in ${path} — add surrounding context to make it unique`;
+            // A replacer function, not the string itself. `String.replace`
+            // interprets `$$`, `$&`, `` $` `` and `$'` in a *string* replacement
+            // even when the pattern is a plain string, so the text written is not
+            // the text the model sent: `echo $$` becomes `echo $`, and `$'` splices
+            // in everything before the match. Those two are not exotic — `$$`
+            // escapes a dollar in a Makefile and reads a PID in shell, and `$'…'`
+            // is bash ANSI-C quoting. A function's return value is used verbatim.
+            await fs.writeFile(
+              path,
+              content.replace(find, () => replace)
+            );
+            return `edited ${path}`;
+          })
+        );
       }
     }),
 
@@ -986,32 +996,28 @@ export function buildComputerTools(
             // arm below renders them), and order is the walk's — pre-order, by
             // name — rather than one flat sort.
             //
-            // Filtered rather than trusted, and this is the arm where it matters
-            // most: at a repo root `.git` is walked *first* and holds thousands
-            // of objects, and `node_modules` runs to tens of thousands, so an
-            // unfiltered page is a page of neither's contents. Four rounds
-            // because a `find` retry re-walks dirents, which is cheap SQLite
-            // reads rather than file bytes.
-            const skips = walkSkips(path);
-            const page = await collectVisible(
-              (at, limit) => fs.find(path, pattern, { limit, offset: at }),
-              (e) => e.path,
-              (p) => isSkipped(skips, p),
-              DEFAULT_MAX_ENTRIES,
-              from,
-              4
-            );
-            if (page.items.length === 0)
-              return page.crowded
-                ? `(everything under ${path} from offset ${from} is inside ${skipNames(skips)} — try a \`pattern\`, or a \`path\` inside the working tree)`
-                : pattern
-                  ? `(nothing under ${path} matches ${pattern})`
-                  : `(${path} is empty)`;
+            // `.git` and `node_modules` are pruned by the store, not filtered
+            // here: at a repo root either one outnumbers a page on its own.
+            const entries = await fs.find(path, pattern, {
+              limit: DEFAULT_MAX_ENTRIES + 1,
+              offset: from,
+              exclude: walkSkips(path).map((segment) => `**/${segment}`)
+            });
+            if (entries.length === 0)
+              return pattern
+                ? `(nothing under ${path} matches ${pattern})`
+                : `(${path} is empty)`;
 
-            const blocks = page.items
+            const blocks = entries
               .slice(0, DEFAULT_MAX_ENTRIES)
               .map((e) => [e.type === "dir" ? `${e.path}/` : e.path]);
             const { body, shown } = packBlocks(blocks, maxChars);
+            const page = {
+              rawIndex: entries.map((_, i) => from + i),
+              rawEnd: from + entries.length,
+              exhausted: entries.length <= DEFAULT_MAX_ENTRIES,
+              crowded: false
+            };
             return body + listingNote(page, shown, "entries", "`pattern`");
           }
           // One over the ceiling: enough to know the listing was cut without a
@@ -1111,11 +1117,10 @@ export function buildComputerTools(
         if (refusal) return refusal;
         const from = offset ?? 0;
         return inWorkspace("searching", target, async (fs) => {
-          // Two rounds, not four: a `grep` retry re-reads and re-scans every file
-          // it already looked at, where the `find` retry in `sb_ls` only re-walks
-          // dirents. `.git` is also far less likely to flood a page here — its
-          // bulk is compressed objects, which a text query does not match —
-          // where `node_modules` is source and matches like any other.
+          // Two rounds, because a `grep` retry re-reads and re-scans every file
+          // it already looked at. `.git` rarely floods a page here — its bulk is
+          // compressed objects, which a text query does not match — where
+          // `node_modules` is source and matches like any other.
           const skips = walkSkips(target);
           const page = await collectVisible(
             (at, limit) =>
@@ -1278,10 +1283,10 @@ export function computer(config: ComputerConfig): AgentPlugin {
   // Resolved per call, not memoized: `workspaceName` is a thunk precisely
   // because the name is not knowable at construction, and a stale stub would
   // silently route a second caller's commands into the first caller's files.
-  const host = (runtime?: unknown) => {
-    const name = workspaceNameFromRuntime(runtime) ?? config.workspaceName();
-    return config.binding.get(config.binding.idFromName(name));
-  };
+  const nameOf = (runtime?: unknown) =>
+    workspaceNameFromRuntime(runtime) ?? config.workspaceName();
+  const host = (runtime?: unknown) =>
+    config.binding.get(config.binding.idFromName(nameOf(runtime)));
 
   const tools = (runtime?: unknown) =>
     buildComputerTools(
@@ -1291,7 +1296,8 @@ export function computer(config: ComputerConfig): AgentPlugin {
       // wrapping again would only make it look like the guarantee lives in two
       // places.
       () => host(runtime).advisories(),
-      () => openWorkspaceFs(host(runtime))
+      () => openWorkspaceFs(host(runtime)),
+      () => nameOf(runtime)
     );
 
   return definePlugin({

@@ -31,16 +31,14 @@ tree back rather than rebuilding it, and the file tools read inside it like anyw
 else.
 
 What it costs is attention, not correctness. A real tree is 22,470 files and sorts
-before `src`, so `sb_grep` and recursive `sb_ls` leave those results out — and say so
-when a page falls entirely inside one. Pointing `path` at `node_modules` searches it,
-which is what keeps that a default rather than a wall; `.git` has no such opt-in,
-because the guard below refuses it as a path at all.
+before `src`, so `sb_grep` and recursive `sb_ls` leave those results out. Pointing
+`path` at `node_modules` searches it, which is what keeps that a default rather than
+a wall; `.git` has no such opt-in, because the guard below refuses it as a path at
+all.
 
-The filtering is on the results. The workspace filesystem takes no exclusion — `find`
-has a limit and an offset, `grep` a positive `include` glob — so a walk still pays to
-traverse what it drops, and a page landing wholly inside one comes back reporting
-that rather than reporting nothing. A narrower `path`, `pattern` or `include` is the
-cheap answer, and the message says so.
+`sb_ls` passes both as `find` exclusions, so the store never walks them. `grep` takes
+no exclusion, so `sb_grep` filters its results: it still pays to traverse what it
+drops, and a page landing wholly inside one says so rather than reporting nothing.
 
 ## `.git` is off limits
 
