@@ -20,6 +20,7 @@ import {
 } from "@cloudflare/computer/backends/container";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
+import { MAX_TOOL_CALL_MS } from "@dynamicagents/core";
 import { ContainerTrust } from "./ca-trust.js";
 import { ContainerDeps } from "./container-deps.js";
 import { InstallJob } from "./install-job.js";
@@ -234,12 +235,13 @@ const SYNC_DRAIN_GRACE_MS = 30 * 60_000;
 /**
  * How long a container start may take before the calls waiting on it are refused.
  *
- * Under core's per-call limit with room left for the command that wanted the
- * container, so the model reads why its call failed rather than an abandoned
- * call. A start still going past this is stuck, not slow — a connect nothing
- * answers — so the next caller starts again instead of joining it.
+ * A minute under core's per-call limit, and tied to it: past that limit core
+ * abandons the call anyway, the model reads no reason, and the next call joins
+ * the same stuck start. As late as that allows, because refusing a start that
+ * was only slow clears `#readying` while it runs, and the next caller starts a
+ * second one beside it — and a start pushing a large tree has taken nine minutes.
  */
-const READY_DEADLINE_MS = 5 * 60_000;
+const READY_DEADLINE_MS = MAX_TOOL_CALL_MS - 60_000;
 
 /**
  * `work`, refused once `ms` pass without it settling. The work itself goes on;
