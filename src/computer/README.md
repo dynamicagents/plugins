@@ -25,11 +25,16 @@ to.
 
 ## `node_modules` is on the container's disk
 
-The one thing to internalise. Every `node_modules` under the workspace is a bind
-mount of the container's own disk, made when `npm`, `npx`, `pnpm`, `yarn` or
-`corepack` runs there. So an install never syncs: it runs at disk speed, and the
-tree never crosses into the Durable Object, or back into every fresh container before
-its first command runs.
+The one thing to internalise. When `npm`, `npx`, `pnpm`, `yarn`, `corepack`, `bun`
+or `bunx` runs under the workspace, the `node_modules` of the package root it runs in
+— or is pointed at with `--prefix`, `--cwd`, `--dir` or `-C` — becomes a bind mount
+of the container's own disk. So an install never syncs: it runs at disk speed, and
+the tree never crosses into the Durable Object, or back into every fresh container
+before its first command runs. Workspace members are not mounted; an install at the
+root puts the bulk of the tree there.
+
+A mount point cannot be removed, so `rm -rf node_modules` empties it and then fails.
+`npm ci` clears it itself.
 
 The cost is that a new container reinstalls. Container directory snapshots are
 the intended fix: restored at start, they would bring the tree back without a
@@ -272,6 +277,6 @@ npm install @cloudflare/computer @platformatic/vfs
 
 The image is `@cloudflare/computer`'s contract rather than this one's — it runs
 `computerd`, and the shell named in `ComputerConfig` has to exist in it. This plugin
-adds `mount`, `mountpoint` and `sha256sum`, `/usr/local/sbin` ahead of the package
-managers on `PATH`, and a container allowed to bind-mount, which Cloudflare
-Containers are.
+also needs `mount`, `mountpoint` and `sha256sum` in the image, `/usr/local/sbin`
+ahead of the package managers on `PATH`, and a container allowed to bind-mount,
+which Cloudflare Containers are.

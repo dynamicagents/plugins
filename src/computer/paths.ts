@@ -48,6 +48,15 @@ export function skipNames(skips: readonly string[]): string {
     : (quoted[0] ?? "");
 }
 
+/** The sentence a `node_modules` path gets. */
+function dependencyTreeNote(path: string, verb: string): string {
+  return (
+    `${path} is inside node_modules, which lives on the container's disk rather ` +
+    `than in the workspace ${verb} works on. Use sb_exec there — ` +
+    `\`cat\`, \`ls\`, \`rg\`.`
+  );
+}
+
 /**
  * The sentence a `.git` path gets.
  *
@@ -61,14 +70,6 @@ export function skipNames(skips: readonly string[]): string {
  * neither reliable nor this guard's job — a fact about the implementation, not a
  * route to advertise.
  */
-function dependencyTreeNote(path: string, verb: string): string {
-  return (
-    `${path} is inside node_modules, which lives on the container's disk rather ` +
-    `than in the workspace ${verb} reads. Use sb_exec to look inside it — ` +
-    `\`cat\`, \`ls\`, \`rg\`.`
-  );
-}
-
 function gitInternalNote(path: string, verb: string): string {
   return (
     `${path} is inside .git — git's internal state, which ${verb} does not touch. ` +

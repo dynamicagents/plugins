@@ -39,9 +39,9 @@ import type { WorkspaceAdvisory } from "./advisory.js";
  *
  * ## The dependency tree is not in the workspace
  *
- * The one thing to internalise before reading further. Every `node_modules` is
- * a bind mount of the container's disk, so installs never sync, and a new
- * container reinstalls — see `./host/container-deps.ts`. The file tools read
+ * The one thing to internalise before reading further. A package root's
+ * `node_modules` is a bind mount of the container's disk, so installs never
+ * sync, and a new container reinstalls — see `./host/container-deps.ts`. The file tools read
  * the workspace, so they refuse it; `sb_exec` reaches it. `paths.ts` owns what a
  * path may be and what walks drop.
  *
@@ -1115,8 +1115,8 @@ export function buildComputerTools(
         return inWorkspace("searching", target, async (fs) => {
           // Two rounds, because a `grep` retry re-reads and re-scans every file
           // it already looked at. `.git` rarely floods a page here — its bulk is
-          // compressed objects, which a text query does not match — where
-          // `node_modules` is source and matches like any other.
+          // compressed objects, which a text query does not match — where a
+          // `node_modules` left in the workspace is source and matches.
           const skips = WALK_SKIPS;
           const page = await collectVisible(
             (at, limit) =>
@@ -1136,7 +1136,7 @@ export function buildComputerTools(
           );
           if (page.items.length === 0)
             return page.crowded
-              ? `every match for ${JSON.stringify(query)} from offset ${from} is inside ${skipNames(skips)}, which ${skips.length > 1 ? "are" : "is"} not searched. Add \`include\` (e.g. '**/*.ts') to search the working tree instead, or pass a \`path\` inside one to search it.`
+              ? `every match for ${JSON.stringify(query)} from offset ${from} is inside ${skipNames(skips)}, which ${skips.length > 1 ? "are" : "is"} not searched. Add \`include\` (e.g. '**/*.ts') to search the working tree instead, or use sb_exec to search \`node_modules\`.`
               : `no matches for ${JSON.stringify(query)} in ${target}${
                   include ? ` (${include})` : ""
                 }${from > 0 ? ` past offset ${from}` : ""}`;
@@ -1322,7 +1322,7 @@ export function computer(config: ComputerConfig): AgentPlugin {
       // is why they are stated together rather than left for the model to work
       // out from a confusing result.
       "The checkout is durable: it survives between tasks and is still there after the container restarts, so it may already contain work from an earlier task — check before assuming it is empty.",
-      "`node_modules` is not durable: it lives on the container's disk, so a new container reinstalls it, and the file tools cannot see inside it — use `sb_exec` there.",
+      "`node_modules` is not durable: it lives on the container's disk, so a new container reinstalls it, and the file tools cannot see inside it — use `sb_exec` there. It is a mount point, so `rm -rf node_modules` fails; `npm ci` clears it itself.",
       // Stated up front rather than left to a refusal, so the model does not spend
       // a turn discovering it. The destination matters as much as the rule: a
       // prohibition with nowhere to go gets worked around.

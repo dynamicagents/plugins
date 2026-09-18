@@ -92,6 +92,9 @@ export class ContainerTrust {
   /** Whether an exit watch is standing for the container now running. */
   #watching = false;
 
+  /** Bumped by {@link forget}, so a watch settling after it is ignored. */
+  #generation = 0;
+
   /**
    * Whether this container's deployment fault has already been reported.
    *
@@ -106,6 +109,7 @@ export class ContainerTrust {
 
   /** Forget that any container was trusted. */
   forget(): void {
+    this.#generation += 1;
     this.#trusted = false;
     this.#faultReported = false;
   }
@@ -121,14 +125,20 @@ export class ContainerTrust {
    * A rejection is an exit too — the runtime reporting the container went away
    * badly — so both settlements clear the flag, and neither is allowed to
    * surface as an unhandled rejection.
+   *
+   * An exit already accounted for — the container was forgotten since — is not
+   * reported: a replacement may be running by then, and it is not the one that
+   * exited.
    */
   #watch(): void {
     if (this.#watching) return;
     const container = this.deps.container();
     if (!container) return;
+    const generation = this.#generation;
     try {
       const done = (): void => {
         this.#watching = false;
+        if (generation !== this.#generation) return;
         this.forget();
         this.deps.onExit?.();
       };

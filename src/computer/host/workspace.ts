@@ -640,7 +640,8 @@ export abstract class WorkspaceObjectBase<
   #readying?: Promise<void>;
 
   /**
-   * Open the workspace, and make sure the container behind it can speak TLS.
+   * Open the workspace, and make sure the container behind it can speak TLS and
+   * installs onto its own disk.
    *
    * **Every path that might start a container goes through here**, which is the
    * fix for a real gap rather than tidiness. The CA install used to hang off
@@ -711,7 +712,10 @@ export abstract class WorkspaceObjectBase<
           exclude: ["**/.git", "**/node_modules/*"]
         })
         // No workspace directory yet, so nothing was ever synced.
-        .catch(() => []);
+        .catch((err: { code?: string }) => {
+          if (err?.code === "ENOENT") return [];
+          throw err;
+        });
       for (const tree of trees) {
         if (tree.type === "dir") await fs.rm(tree.path, { recursive: true });
       }
@@ -1101,7 +1105,6 @@ export abstract class WorkspaceObjectBase<
     });
     try {
       await this.ctx.container?.destroy();
-      await this.#containerGone();
     } catch (err) {
       // Already gone, most likely, and a container that cannot be stopped must
       // not turn a clean reclaim into a failed alarm.
@@ -1110,6 +1113,7 @@ export abstract class WorkspaceObjectBase<
         err: String(err)
       });
     }
+    await this.#containerGone();
   }
 
   /**
@@ -1267,11 +1271,14 @@ export abstract class WorkspaceObjectBase<
    * drain outlives its owner, dies mid-`npm ci` with "WritableStream RPC stub
    * was disposed without calling close()", and leaves a half-written tree.
    *
-   * A missing dependency tree is detected when a container comes up, and the
-   * install it arms runs in the alarm, which owns no request and outlives every
-   * RPC.
+   * A missing dependency tree arms an install here, which runs in the alarm,
+   * which owns no request and outlives every RPC. Here because a command reads
+   * this before its `#ready()` starts a container, so the gate holds it for the
+   * install rather than letting it outrun one.
    */
   async advisories(): Promise<readonly WorkspaceAdvisory[]> {
+    if (!this.ctx.container?.running) await this.#containerGone();
+    await this.#install.armIfTreeMissing();
     const install = await this.#install.state();
     const storage = this.#storageHeadroom();
     // Only when the record says failed: it is the one state whose reading a

@@ -583,6 +583,19 @@ describe("arming an install when the tree is missing", () => {
   });
 
   /**
+   * `sb_exec` reads the advisories before its `#ready()` starts a container, so
+   * that read has to arm the install, or the gate lets the command outrun it.
+   */
+  it("arms from the gate's own read, before a command starts a container", async () => {
+    const stub = freshWorkspace("arm-from-gate");
+    await seedInstalled(stub, "/workspace/probe", { tree: true });
+
+    await stub.advisories();
+
+    expect((await settled(stub))?.state).toBe("failed");
+  });
+
+  /**
    * A caller's very first task: nothing has ever been installed, so there is no
    * record of *where* to install. `repo_clone` and its `afterCheckout` hook own
    * this case, exactly as they always have.
@@ -1158,5 +1171,37 @@ describe("purging synced dependency trees", () => {
         state.storage.get("deps:purged")
       )
     ).toBeTypeOf("number");
+  });
+
+  /** Only a missing workspace means nothing was synced; anything else retries. */
+  it("tries again after a failure other than a missing workspace", async () => {
+    const stub = freshWorkspace("purge-fails");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("deps:purged", Date.now());
+    });
+    {
+      using ws = await openWorkspaceFs(stub);
+      await ws.fs.rm("/workspace", { recursive: true, force: true });
+      await ws.fs.writeFile("/workspace", "not a directory");
+    }
+    await runInDurableObject(stub, (_instance, state) =>
+      state.storage.delete("deps:purged")
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      using ws = await openWorkspace(stub);
+      void ws;
+    } catch {
+      // Whatever else a file at the workspace root breaks is not this spec's.
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(
+      await runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("deps:purged")
+      )
+    ).toBeUndefined();
   });
 });

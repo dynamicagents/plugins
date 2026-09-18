@@ -201,10 +201,10 @@ export class InstallJob {
    * The signal is {@link CONTAINER_TREE_KEY}: a local read, true only while the
    * container that ran the install is the one running.
    *
-   * Armed as soon as a container is up, because the model's first minute is
-   * README-reading and `git status` — an install armed there runs *through* that
-   * minute, where one armed on the first `npm` command charges its full time to
-   * that command.
+   * Armed as soon as a container is up or a command is about to start one,
+   * because the model's first minute is README-reading and `git status` — an
+   * install armed there runs *through* that minute, where one armed on the first
+   * `npm` command charges its full time to that command.
    *
    * It writes `running` before anything is running: the alarm has not fired yet,
    * and a `done` record would let an `npm` command through against a tree that
@@ -288,8 +288,8 @@ export class InstallJob {
   /**
    * Check the record against the marker a new isolate's setup read.
    *
-   * The record can outlive its container when a replacement starts inside
-   * `connect()`, where no exit is observed; the marker cannot.
+   * The record can outlive its container in an isolate that did not watch it
+   * exit; the marker cannot.
    */
   async reconcile(marker: string | null): Promise<void> {
     const tree = await this.#tree();

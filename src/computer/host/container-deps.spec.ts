@@ -4,9 +4,10 @@ import { ContainerDeps, depsSetupCommand } from "./container-deps.js";
 
 /**
  * The script is verified end to end against a real shell outside this suite
- * (Docker, `--privileged`): a script-spawned `npm ci` gets the mount, a re-run
- * setup wraps the real binary rather than its wrapper, and nothing outside the
- * workspace is mounted. These pin the properties that made those true.
+ * (Docker, `--privileged`): a script-spawned `npm ci` gets the mount, as does a
+ * `--prefix` target; a re-run setup wraps the real binary rather than its
+ * wrapper; `corepack enable` leaves the wrappers in place; and nothing outside
+ * the workspace is mounted. These pin the properties that made those true.
  */
 describe("depsSetupCommand", () => {
   const command = depsSetupCommand("/workspace", "/workspace/repo");
@@ -23,8 +24,28 @@ describe("depsSetupCommand", () => {
     );
   });
 
-  it("resolves the real binary with the wrapper directory skipped", () => {
+  /** `corepack enable` or `npm i -g pnpm` installs one after the setup ran. */
+  it("wraps every package manager, installed yet or not", () => {
+    expect(command).toContain(
+      "for tool in npm npx pnpm yarn corepack bun bunx; do install"
+    );
+  });
+
+  it("finds the real binary when the wrapper runs, with the wrapper directory skipped", () => {
+    expect(command).toContain('tool=$(basename "$0")');
     expect(command).toContain('[ "$d" = /usr/local/sbin ] && continue');
+  });
+
+  it("keeps corepack's shims from replacing the wrappers", () => {
+    expect(command).toContain('set -- "$cmd" --install-directory "$real" "$@"');
+  });
+
+  it("mounts the directory a package manager is pointed at", () => {
+    expect(command).toContain(
+      '/usr/local/sbin/workspace-deps-mount "$PWD" "$@"'
+    );
+    expect(command).toContain("--prefix|--cwd|--dir|-C)");
+    expect(command).toContain("--prefix=*|--cwd=*|--dir=*)");
   });
 
   it("reads the marker only when there is a directory to read it in", () => {
@@ -61,9 +82,7 @@ function depsOn(workspace: Workspace): ContainerDeps {
 
 describe("ContainerDeps", () => {
   it("sets up once per container, and again after it is forgotten", async () => {
-    const { workspace, runs } = answering(
-      "WRAPPED npm\nMARKER abc\nSETUP OK\n"
-    );
+    const { workspace, runs } = answering("MARKER abc\nSETUP OK\n");
     const deps = depsOn(workspace);
 
     expect(await deps.ensure("/workspace/repo")).toEqual({ marker: "abc" });
@@ -82,15 +101,21 @@ describe("ContainerDeps", () => {
     });
   });
 
-  it("retries a setup that did not finish", async () => {
-    const { workspace, runs } = answering("", 1);
+  /**
+   * The container answered and has no wrappers, so an install would succeed
+   * into the workspace. Nothing else would say so.
+   */
+  it("throws for a setup that did not finish, and retries it", async () => {
+    const { workspace, runs } = answering("install: permission denied", 1);
     const deps = depsOn(workspace);
-    expect(await deps.ensure("/workspace/repo")).toBeUndefined();
-    await deps.ensure("/workspace/repo");
+    await expect(deps.ensure("/workspace/repo")).rejects.toThrow(
+      /permission denied/
+    );
+    await expect(deps.ensure("/workspace/repo")).rejects.toThrow();
     expect(runs.count).toBe(2);
   });
 
-  it("never throws for an unreachable container", async () => {
+  it("only logs an unreachable container, whose next command fails too", async () => {
     const workspace = {
       runtime: {
         exec: async () => {

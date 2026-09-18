@@ -145,3 +145,68 @@ describe("when the container is asked to trust the CA again", () => {
     }
   });
 });
+
+/**
+ * The exit watch, which also tells the object its container's tree is gone.
+ *
+ * A watch can settle after its container was already accounted for — stopped
+ * by the object, or found not running — and by then a replacement may hold a
+ * finished install. Reporting that late exit would drop its record.
+ */
+describe("watching the container's exit", () => {
+  function watched() {
+    let exit!: () => void;
+    const container = {
+      monitor: () =>
+        new Promise<void>((resolve) => {
+          exit = resolve;
+        })
+    } as unknown as Container;
+    const onExit = vi.fn();
+    const workspace = {
+      runtime: {
+        exec: async () => ({
+          result: async () => ({ exitCode: 0, stdout: "TRUSTED", stderr: "" }),
+          [Symbol.dispose]: () => {}
+        })
+      }
+    } as unknown as Workspace;
+    const trust = new ContainerTrust({
+      workspace: () => workspace,
+      container: () => container,
+      tag: () => "spec",
+      id: () => "spec-id",
+      onExit
+    });
+    const settle = async () => {
+      exit();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    return { trust, onExit, settle };
+  }
+
+  it("reports the exit of the container it watched", async () => {
+    const { trust, onExit, settle } = watched();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await trust.ensure();
+      await settle();
+      expect(onExit).toHaveBeenCalledTimes(1);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("ignores one that settles after the container was forgotten", async () => {
+    const { trust, onExit, settle } = watched();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await trust.ensure();
+      trust.forget();
+      await settle();
+      expect(onExit).not.toHaveBeenCalled();
+    } finally {
+      info.mockRestore();
+    }
+  });
+});
