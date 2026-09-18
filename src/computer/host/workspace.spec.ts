@@ -10,6 +10,7 @@ import { openWorkspace, openWorkspaceFs } from "../index.js";
 import { DEFAULT_SCRATCH_DIR } from "../../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
 import { pathExists } from "../read.js";
+import { readyWithin } from "./workspace.js";
 
 /**
  * The plan `TestWorkspaceDO` is configured with — read here rather than
@@ -1203,5 +1204,30 @@ describe("purging synced dependency trees", () => {
         state.storage.get("deps:purged")
       )
     ).toBeUndefined();
+  });
+});
+
+/**
+ * The wait on a container start. A start whose connect never answers held every
+ * caller until core abandoned the call, so the model read an abandoned call, not
+ * a reason, and the next call joined the same hung start.
+ */
+describe("waiting on a container start", () => {
+  it("refuses the wait at its deadline, with a reason", async () => {
+    const hung = new Promise<void>(() => {});
+
+    await expect(readyWithin(hung, 10)).rejects.toThrow(
+      /did not become ready within .*the next call starts it again/
+    );
+  });
+
+  it("leaves no timer behind when the start finishes first", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await readyWithin(Promise.resolve(), 5 * 60_000);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

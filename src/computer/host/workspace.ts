@@ -20,6 +20,7 @@ import {
 } from "@cloudflare/computer/backends/container";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
+import { MAX_TOOL_CALL_MS } from "@dynamicagents/core";
 import { ContainerTrust } from "./ca-trust.js";
 import { ContainerDeps } from "./container-deps.js";
 import { InstallJob } from "./install-job.js";
@@ -230,6 +231,39 @@ const SYNC_DRAIN_ID = "sync-drain-id";
  * indefinitely — so this is the wall on that, measured from the last use.
  */
 const SYNC_DRAIN_GRACE_MS = 30 * 60_000;
+
+/**
+ * How long a container start may take before the calls waiting on it are refused.
+ *
+ * A minute under core's per-call limit, and tied to it: past that limit core
+ * abandons the call anyway, the model reads no reason, and the next call joins
+ * the same stuck start. As late as that allows, because refusing a start that
+ * was only slow clears `#readying` while it runs, and the next caller starts a
+ * second one beside it — and a start pushing a large tree has taken nine minutes.
+ */
+const READY_DEADLINE_MS = MAX_TOOL_CALL_MS - 60_000;
+
+/**
+ * `work`, refused once `ms` pass without it settling. The work itself goes on;
+ * only the wait for it ends — see {@link READY_DEADLINE_MS}.
+ */
+export function readyWithin(work: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `the workspace container did not become ready within ${ms / 1000}s; the next call starts it again`
+          )
+        ),
+      ms
+    );
+  });
+  // The loser still settles, and a rejection nobody holds fails the request.
+  work.catch(() => {});
+  return Promise.race([work, expired]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Set once the synced dependency trees are gone from this object's storage —
@@ -675,12 +709,15 @@ export abstract class WorkspaceObjectBase<
    * a warm and the install alarm. Two starts means two trust commands through a
    * half-established connection, the second pushing the tree again behind the
    * first. Cleared on settle, so the next caller asks about the container that
-   * is there now.
+   * is there now — and on {@link READY_DEADLINE_MS}, so a start that hangs holds
+   * its callers for that long and no longer.
    */
   async #ready(): Promise<void> {
-    this.#readying ??= this.#readyNow().finally(() => {
-      this.#readying = undefined;
-    });
+    this.#readying ??= readyWithin(this.#readyNow(), READY_DEADLINE_MS).finally(
+      () => {
+        this.#readying = undefined;
+      }
+    );
     return this.#readying;
   }
 

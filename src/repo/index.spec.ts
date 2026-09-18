@@ -210,14 +210,16 @@ describe("token containment", () => {
   });
 
   it("opens the pull request from the Worker, never from the container", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({ html_url: "https://github.com/o/r/pull/7" }),
-        {
-          status: 201
-        }
-      )
-    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) =>
+        init?.method === "POST"
+          ? new Response(
+              JSON.stringify({ html_url: "https://github.com/o/r/pull/7" }),
+              { status: 201 }
+            )
+          : new Response("[]", { status: 200 })
+      );
     const { exec, calls } = recorder();
 
     const url = await run(tools(exec), "repo_open_pr", {
@@ -239,7 +241,8 @@ describe("token containment", () => {
       expect(call.command).not.toContain(TOKEN);
       expect(JSON.stringify(call.options?.env ?? {})).not.toContain(TOKEN);
     }
-    expect(fetchSpy).toHaveBeenCalledOnce();
+    // The lookup for one already open, then the POST.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
     fetchSpy.mockRestore();
   });
 });
@@ -285,6 +288,26 @@ describe("shell injection", () => {
     // Byte-identical: the point of the env indirection is that nothing has to
     // be escaped, so nothing can be escaped wrongly.
     expect(commit.options?.env?.["GIT_COMMIT_MESSAGE"]).toBe(message);
+  });
+
+  it("names the author on the commit, whatever the checkout's config says", async () => {
+    const { exec, calls } = recorder();
+    await run(
+      tools(exec, { author: { name: "Coder", email: "c@x.test" } }),
+      "repo_commit",
+      {
+        dir: "/w/r",
+        message: "wip"
+      }
+    );
+
+    const env = calls.find((c) => c.command.includes("commit"))!.options?.env;
+    expect(env).toMatchObject({
+      GIT_AUTHOR_NAME: "Coder",
+      GIT_AUTHOR_EMAIL: "c@x.test",
+      GIT_COMMITTER_NAME: "Coder",
+      GIT_COMMITTER_EMAIL: "c@x.test"
+    });
   });
 });
 
@@ -774,9 +797,70 @@ describe("talking to the forge", () => {
       });
 
       expect(result).toBe("https://github.com/o/r/pull/7");
-      expect(String(spy.mock.calls[0]![0])).toBe(
-        "https://api.github.com/repos/o/r/pulls"
+      const posted = spy.mock.calls.find(
+        ([, init]) => (init as RequestInit | undefined)?.method === "POST"
       );
+      expect(String(posted![0])).toBe("https://api.github.com/repos/o/r/pulls");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  /**
+   * The retry after a call that was abandoned at its time limit. That call's POST
+   * had landed, and a second one either fails on the duplicate or, across forks,
+   * opens another pull request beside the first.
+   */
+  it("returns a pull request already open for the branch instead of opening another", async () => {
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify([{ html_url: "https://github.com/o/r/pull/42" }]),
+            { status: 200 }
+          )
+      );
+    try {
+      const { exec } = recorder({
+        "remote get-url origin": { stdout: "https://github.com/o/r" }
+      });
+      const result = await run(tools(exec), "repo_open_pr", {
+        dir: "/w/r",
+        head: "coder/x",
+        base: "main",
+        title: "t",
+        body: "b"
+      });
+
+      expect(result).toMatch(/already open.*pull\/42/);
+      expect(spy).toHaveBeenCalledOnce();
+      const [url, init] = spy.mock.calls[0]!;
+      expect((init as RequestInit | undefined)?.method ?? "GET").toBe("GET");
+      const query = new URL(String(url)).searchParams;
+      expect(query.get("head")).toBe("o:coder/x");
+      expect(query.get("base")).toBe("main");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("looks a fork's head up under the fork's owner", async () => {
+    const spy = api({ "/pulls": [] });
+    try {
+      const { exec } = recorder({
+        "remote get-url origin": { stdout: "https://github.com/o/r" }
+      });
+      await run(tools(exec), "repo_open_pr", {
+        dir: "/w/r",
+        head: "fork:coder/x",
+        base: "main",
+        title: "t",
+        body: "b"
+      });
+
+      const lookup = new URL(String(spy.mock.calls[0]![0])).searchParams;
+      expect(lookup.get("head")).toBe("fork:coder/x");
     } finally {
       spy.mockRestore();
     }
@@ -1555,6 +1639,33 @@ describe("concurrent git", () => {
       ])
     ).resolves.toHaveLength(2);
     expect(calls).toBeGreaterThan(1);
+  });
+
+  /**
+   * A command that never answers — its workspace object reset under it — must
+   * not hold every git command behind it for the life of the isolate.
+   */
+  it("moves on from a command that never answers", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let calls = 0;
+      const exec: RepoExec = async () => {
+        calls += 1;
+        if (calls === 1) return new Promise(() => {});
+        return { success: true, stdout: "", stderr: "", exitCode: 0 };
+      };
+      const set = tools(exec);
+
+      const stuck = run(set, "repo_status", { dir: "/w/r" });
+      const behind = run(set, "repo_status", { dir: "/w/r" });
+      await vi.advanceTimersByTimeAsync(8 * 60_000);
+
+      expect(await stuck).toMatch(/no answer within 8 minutes/);
+      await behind;
+      expect(calls).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
