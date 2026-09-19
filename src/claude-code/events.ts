@@ -473,24 +473,10 @@ function readResult(event: Record<string, unknown>): ClaudeCodeResult {
 }
 
 /**
- * How much of one progress note the parent is shown.
- *
- * Generous, because a clipped note is worse than a long one here. What arrives
- * is an assistant turn a session wrote to be read — a caveat about what it
- * changed, a table of what it found — and a cut lands mid-sentence, leaving the
- * reader a beginning that reads complete and is not. The thing this bounds is a
- * session pasting a whole file into the thread, and that is far above where a
- * written turn ends.
- */
-export const PROGRESS_MAX_CHARS = 4_000;
-
-/**
  * How much of an unrecognised line is kept for the logs.
  *
- * Shorter than a progress note and for a different reason: a note is read by a
- * model deciding what to do next, whereas this is read by a person deciding
- * whether a schema moved. The discriminating part of a stream-json line is its
- * `type` and `subtype`, both of which are at the front.
+ * Read by a person deciding whether a schema moved, and the discriminating part
+ * of a stream-json line is its `type` and `subtype`, both at the front.
  */
 const SAMPLE_MAX_CHARS = 200;
 
@@ -539,8 +525,10 @@ function describe(event: ClaudeCodeEvent): string | undefined {
     // Deliberately narrower than silencing the whole channel: `denied` and
     // `retry` below stay, because they are the only evidence of a session that
     // is being refused or throttled.
+    //
+    // Never clipped. A plan or a report cut mid-sentence reads as complete.
     case "assistant":
-      return event.text ? clip(event.text) : undefined;
+      return event.text || undefined;
     case "denied":
       // The one progress note that is more useful than the session's own
       // account of itself. A refused tool call is invisible in the transcript —
@@ -548,12 +536,12 @@ function describe(event: ClaudeCodeEvent): string | undefined {
       // parent sees a subagent being resourceful and never learns it was fenced
       // in. Named tool first, because that is what distinguishes a broken
       // configuration from a deny rule doing its job.
-      return `permission denied${event.tool ? ` for ${event.tool}` : ""}: ${clip(event.reason)}`;
+      return `permission denied${event.tool ? ` for ${event.tool}` : ""}: ${event.reason}`;
     case "retry":
       // Surfaced deliberately. This is what a budget refusal from the egress
       // gateway looks like from inside the container, and a run that ends
       // shortly afterwards is explained by it.
-      return `retrying the model call: ${clip(event.detail)}`;
+      return `retrying the model call: ${event.detail}`;
     case "rateLimit":
       /**
        * Silent while the bucket is fine, which is every line of a healthy
@@ -579,6 +567,6 @@ function describe(event: ClaudeCodeEvent): string | undefined {
   }
 }
 
-function clip(text: string, max: number = PROGRESS_MAX_CHARS): string {
+function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
