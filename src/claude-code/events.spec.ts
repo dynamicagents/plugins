@@ -429,6 +429,21 @@ describe("toProgress", () => {
 
     expect(note[0]!.text).toBe(text);
   });
+
+  it("posts a long denial reason and retry detail whole", () => {
+    const reason = "r".repeat(20_000);
+    const detail = "d".repeat(20_000);
+    const [denied, retry] = toProgress(
+      [
+        { kind: "denied", tool: "Bash", reason },
+        { kind: "retry", detail }
+      ],
+      0
+    );
+
+    expect(denied!.text).toBe(`permission denied for Bash: ${reason}`);
+    expect(retry!.text).toBe(`retrying the model call: ${detail}`);
+  });
 });
 
 describe("rate_limit_event", () => {
