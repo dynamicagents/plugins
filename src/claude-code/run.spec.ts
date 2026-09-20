@@ -202,8 +202,8 @@ describe("buildLaunch", () => {
   });
 
   /**
-   * §4 of the design plan, cancelled 2026-08-21. A repository's `CLAUDE.md`,
-   * skills and hooks are what make the agent good at that repository, and the
+   * A repository's `CLAUDE.md`, skills and hooks are what make the agent good at
+   * that repository, and the
    * container already runs the repo's `postinstall` and its test suite — so
    * stripping one door while the others stand open costs context and buys
    * nothing.

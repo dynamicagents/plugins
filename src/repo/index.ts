@@ -609,12 +609,12 @@ type RunResult = Awaited<ReturnType<RepoExec>> & { unreachable?: true };
  * What to tell the model when the plumbing, not the command, is the problem.
  *
  * A sibling of the computer plugin's `execLostNote` rather than an import, for
- * the same reason {@link truncateOutput} is a copy: `npm run verify:exports`
- * fails any subpath whose module graph reaches a sibling's, and installing `repo`
- * must not drag `computer` in behind it. The wording differs anyway, and the
- * difference is the point — that plugin cannot know the lost command was git, and
- * this one does. What a model needs after a lost `git push` is not "re-run it"
- * but whether re-running it is *safe*.
+ * the same reason {@link truncateOutput} is a copy: `verify:exports` fails any
+ * subpath whose module graph reaches a sibling's, and installing `repo` must
+ * not drag `computer` in behind it. The wording differs anyway, and the
+ * difference is the point — that plugin cannot know the lost command was git,
+ * and this one does. What a model needs after a lost `git push` is not "re-run
+ * it" but whether re-running it is *safe*.
  */
 function unreachableNote(err: unknown): string {
   if ((err as { code?: unknown } | null | undefined)?.code === "EEXEC_LOST") {
@@ -791,9 +791,9 @@ function repoSurface(
    * directly.
    *
    * At `error`, because `--level error` is what an operator narrows to once a
-   * task has gone wrong and this is a thing that went wrong. As a `warn` it was
-   * outside that filter: a clone that failed on 2026-09-05 was invisible to the
-   * first pass of the investigation and had to be found by timestamp.
+   * task has gone wrong and this is a thing that went wrong. A `warn` sits
+   * outside that filter, which leaves a failed clone invisible to the first pass
+   * of an investigation and findable only by timestamp.
    *
    * The token is scrubbed rather than trusted. It has no route into a container
    * command, and the one channel that could carry it is the forge API's error

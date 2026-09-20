@@ -29,18 +29,14 @@ import type { WorkspaceClient } from "@cloudflare/computer";
  *
  * `maxChars` is a character ceiling everywhere else — see
  * {@link ComputerConfig.maxOutputChars} — and here it is spent against
- * `byteOffset`/`byteLength`, which are the only units the transport has. That is
- * deliberate and it is safe in the direction that matters: a UTF-8 byte is never
- * more than one UTF-16 code unit, so *N* bytes decode to at most *N* characters.
- * Reading the character budget as bytes therefore always honours the ceiling,
- * and errs low on a file that is mostly non-ASCII — a CJK source file is cut at
- * about a third of the characters it could have shown. The alternative is a
- * second round trip to measure what the first one returned, on every read, to
- * recover a bound the marker already announces.
- *
- * The other reason it cannot be characters is the one this function exists for:
- * bounding the *transport*. A byte range is what stops a 4 MB lockfile being
- * materialised in a 128 MB isolate before anything is thrown away.
+ * `byteOffset`/`byteLength`, which are the only units the transport has, and the
+ * only ones that bound what crosses it. Safe in the direction that matters: a
+ * UTF-8 byte is never more than one UTF-16 code unit, so *N* bytes decode to at
+ * most *N* characters. Reading the character budget as bytes therefore always
+ * honours the ceiling, and errs low on a file that is mostly non-ASCII — a CJK
+ * source file is cut at about a third of the characters it could have shown. The
+ * alternative is a second round trip on every read, to recover a bound the
+ * marker already announces.
  *
  * ## Why `stat` first
  *

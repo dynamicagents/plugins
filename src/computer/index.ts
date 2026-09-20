@@ -527,13 +527,12 @@ export function buildComputerTools(
    * there is no event to wait on, and the whole window is under two minutes.
    *
    * **Read for every command, including the ones that need no dependencies.**
-   * That is a change of shape, not a slip. The filter that spares `cat
-   * README.md` from queueing behind an `npm ci` lives in `execGate`, where it
-   * applies per advisory — because a dependency install and a full workspace are
-   * not relevant to the same commands, and applying one filter to both is what
-   * made a workspace at its ceiling silent for exactly the commands whose writes
-   * it was dropping. The cost is one same-colo RPC on commands that previously
-   * skipped it, against a class of silent data loss.
+   * The filter that spares `cat README.md` from queueing behind an `npm ci`
+   * lives in `execGate`, where it applies per advisory — because a dependency
+   * install and a full workspace are not relevant to the same commands, and one
+   * filter over both leaves a workspace at its ceiling silent for exactly the
+   * commands whose writes it is dropping. The cost is one same-colo RPC per
+   * command, against a class of silent data loss.
    */
   const awaitAdvisories = async (
     command: string,
@@ -687,11 +686,11 @@ export function buildComputerTools(
          *
          * Everything on the Worker side of a container command is an `await`, so
          * Workers Observability records the invocation at ~0% CPU and a long wall
-         * time and cannot say what ran. Diagnosing a 59-minute task on 2026-08-11
-         * meant inferring the shape of each command from the *gaps between AI
-         * Gateway calls*, because nothing logged the command itself. The three
-         * numbers below — how long the install gate held, how long the command
-         * took, what it exited with — would have answered it directly.
+         * time and cannot say what ran. Without this line, diagnosing a 59-minute
+         * task means inferring the shape of each command from the *gaps between
+         * AI Gateway calls*. The three numbers below — how long the install gate
+         * held, how long the command took, what it exited with — answer it
+         * directly.
          *
          * Timed around the gate as well as the command, since a subagent blocked
          * waiting for `npm ci` and one running a slow test suite are

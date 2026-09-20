@@ -65,10 +65,10 @@ export function execLostNote(err: unknown): string | undefined {
  * ## What a command is told depends on the command
  *
  * A dependency advisory reaches only commands that read `node_modules`; a
- * universal one reaches everything. That asymmetry is the reason a full
- * workspace used to say nothing at all to `echo hi > file.txt` — the write being
- * lost is usually not a dependency's, and the filter that was right for installs
- * was silently applied to capacity too.
+ * universal one reaches everything. Applying the dependency filter to capacity
+ * too is the mistake that asymmetry invites: a full workspace then says nothing
+ * at all to `echo hi > file.txt`, and the write being lost is usually not a
+ * dependency's.
  */
 export interface ExecGate {
   /** Set only for something transient: the command did not run. */

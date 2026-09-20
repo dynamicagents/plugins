@@ -7,35 +7,24 @@
  * Subtask param and the card is resolved runtime state, so the tools close over
  * both and the model never names, chooses, or copies either id.
  *
- * Three sections here are written against specific, logged failures rather than
- * against a theory of good play, and each says so where it sits:
+ * Sections written against logged failures rather than a theory of good play,
+ * and the constraints they carry:
  *
- * - **Memory** used to be workspace discipline ("write your notes to a file").
- *   Two plays never read a note back, so the notes are gone and what replaces
- *   them is `arc_act`'s `note` field, which costs no turn.
- * - **Finishing** used to ask for the rules "in prose", and got a final report
- *   whose central claim its own last tool result contradicted. It now asks for
- *   provenance: observed, inferred, or untested.
- * - **Inherited knowledge** is new. A play handed a route from an earlier play
- *   executed it faithfully while the board disagreed, because nothing told it
- *   that what it was given was a guess about a level nobody had finished.
- * - **Reading a step's result** used to teach one phrase, `nothing moved`, as the
- *   whole vocabulary of a step that achieved nothing. That is a movement game's
- *   vocabulary: a click game moves nothing ever, and the play that found this out
- *   was told its every click had been "refused or blocked" while each was toggling
- *   a 36-cell block. The registers are now named separately here and rendered
- *   separately in {@link file://./analysis.ts}.
- * - **Where the views stand** was rewritten against measurements. It used to sell
- *   `shapes` as cheap and `grid` as the expensive last resort; three logged plays
- *   answered by calling `region` twelve times and `grid` not once, mapping a maze
- *   through 11×11 peepholes because the one line `shapes` gave them for the wall
- *   was its full-board bounding box. `shapes` now carries the terrain itself, and
- *   the full grid of a real board is 35 collapsed lines — so the ordering here is
+ * - **Reading a step's result** names each register separately — refused,
+ *   nothing moved, changed but did not travel — because `nothing moved` is a
+ *   movement game's vocabulary and a click game moves nothing ever. The wording
+ *   here is paired with the rendering in {@link file://./analysis.ts}: teach a
+ *   register the prompt does not name, or name one the renderer never emits, and
+ *   the model reads every click as refused.
+ * - **Where the views stand** is ordered by measurement, not by cost intuition:
  *   `shapes` for the map, `grid` for exact cells, `region` for fine detail only.
- *   The batching section gained the step that follows from it: a route is checked
- *   against those bands before it is sent. That check lives here rather than in
- *   the tool because it is a judgement about the game's rules — what blocks what —
- *   and a tool that made it would be guessing on the model's behalf.
+ *   The full grid of a real board is 35 collapsed lines, so `grid` is not the
+ *   expensive last resort it reads as; rank it as one and the model maps a
+ *   maze through `region` peepholes rather than reading the board whole.
+ * - **Batching** requires a route to be walked against those bands before it is
+ *   sent. That check is here rather than in the tool because it is a judgement
+ *   about the game's rules — what blocks what — and a tool making it would be
+ *   guessing on the model's behalf.
  */
 export const ARC_GAME_SOUL = [
   "You are playing an ARC-AGI-3 game: a visual-reasoning puzzle on a 64×64 grid of colored cells. You discover the game's hidden rules by acting and observing, and progress through levels toward a win.",

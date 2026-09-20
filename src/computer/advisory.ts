@@ -11,21 +11,20 @@ import { humanMs } from "./render.js";
  * and the generation marker. It is right for that and unchanged by this file.
  *
  * Every *reader*, though, is asking a different question: **can I rely on this
- * workspace right now?** The two diverge, and where they did the old code either
- * overloaded a variant or invented a record:
+ * workspace right now?** The two diverge, and expressing the second through the
+ * first goes wrong in ways that are each easy to reintroduce:
  *
- * - A workspace at its storage ceiling was written as `skipped` — the same
- *   variant that means "this checkout has nothing to install". One is a hard
- *   wall about the Durable Object, the other is routine and about the
- *   repository, and they were told apart only by reading prose. Both readers
- *   missed the first.
- * - Capacity therefore travelled through a channel gated by
- *   {@link file://./gate.ts needsDependencies}, so a full workspace said nothing
+ * - A workspace at its storage ceiling is not `skipped`. That variant means
+ *   "this checkout has nothing to install" — routine, and about the repository.
+ *   A ceiling is a hard wall about the Durable Object, and the two are then told
+ *   apart only by reading prose.
+ * - Capacity must not travel through a channel gated by
+ *   {@link file://./gate.ts needsDependencies}, or a full workspace says nothing
  *   at all to `echo hi > file.txt` — the command whose write is being lost.
- * - "The tree is fine now", after a subagent installed by hand, had no way to be
- *   said except by fabricating a `done` with an invented exit code — and the
- *   probe it rested on, the presence of a `node_modules` directory, is satisfied
- *   by the wreckage of the very install it was overriding.
+ * - "The tree is fine now", after a subagent installed by hand, has no honest
+ *   spelling as a job record: fabricating a `done` rests on the presence of a
+ *   `node_modules` directory, which the wreckage of the very install being
+ *   overridden already satisfies.
  *
  * So an advisory is **derived at read time** and describes the workspace, not a
  * job. Its absence is the good case, which is what removes the need to invent

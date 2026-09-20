@@ -20,15 +20,13 @@ import type { ArcRuntime } from "./types.js";
 /**
  * `@dynamicagents/plugins/arc-agi` — play ARC-AGI-3 games.
  *
- * The stress test for the whole plugin contract, and the reason three of its
- * hooks exist. In the predecessor these were four leaks in the agent's Durable
- * Object — `resolveRuntime`, `arcScorecardDeps`, `leaseScorecard`/`leasePlay`,
- * and `enrichResult` — each a piece of ARC-specific policy living in code that
- * had no other reason to know what a scorecard was. Inverted, they are this
- * file.
+ * The stress test for the whole plugin contract, and the reason `resolveRuntime`,
+ * the lease hooks and `enrichResult` exist on it: every one of them is a piece of
+ * ARC-specific policy that would otherwise sit in an agent's Durable Object,
+ * which has no other reason to know what a scorecard is.
  *
- * What the split makes visible: the *only* thing the agent still knows is that
- * it installed a plugin. Nothing in a loop, a workflow, or a DO names a card, a
+ * The line that keeps it honest: the *only* thing the agent knows is that it
+ * installed a plugin. Nothing in a loop, a workflow, or a DO names a card, a
  * guid, or a game.
  */
 
@@ -66,9 +64,9 @@ export function arcAgi(config: ArcAgiConfig): AgentPlugin<ArcRuntime> {
   /**
    * In-flight leases, collapsed so concurrent branches share one call.
    *
-   * These were DO instance fields in the predecessor, and the plugin is built
-   * per DO instance, so this closure is the same scope — but it is now the scope
-   * of the thing that *cares*, rather than of the agent that merely hosted it.
+   * The plugin is built once per DO instance, so this closure is per-instance
+   * scope — held by the thing that cares about a card rather than by the agent
+   * that merely hosts it.
    *
    * Load-bearing, not an optimization. All of a round's ready Subtasks execute
    * concurrently, and opening a card is a `fetch`, which opens the DO's input

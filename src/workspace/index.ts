@@ -20,9 +20,9 @@ import { Workspace } from "@cloudflare/shell";
  * changes"). An agent that never delegates file work should not carry that
  * dependency, so it ships here and is an optional peer.
  *
- * This is the only `@cloudflare/shell` import surface in the package — the same
- * discipline the predecessor kept, for the same reason: everything else codes
- * against core's stable wrapper rather than shell's large, churning API.
+ * This is the only `@cloudflare/shell` import surface in the package, and stays
+ * that way: everything else codes against core's stable wrapper rather than
+ * shell's large, churning API.
  *
  * Two halves, and they are independent:
  *

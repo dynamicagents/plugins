@@ -371,8 +371,8 @@ describe("arc-game tool family", () => {
   });
 
   it("never opens a second play after a terminal state", async () => {
-    // The exact behaviour the reset tool used to provide, now impossible: a
-    // finished play stays finished, so the scorecard's GAME_OVER stands.
+    // A finished play stays finished, so the scorecard's GAME_OVER stands and
+    // no tool can open a second one over it.
     const hits = stubFetch({});
     const { ctx: c } = ctx();
     await c.workspace.writeJson(
@@ -666,11 +666,10 @@ describe("arc_act sequences", () => {
     expect(out).not.toContain("cells changed");
   });
 
-  // The mirror-image failure, and the one the click games produce. Nothing on a
-  // click board ever travels, so every step used to be counted as having moved
-  // nothing and the batch summarised as "every one of them was refused or
-  // blocked" — over clicks that had each toggled a block. What separates a refusal
-  // from a move here is the cell diff, not the shape delta.
+  // The mirror-image failure, and the one click games produce. Nothing on a click
+  // board ever travels, so judging by shape delta calls every step "refused or
+  // blocked" over clicks that each toggled a block. What separates a refusal from
+  // a move here is the cell diff.
   it("does not call a click that changed the board a refusal", async () => {
     // A blue block that clicking toggles to red, a bar that gives up a cell to a
     // yellow counter when it does — then a click that lands on nothing.
@@ -919,8 +918,8 @@ describe("arc_act sequences", () => {
     const out = await callTool(tools.arc_act, one(1));
     expect(out).toContain("Playing ls20-abc");
     expect(out).toContain("blue: row 1, cols 0-1 (2 cells)");
-    // The old text ended with "Call arc_inspect to see the board", which bought a
-    // guaranteed second turn before the model could act.
+    // Ending on "Call arc_inspect to see the board" buys a guaranteed second turn
+    // before the model can act, and the board is already rendered above it.
     expect(out).not.toContain("Call arc_inspect");
   });
 

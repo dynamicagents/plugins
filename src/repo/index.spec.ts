@@ -106,7 +106,7 @@ type GitStub = Partial<
  * The counterpart to {@link recorder}, and the split between them is the point
  * of these tests: `calls` is everything that ran in the container, `gitCalls` is
  * everything that touched the forge. No token appears in the first list, ever,
- * and asserting that is much of what this file now does.
+ * and asserting that is much of what this file does.
  */
 function gitRecorder(results: GitStub = {}): {
   git: RepoGit;
@@ -369,9 +369,9 @@ describe("guardrails", () => {
    * set above ever sees, because it only compares literal strings.
    *
    * `git checkout -B` happens to reject some of these first (a `:` is not a
-   * legal branch name, and `refs/heads/main` makes the later push ambiguous),
-   * which is why this was not exploitable in practice. "Happens to" is not a
-   * property worth shipping, so the shape is now checked directly.
+   * legal branch name, and `refs/heads/main` makes the later push ambiguous).
+   * "Happens to" is not a property worth relying on, so the shape is checked
+   * directly.
    */
   it.each([
     "HEAD:main",
@@ -1257,10 +1257,10 @@ describe("a container that is not there", () => {
 });
 
 /**
- * What a model copies out of a browser is not a clone URL, and this used to
- * proceed anyway: a `dir` of `/workspace/repo` and no `beforeCheckout` at all, so
- * a host keying its filesystem per repository never switched and the checkout
- * landed in whichever repository's workspace was already open.
+ * What a model copies out of a browser is not a clone URL, and proceeding
+ * anyway gives a `dir` of `/workspace/repo` and no `beforeCheckout` at all — so
+ * a host keying its filesystem per repository never switches, and the checkout
+ * lands in whichever repository's workspace was already open.
  */
 describe("a clone URL that names no repository", () => {
   it.each([
@@ -1459,9 +1459,9 @@ describe("failure logging", () => {
    * plugin told the model what went wrong and told the operator nothing.
    *
    * At `error`, and the level is part of the assertion. `--level error` is where
-   * an operator looks once a task has gone wrong, and as a `warn` this line sat
-   * outside that filter — which is how a clone failure stayed hidden through the
-   * first pass of the 2026-09-05 investigation.
+   * an operator looks once a task has gone wrong, and a `warn` sits outside that
+   * filter — which is how a clone failure stays hidden and has to be found by
+   * timestamp instead.
    */
   it("logs the tool and git's stderr when a push fails", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1518,12 +1518,11 @@ describe("failure logging", () => {
 
 /**
  * Git takes `.git/index.lock` for anything that writes and fails outright rather
- * than waiting. Nothing stopped two of these tools running at once — a model can
- * emit several tool calls in one turn and the SDK runs them concurrently — so a
- * `repo_commit` and a `repo_push` issued together raced, and production returned
- * `fatal: Unable to create '…/.git/index.lock': File exists`. The commit failed
- * while the push succeeded against the previous state, which is a worse outcome
- * than either failing.
+ * than waiting — and a model can emit several tool calls in one turn, which the
+ * SDK runs concurrently. Unserialised, a `repo_commit` and a `repo_push` issued
+ * together return `fatal: Unable to create '…/.git/index.lock': File exists`:
+ * the commit fails while the push succeeds against the previous state, which is
+ * a worse outcome than either failing.
  */
 describe("concurrent git", () => {
   /** An exec that reports how many commands were in flight at their peak. */
@@ -2054,9 +2053,9 @@ describe("a review, and answering it", () => {
     });
 
     it("never reports clean on a review it did not finish reading", async () => {
-      // The false-clean result paging exists to prevent, at the one exit that
-      // used to skip the warning: a run that stopped early and found nothing
-      // open in what it read. The unread pages are where the newest threads are.
+      // The false-clean result paging exists to prevent, at the exit most likely
+      // to skip the warning: a run that stopped early and found nothing open in
+      // what it read. The unread pages are where the newest threads are.
       const spy = forgeStub({
         graphql: () =>
           threadsPage([thread({ isResolved: true })], "always-more")

@@ -80,7 +80,7 @@ const openGateway = (
     ...over
   });
 
-/** How Claude Code 2.1.238 actually sends a model call — see the Phase 0 capture. */
+/** How Claude Code actually sends a model call, taken from a recorded request. */
 function modelCall(): Request {
   return new Request(`https://${ANTHROPIC_HOST}/v1/messages?beta=true`, {
     method: "POST",

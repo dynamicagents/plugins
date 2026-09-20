@@ -309,12 +309,12 @@ describe("when storage is unavailable", () => {
 });
 
 /**
- * **No genuine subscription-exhaustion 429 has ever been observed through this
- * path** — the Phase 0 spike's 429s were the raw-API refusal, a different
- * response. So these rules are inferences from the documented API rate limits,
- * and the gateway logs every refusal whole so the first real one can replace
- * them with a fact. What the tests below pin is the *shape* of the judgement,
- * which is what should survive learning the exact header.
+ * **No genuine subscription-exhaustion 429 has been observed through this
+ * path** — a raw-API refusal is a different response — so these rules are
+ * inferences from the documented API rate limits, and the gateway logs every
+ * refusal whole so the first real one can replace them with a fact. What the
+ * tests below pin is the *shape* of the judgement, which is what should survive
+ * learning the exact header.
  */
 describe("reading a refusal", () => {
   const NOW = 1_000_000;

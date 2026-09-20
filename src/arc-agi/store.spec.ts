@@ -237,8 +237,8 @@ describe("scorecards.touch", () => {
 
 describe("scorecards.cleanup", () => {
   it("deletes cards untouched past the retention window", async () => {
-    // Safe in a way the predecessor's shape was not: a row holds no score, only
-    // a dead card id and its jar, and a score is read back from the API on demand.
+    // Safe to delete because a row holds no score — only a dead card id and its
+    // jar — and a score is read back from the API on demand.
     const remaining = await withScorecards("sc-cleanup", (store, storage) => {
       store.open("old", {});
       store.open("new", {});

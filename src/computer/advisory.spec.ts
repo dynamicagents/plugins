@@ -168,9 +168,9 @@ describe("deriving what is true from what the host knows", () => {
   });
 
   /**
-   * Both true at once. The single-slot record this replaced kept whichever was
-   * written last, so a workspace that hit its ceiling silently erased the
-   * install failure — or the reverse — and no reader could see the pair.
+   * Both true at once, which is why this is a list and not a slot: one slot
+   * keeps whichever was written last, so a workspace that hits its ceiling
+   * silently erases the install failure, or the reverse.
    */
   it("reports a full workspace and a broken install together", () => {
     const advisories = deriveAdvisories({

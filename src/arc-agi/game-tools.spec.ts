@@ -1,9 +1,7 @@
 /**
- * The main agent's one remaining ARC tool (src/recipes/arc-game/game-tools.ts):
- * the game catalogue it needs to name a game in a delegated play.
- *
- * The scorecard tools that used to live beside it are gone — the card is leased
- * by the recipe now (see scorecard.spec.ts), not chosen by a model.
+ * The main agent's only ARC tool: the game catalogue it needs to name a game in
+ * a delegated play. The card is leased by the recipe (see `./scorecard.spec.ts`)
+ * and never chosen by a model, so no scorecard tool belongs beside it.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { buildArcGamesTools, renderGames } from "./game-tools.js";

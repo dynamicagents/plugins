@@ -34,8 +34,8 @@ const context = {
 };
 
 /**
- * The hook this plugin exists to have, and the reason 0.5.0 was unusable by its
- * own reference host.
+ * The hook this plugin exists to have, and without which its own reference host
+ * cannot use it.
  *
  * Core dispatches `resolveRuntime` to the plugin that **declared** the subtask
  * type. `claude-code` is declared here, so if this plugin does not carry the
@@ -71,14 +71,9 @@ describe("resolveRuntime", () => {
   });
 
   /**
-   * `WORKSPACE_RUNTIME_KEY` is declared twice on purpose — importing
-   * `/computer`'s copy from `/claude-code` would merge two realms
-   * `verify:exports` keeps apart, and drag the whole computer plugin into the
-   * graph of every agent that installs this one, for one string.
-   *
-   * They have to stay equal, because a host that installs both on its subagent
-   * gets them working off a single runtime value. A spec is the one place a
-   * cross-realm import costs nothing, so the drift is caught here.
+   * `WORKSPACE_RUNTIME_KEY` is declared twice on purpose — see `./recipe.ts` —
+   * and the two must stay equal. A spec is the one place a cross-realm import
+   * costs nothing, so the drift is caught here.
    */
   it("writes under the same key `/computer` reads", () => {
     expect(WORKSPACE_RUNTIME_KEY).toBe(COMPUTER_KEY);
@@ -89,10 +84,9 @@ describe("resolveRuntime", () => {
  * Fail at Durable Object start, with a sentence naming this plugin — not at the
  * first model call, inside a subtask somebody is already waiting on.
  *
- * This replaced `requires: { secrets: [...] }`, which named
- * `CLAUDE_CODE_OAUTH_TOKEN` back when there was one credential with a name this
- * package could know. Pool entries are host-named, so there is no name left to
- * declare — and checking the value is stronger than checking that a name is set.
+ * Not `requires: { secrets: [...] }`: pool entries are host-named, so there is
+ * no name this package could declare — and checking the value is stronger than
+ * checking that a name is set.
  */
 describe("construction", () => {
   it("refuses a pool with no credentials in it", () => {

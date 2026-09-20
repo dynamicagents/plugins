@@ -223,14 +223,14 @@ describe("installFingerprint", () => {
   });
 
   /**
-   * The half the fingerprint used to be blind to.
+   * The half a lockfile-only fingerprint is blind to.
    *
-   * `package.json` was only consulted when there was *no* lockfile, so a commit
-   * that adds a `postinstall`, or moves the `packageManager` pin from `pnpm@9`
-   * to `pnpm@10`, matched the stored fingerprint exactly and skipped the
-   * install. The tree that produced was quietly wrong rather than absent, and it
-   * surfaced as a missing module in some later build with nothing pointing back
-   * at the install that never ran.
+   * Consult `package.json` only when there is *no* lockfile and a commit that
+   * adds a `postinstall`, or moves the `packageManager` pin to a new version,
+   * matches the stored fingerprint exactly and skips the install. The tree
+   * that produces is quietly wrong rather than absent, and it surfaces as a
+   * missing module in some later build with nothing pointing back at the
+   * install that never ran.
    */
   it.each([
     ['{"scripts":{"postinstall":"prisma generate"}}', "a postinstall"],
@@ -293,11 +293,11 @@ describe("installFingerprint", () => {
   });
 
   /**
-   * The silent one. An override used to record no lockfile, so its digest was
-   * the command plus `package.json` — and a dependency bump, which is a commit
-   * that touches only the lock, matched the stored fingerprint. The install was
-   * skipped, `node_modules` stayed a version behind, and the first sign of it
-   * was a build failing somewhere unrelated.
+   * The silent one. An override recording no lockfile digests the command plus
+   * `package.json` alone — so a dependency bump, which touches only the lock,
+   * matches the stored fingerprint. The install is skipped, `node_modules` stays
+   * a version behind, and the first sign of it is a build failing somewhere
+   * unrelated.
    */
   it("re-installs under an override when only the lockfile changed", async () => {
     const plan: InstallPlan = {

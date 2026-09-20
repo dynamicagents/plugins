@@ -22,11 +22,11 @@ import type { SessionMessage } from "@dynamicagents/core/agent";
  * context window.
  *
  * Core carries **no embedding code at all**: no `Embed` type, no
- * `embeddingModelId`, no recall config. It used to, without a single caller, and
- * that had fixed the shape of embedding for every future plugin — one model, one
- * dimension, `string[] → number[][]` — while `ModelConfig` could only say "the
- * agent has an embedding model" when the true statement is "*this plugin* uses
- * this embedding model". So the whole embedding path lives here.
+ * `embeddingModelId`, no recall config. Putting any of it there fixes the shape
+ * of embedding for every future plugin — one model, one dimension,
+ * `string[] → number[][]` — and lets `ModelConfig` say only "the agent has an
+ * embedding model" when the true statement is "*this plugin* uses this embedding
+ * model". So the whole embedding path lives here.
  *
  * The namespace is always bound in code from the caller's verified identity,
  * never model input, so one caller can never read another's archive.
@@ -176,7 +176,7 @@ export async function recallSearch(
  *
  * Field-by-field re-typing is not just verbose — it silently drops any option
  * added later, so a new default lands everywhere except the deployments that
- * enumerated the old set.
+ * enumerated the fields by hand.
  */
 export interface RecallTuning {
   /**

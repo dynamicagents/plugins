@@ -39,10 +39,9 @@ import {
  *
  * ## What this deliberately does not do
  *
- * It does not meter. 0.5.0 had a budget gate that estimated spend in dollars and
- * refused to start work over a cap; 0.6.0 deleted it. An estimate is a guess
- * about a bucket nobody can read, it only moved once per run, and the bucket
- * itself announces the answer exactly — see the docblock in `credentials.ts`.
+ * It does not meter, and a budget gate must not come back: an estimate of spend
+ * is a guess about a bucket nobody can read, moves only once per run, and the
+ * bucket announces the answer exactly — see the docblock in `credentials.ts`.
  *
  * And it does not, by default, **bound exfiltration**. The container holds the
  * checkout, and with no restriction configured it can send it anywhere. That is
@@ -125,16 +124,11 @@ const CAPTURE_BYTES = 2048;
 
 export interface EgressConfig {
   /**
-   * The credential pool, in priority order — index 0 is tried first.
+   * The credential pool — see {@link file://./config.ts ClaudeCodeConfig.credentials}.
    *
-   * A thunk so a rotated secret is picked up without rebuilding the plugin list.
-   * Called per request; it must be cheap. **None of these values enters the
-   * container**: the session is launched with `CREDENTIAL_PLACEHOLDER` and the
-   * swap happens here.
-   *
-   * An array of one is entirely valid and behaves as 0.5.0's single credential
-   * did — used until its bucket empties, after which requests are refused with
-   * the reset time.
+   * Called per request, so it must be cheap. This is the one place a real
+   * credential is read: the session is launched with `CREDENTIAL_PLACEHOLDER`
+   * and the swap happens here.
    */
   credentials: () => readonly string[];
   /**
@@ -360,8 +354,8 @@ export function claudeCodeEgress(config: EgressConfig): Fetcher {
      * The swap, and it is the whole point of the file.
      *
      * `authorization` is set and `x-api-key` removed because that is the shape
-     * the sanctioned client sends — the Phase 0 capture showed `authorization:
-     * Bearer …` with no `x-api-key` at all. Everything else is forwarded
+     * the sanctioned client sends: `authorization: Bearer …` with no
+     * `x-api-key` at all. Everything else is forwarded
      * untouched: the `anthropic-beta` list (which carries
      * `claude-code-20250219` and `oauth-2025-04-20`, almost certainly part of
      * what marks the request as coming from the client) and the `user-agent`
@@ -409,10 +403,10 @@ export function claudeCodeEgress(config: EgressConfig): Fetcher {
     /**
      * Capture the whole thing, every time.
      *
-     * **No genuine subscription-exhaustion `429` has ever been observed through
-     * this path** — the Phase 0 spike's 429s were the raw-API refusal, which is
-     * a different response — so the rules in `readRefusal` are inferences from
-     * the documented API rate limits. This log is the instrument that replaces
+     * **No genuine subscription-exhaustion `429` has been observed through this
+     * path** — a raw-API refusal is a different response — so the rules in
+     * `readRefusal` are inferences from the documented API rate limits. This log
+     * is the instrument that replaces
      * them with a fact, and it costs nothing: these statuses are rare, and the
      * body of one is a few hundred bytes.
      */

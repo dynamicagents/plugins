@@ -197,13 +197,12 @@ export const ARC_SESSION_PATH = "arc/session.json";
  * This plugin's slice of a Subtask's runtime bag — what the parent resolves for
  * an execution and no model could supply.
  *
- * Core's `SubtaskRuntime` is an open `Record<string, unknown>`, and these four
- * fields are the reason. The predecessor declared them in core's own delegation
- * types, which meant core imported a domain's vocabulary and every unrelated
- * agent carried `cardId`, `cookies`, `guid` and `frame` in its bundle. The
- * plugin that writes this slice is the plugin that reads it, so narrow it with
- * `runtimeAs<ArcRuntime>` at the boundary and keep the cast's blast radius to
- * this one module.
+ * Core's `SubtaskRuntime` is an open `Record<string, unknown>`, and this slice is
+ * why: declared in core's own delegation types instead, core would import a
+ * domain's vocabulary and every unrelated agent would carry it in its bundle.
+ * The plugin that writes this slice is the plugin that reads it, so narrow it
+ * with `runtimeAs<ArcRuntime>` at the boundary and keep the cast's blast radius
+ * to this one module.
  */
 /*
  * A `type` alias, not an `interface`, and that is not style. Core's

@@ -61,10 +61,9 @@ import {
  *
  * ## The 5-hour and weekly limits are routed around, not predicted
  *
- * 0.5.0 had a budget gate: an estimate of spend in dollars, and a refusal to
- * start work over a cap. 0.6.0 deletes it. The estimate was a guess about a
- * bucket nobody can read, and it only moved when a run *ended* — so it was never
- * a cap on spend, only a gate on starting.
+ * **No budget gate, and one must not come back.** An estimate of spend is a
+ * guess about a bucket nobody can read, and it only moves when a run *ends* — so
+ * it caps nothing, it only refuses to start.
  *
  * The gateway sees Anthropic's actual response, which is the one place the
  * bucket announces itself. So the credential is a **pool**: the first usable
