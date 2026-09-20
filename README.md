@@ -130,8 +130,7 @@ Specs run inside real workerd via `@cloudflare/vitest-plugin`, with the harness 
 
 ```bash
 npm test          # the whole suite, no credentials and no network
-npm run check     # prettier + eslint + tsc + build
-npm run verify:exports
+npm run check     # prettier + eslint + tsc + build, then verify:exports over it
 ```
 
 ### Working against an unpublished core
