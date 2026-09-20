@@ -328,12 +328,17 @@ export interface WorkspaceGitConfig {
   /**
    * Who a commit is attributed to — on this side, and in the container.
    *
-   * The same pair the repo plugin writes into the checkout's own config, so a
-   * commit cannot be attributed differently depending on which side made it,
-   * and the same pair `./git-identity.ts` writes into the container's system
-   * config, so a repository the container made for itself is attributed rather
-   * than nameless. A deployment's fallback for an unset binding belongs where
-   * that binding is read; this takes the resolved answer.
+   * Two things read it: this object's git client, and `./git-identity.ts`,
+   * which writes it into the container's system config so a repository the
+   * container made for itself is attributed rather than nameless.
+   *
+   * **The repo plugin is not one of them.** It resolves `RepoConfig.author`
+   * independently, with a generic fallback of its own, and nothing in either
+   * package checks the two agree — so a commit *can* be attributed differently
+   * depending on which side made it, and the only thing preventing that is a
+   * consumer answering both from one place. A deployment's fallback for an
+   * unset binding belongs where that binding is read; this takes the resolved
+   * answer.
    */
   author: { name: string; email: string };
 }

@@ -167,6 +167,33 @@ export interface Launch {
 }
 
 /**
+ * Git's identity as an *environment*, not a `git config`.
+ *
+ * The session's cwd is one checkout, and what it commits in is not: a
+ * superproject's submodules, a scratch clone, anything it initialises are all
+ * separate repositories with separate configs, and `/repo` only ever configured
+ * the one it cloned. A config write would have to find each of them; the
+ * environment is inherited by every git the session starts, and it outranks all
+ * four config levels — so a checkout carrying a name from whenever it was
+ * created no longer decides who commits today.
+ *
+ * Both pairs, because they answer different questions: an amend or a rebase
+ * keeps the original author and stamps a fresh committer, and with only
+ * `GIT_AUTHOR_*` set that commit ends up half attributed.
+ */
+function gitIdentityEnv(
+  author: LaunchOptions["author"]
+): Record<string, string> {
+  if (!author) return {};
+  return {
+    GIT_AUTHOR_NAME: author.name,
+    GIT_AUTHOR_EMAIL: author.email,
+    GIT_COMMITTER_NAME: author.name,
+    GIT_COMMITTER_EMAIL: author.email
+  };
+}
+
+/**
  * Build the command and environment for one session.
  *
  * `--output-format stream-json` with `--verbose`, because the stream is the only
@@ -249,25 +276,6 @@ export function buildLaunch(options: LaunchOptions): Launch {
     // nothing.
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
   };
-  // Git's identity as an *environment*, not a `git config`.
-  //
-  // The session's cwd is one checkout, and what it commits in is not: a
-  // superproject's submodules, a scratch clone, anything it initialises are all
-  // separate repositories with separate configs, and `/repo` only ever
-  // configured the one it cloned. A config write would have to find each of
-  // them; the environment is inherited by every git the session starts, and it
-  // outranks all four config levels — so a checkout carrying a name from
-  // whenever it was created no longer decides who commits today.
-  //
-  // Both halves, because they answer different questions: an amend or a rebase
-  // keeps the original author and stamps a fresh committer, and without
-  // `GIT_COMMITTER_*` that one commit ends up half attributed.
-  if (options.author) {
-    env.GIT_AUTHOR_NAME = options.author.name;
-    env.GIT_AUTHOR_EMAIL = options.author.email;
-    env.GIT_COMMITTER_NAME = options.author.name;
-    env.GIT_COMMITTER_EMAIL = options.author.email;
-  }
   if (options.maxSubagentDepth !== undefined)
     env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH = String(options.maxSubagentDepth);
   if (options.maxConcurrentSubagents !== undefined)
@@ -277,16 +285,23 @@ export function buildLaunch(options: LaunchOptions): Launch {
 
   return {
     command: argv.join(" "),
-    // The last two are applied **after** the host's environment rather than
+    // The last three are applied **after** the host's environment rather than
     // before it. For the placeholder that makes the guard above a second line
     // rather than the only one; for `IS_SANDBOX` it means a host cannot unset
     // the variable its own permission mode depends on — see the note above.
+    //
+    // For the identity it is what keeps the four keys one answer. Spread before
+    // `env`, a host that set `GIT_AUTHOR_NAME` there and `author` here would
+    // get the author from one and the committer from the other — a commit
+    // attributed to two people, which is the exact failure `author` exists to
+    // end. Last, `author` is simply the answer whenever a host gives one.
     env: {
       ...env,
       ...options.env,
       ...(permissionMode === "bypassPermissions"
         ? { IS_SANDBOX: "1" }
         : undefined),
+      ...gitIdentityEnv(options.author),
       [RESERVED_ENV_KEY]: CREDENTIAL_PLACEHOLDER
     }
   };

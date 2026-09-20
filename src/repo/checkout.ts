@@ -93,11 +93,14 @@ export async function resolveDefaultBranch(
  * goes on committing under the old one, with nothing in the tree saying why.
  * Rewriting costs two commands against a checkout that is being set up anyway.
  *
- * It is the *nearest* answer, not the only one. The container has a system-wide
- * identity underneath it, so a repository this plugin never cloned is still
- * attributed — see the computer plugin's `host/git-identity` module — and
- * `repo_commit` names the identity on the commit itself, which is the only
- * layer a stale config cannot outrank.
+ * It is the *nearest* answer, not the only one. `repo_commit` names the identity
+ * on the commit itself, which is the one layer a stale config cannot outrank.
+ * Underneath, a repository this plugin never cloned falls back to whatever the
+ * shell's own git is configured with — which is an identity rather than nothing
+ * only where `exec` is backed by the computer plugin, whose workspace writes one
+ * per container; see
+ * {@link file://../computer/host/git-identity.ts}. `exec` is an arbitrary
+ * runner, so that is a property of a deployment, not of this plugin.
  *
  * Unchecked, like the config pins at the clone: git's identity is needed by the
  * first commit, and a failure to write it fails that commit with a sentence far
