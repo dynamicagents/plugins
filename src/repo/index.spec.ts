@@ -1787,7 +1787,9 @@ describe("a review, and answering it", () => {
           "/requested_reviewers": { users: [] },
           "/pulls/42/reviews": [
             {
-              user: { login: "Copilot" },
+              // The spelling `pulls/{n}/reviews` actually returns — not the
+              // `Copilot` the request endpoint uses for the same account.
+              user: { login: "copilot-pull-request-reviewer[bot]" },
               state: "COMMENTED",
               submitted_at: "2026-09-17T10:00:00Z"
             }
@@ -1818,7 +1820,10 @@ describe("a review, and answering it", () => {
         rest: {
           "/requested_reviewers": { users: [{ login: "Copilot" }] },
           "/pulls/42/reviews": [
-            { user: { login: "Copilot" }, state: "COMMENTED" }
+            {
+              user: { login: "copilot-pull-request-reviewer[bot]" },
+              state: "COMMENTED"
+            }
           ]
         }
       });
@@ -1842,7 +1847,10 @@ describe("a review, and answering it", () => {
         rest: {
           "/requested_reviewers": { users: [] },
           "/pulls/42/reviews": [
-            { user: { login: "Copilot" }, state: "PENDING" }
+            {
+              user: { login: "copilot-pull-request-reviewer[bot]" },
+              state: "PENDING"
+            }
           ]
         }
       });
@@ -1880,6 +1888,60 @@ describe("a review, and answering it", () => {
         );
         expect(result).toContain("unknown");
         expect(result).not.toContain("waiting will not change it");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("matches the reviewer across the spellings one account arrives under", async () => {
+      // The failure this guards is not a missed review but an inverted answer:
+      // the request endpoint says `Copilot` and the reviews endpoint says
+      // `copilot-pull-request-reviewer[bot]`, so an exact comparison sees the
+      // request, then sees nothing the instant the review clears it — and
+      // "waiting will not change it" is where a poll loop stops.
+      const spy = forgeStub({
+        rest: {
+          "/requested_reviewers": { users: [] },
+          "/pulls/42/reviews": [
+            {
+              user: { login: "copilot-pull-request-reviewer[bot]" },
+              state: "COMMENTED",
+              submitted_at: "2026-09-17T10:00:00Z"
+            }
+          ]
+        }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).toContain("reviewed");
+        expect(result).not.toContain("waiting will not change it");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("does not take a login that merely starts with the word", async () => {
+      // The boundary in the pattern, which is what separates the reviewer's
+      // family of bots from a person who chose a name near it.
+      const spy = forgeStub({
+        rest: {
+          "/requested_reviewers": { users: [] },
+          "/pulls/42/reviews": [
+            { user: { login: "copilotfan" }, state: "COMMENTED" }
+          ]
+        }
+      });
+      try {
+        const result = await run(
+          tools(recorder().exec),
+          "repo_pr_review_status",
+          { dir: "/w/r", number: 42 }
+        );
+        expect(result).toContain("waiting will not change it");
       } finally {
         spy.mockRestore();
       }

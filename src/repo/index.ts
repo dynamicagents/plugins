@@ -501,6 +501,38 @@ function decoded(target: { owner: string; repo: string }): {
 }
 
 /**
+ * One reviewer's logins, which GitHub does not spell the same way twice.
+ *
+ * The same actor — one account id — arrives as `Copilot` from
+ * `requested_reviewers` and the issue timeline, and as
+ * `copilot-pull-request-reviewer[bot]` from `pulls/{n}/reviews`. Compared
+ * exactly, the request matches and the review never does, so
+ * `repo_pr_review_status` finds a pending request and then, the moment the
+ * review lands and clears it, reports "none pending — waiting will not change
+ * it". That is the one answer a polling caller stops on, so the mismatch does
+ * not degrade the tool, it inverts it.
+ *
+ * Hence a prefix rather than the two known spellings: the reviewer is a family
+ * of bots — `copilot-swe-agent[bot]` and the rest — sharing one first word, and
+ * an enumeration has to be edited for each new member while a prefix does not.
+ * The boundary is what keeps a human login like `copilotfan` out.
+ */
+const COPILOT_LOGIN = /^copilot\b/;
+
+/**
+ * Whether a login from the API is the reviewer the caller asked about.
+ *
+ * `[bot]` is a suffix REST appends to an app's login and GraphQL does not, so it
+ * is never part of the identity — stripping it is what lets a caller name any
+ * app reviewer the way GitHub's UI shows it.
+ */
+function sameReviewer(a: string, b: string): boolean {
+  const bare = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
+  const [x, y] = [bare(a), bare(b)];
+  return COPILOT_LOGIN.test(x) && COPILOT_LOGIN.test(y) ? true : x === y;
+}
+
+/**
  * Middle-out truncation, so both the head of a diff and its tail survive.
  *
  * Deliberately a **copy** of the computer plugin's function of the same name,
@@ -1803,7 +1835,6 @@ function repoSurface(
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
         const who = reviewer ?? "Copilot";
-        const login = who.toLowerCase();
 
         // A *pending* request outranks any review already on the pull request,
         // and that ordering is the whole logic here. GitHub clears the request
@@ -1823,7 +1854,7 @@ function repoSurface(
         const pending = [
           ...(waiting.users ?? []).map((u) => u.login),
           ...(waiting.teams ?? []).map((t) => t.slug)
-        ].some((name) => name?.toLowerCase() === login);
+        ].some((name) => !!name && sameReviewer(name, who));
         if (pending)
           return `${who} has been asked to review #${number} and has not finished.`;
 
@@ -1839,7 +1870,8 @@ function repoSurface(
         }[];
         const submitted = all.filter(
           (r) =>
-            r.user?.login?.toLowerCase() === login &&
+            !!r.user?.login &&
+            sameReviewer(r.user.login, who) &&
             // A `PENDING` review is a draft its author has not sent, and it is
             // visible to whoever holds the token that wrote it. Counting one as
             // finished reports a review nobody has read, which is the answer a
