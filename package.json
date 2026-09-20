@@ -85,7 +85,7 @@
     "verify:references": "node scripts/verify-references.mjs",
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
     "prepack": "npm run build && npm run verify:exports",
-    "prepublishOnly": "npm run check && npm test && npm run verify:exports",
+    "prepublishOnly": "npm run check && npm test",
     "prepare": "husky || true && npm run build"
   },
   "peerDependencies": {
