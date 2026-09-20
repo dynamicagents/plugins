@@ -25,8 +25,8 @@ interface RefreshOutcome {
 /**
  * What this module needs back from a git command.
  *
- * A structural subset of `index.ts`'s `RunResult` rather than an import of it,
- * so the dependency runs one way: `index.ts` knows about this file, and this file
+ * A structural subset of `context.ts`'s `RunResult` rather than an import of it,
+ * so the dependency runs one way: the tools know about this file, and this file
  * knows only about the shape of an answer. `unreachable` is the field that earns
  * the type — a command that *ran and failed* has answered the question it was
  * asked, and one that never ran has answered nothing, which two refusals below
@@ -39,7 +39,7 @@ export interface GitAnswer {
   unreachable?: true;
 }
 
-/** The two runners `refreshCheckout` borrows from `repoSurface`. */
+/** The two runners `refreshCheckout` borrows from `repoContext`. */
 export interface GitRunners {
   plain: (
     args: string,
