@@ -2,7 +2,7 @@ import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
 import { parseRepo, repoLocation, UNSAFE_BRANCH } from "./url.js";
-import { refreshCheckout } from "./checkout.js";
+import { refreshCheckout, writeGitIdentity } from "./checkout.js";
 import type { RepoContext } from "./context.js";
 
 /** Putting a checkout on disk, fresh or refreshed. */
@@ -140,6 +140,7 @@ export function cloneTools(ctx: RepoContext): ToolSet {
             dir,
             url: target,
             branch,
+            author,
             plain,
             fetchOrigin
           });
@@ -173,18 +174,15 @@ export function cloneTools(ctx: RepoContext): ToolSet {
           return bounded(`clone failed: ${result.stderr || result.stdout}`);
         }
 
-        // Identity has to exist before the first commit, and a repo-local config
-        // keeps it from leaking into anything else in the container.
+        // Identity has to exist before the first commit. Written through the
+        // container, and deliberately: the commits it names are made there, by
+        // `repo_commit`, with no credential in sight — only the three operations
+        // that talk to the forge moved.
         //
-        // Still written through the container, and deliberately: the commits it
-        // names are made there, by `repo_commit`, with no credential in sight.
-        // Only the three operations that talk to the forge moved.
-        await plain(`config user.name "$GIT_NAME"`, dir, {
-          GIT_NAME: author.name
-        });
-        await plain(`config user.email "$GIT_EMAIL"`, dir, {
-          GIT_EMAIL: author.email
-        });
+        // Why a refresh rewrites it, and what answers for a repository this
+        // plugin never cloned, is on
+        // {@link file://./checkout.ts writeGitIdentity}.
+        await writeGitIdentity(plain, dir, author);
 
         // Two gits now share one `.git`, and this is where they could disagree.
         //

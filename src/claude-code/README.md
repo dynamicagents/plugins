@@ -219,6 +219,11 @@ readonly #session = claudeCodeSession({
     ].filter(Boolean),
   // How a delegated session finds this workspace — see below.
   workspaceName: () => this.#name(),
+  // Who the session's own commits, amends and rebases are attributed to. The
+  // same pair the workspace's `git.author` takes: a session commits in
+  // repositories nothing configured, and a checkout's config is a value frozen
+  // when that checkout was created.
+  author: { name: env.GITHUB_NAME, email: env.GITHUB_EMAIL },
   // Omit for unrestricted, which is the default.
   restrictToHosts: ["registry.npmjs.org"]
 });

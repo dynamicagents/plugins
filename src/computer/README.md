@@ -183,6 +183,10 @@ and a consumer who had to remember a second import is a consumer who can forget 
 The bundle cost is nothing — `sideEffects` is false, so an agent that only calls
 `sb_exec` carries no container backend and no isomorphic-git.
 
+`git.author` is answered twice over: it configures each checkout `/repo` clones, and
+it is written into the container's own system git config, so a repository the container
+made for itself — a submodule, a `git init` — is attributed rather than nameless.
+
 `workspaceConfig()` is short because it is the complete answer to "what is different
 about this agent's workspace". Everything else is inherited, and the alternative is a
 second copy of a thousand-line object drifting in whichever direction the one nobody

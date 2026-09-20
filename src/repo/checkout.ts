@@ -85,6 +85,38 @@ export async function resolveDefaultBranch(
 }
 
 /**
+ * Write the identity this checkout's commits carry into its own config.
+ *
+ * **Repo-local, and repeated on every clone and every refresh.** The workspace
+ * outlives the deployment's configuration: written once, at the clone, it is
+ * frozen — change the configured name and every checkout that already exists
+ * goes on committing under the old one, with nothing in the tree saying why.
+ * Rewriting costs two commands against a checkout that is being set up anyway.
+ *
+ * It is the *nearest* answer, not the only one. The container has a system-wide
+ * identity underneath it, so a repository this plugin never cloned is still
+ * attributed — see the computer plugin's `host/git-identity` module — and
+ * `repo_commit` names the identity on the commit itself, which is the only
+ * layer a stale config cannot outrank.
+ *
+ * Unchecked, like the config pins at the clone: git's identity is needed by the
+ * first commit, and a failure to write it fails that commit with a sentence far
+ * clearer than anything this could report from here.
+ */
+export async function writeGitIdentity(
+  plain: GitRunners["plain"],
+  dir: string,
+  author: { name: string; email: string }
+): Promise<void> {
+  // Through the environment, so a configured name containing a quote stays a
+  // value rather than becoming shell.
+  await plain(`config user.name "$GIT_NAME"`, dir, { GIT_NAME: author.name });
+  await plain(`config user.email "$GIT_EMAIL"`, dir, {
+    GIT_EMAIL: author.email
+  });
+}
+
+/**
  * Bring an existing checkout back to a clean, current state.
  *
  * The workspace outlives the task, so a clone target may already hold one —
@@ -102,12 +134,14 @@ export async function refreshCheckout({
   dir,
   url,
   branch,
+  author,
   plain,
   fetchOrigin
 }: GitRunners & {
   dir: string;
   url: string;
   branch: string | undefined;
+  author: { name: string; email: string };
 }): Promise<RefreshOutcome> {
   const remote = await plain("remote get-url origin", dir);
   // Interrogated, for the same reason the `status` below is: a question that went
@@ -134,6 +168,12 @@ export async function refreshCheckout({
         `not ${url}. Pick a different directory or work with the checkout that is there.`
     };
   }
+
+  // Ahead of every refusal below, and deliberately: a refusal leaves the *tree*
+  // untouched, which is what those sentences promise. An identity is not tree
+  // state, and a dirty tree is the case where somebody is about to commit —
+  // exactly when a stale name would be spent.
+  await writeGitIdentity(plain, dir, author);
 
   // Interrogated, not assumed. Empty stdout from a `status` that *failed* is not
   // a clean tree, it is no answer at all — and the next two commands are `fetch`

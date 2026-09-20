@@ -198,6 +198,20 @@ export interface ClaudeCodeConfig {
 
   /** Extra environment for the session. Never secrets — see the README. */
   env?: Record<string, string>;
+
+  /**
+   * Who the session's own git commits are attributed to.
+   *
+   * A session has a shell and a checkout, so it commits — and it amends,
+   * rebases and cherry-picks, none of which a host can intercept the way it
+   * names an identity on a commit it makes itself. Left unset, every one of
+   * those falls through to whatever config the checkout happens to carry, which
+   * is a value frozen whenever that checkout was created.
+   *
+   * See {@link file://./run.ts buildLaunch} for why this becomes an environment
+   * rather than a `git config`.
+   */
+  author?: { name: string; email: string };
 }
 
 /**

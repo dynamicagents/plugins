@@ -116,7 +116,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     // Forwarded only when set, so `buildLaunch` owns the default in one place
     // rather than this line resolving it and the flag being written twice.
     ...(config.permissionMode ? { permissionMode: config.permissionMode } : {}),
-    ...(config.env ? { env: config.env } : {})
+    ...(config.env ? { env: config.env } : {}),
+    ...(config.author ? { author: config.author } : {})
   });
 
   return {

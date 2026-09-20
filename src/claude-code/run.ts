@@ -153,6 +153,12 @@ export interface LaunchOptions {
    * than trusted to the reader of that sentence.
    */
   env?: Record<string, string>;
+
+  /**
+   * Who this session's commits are attributed to — see
+   * {@link file://./config.ts ClaudeCodeConfig.author}.
+   */
+  author?: { name: string; email: string };
 }
 
 export interface Launch {
@@ -243,6 +249,25 @@ export function buildLaunch(options: LaunchOptions): Launch {
     // nothing.
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
   };
+  // Git's identity as an *environment*, not a `git config`.
+  //
+  // The session's cwd is one checkout, and what it commits in is not: a
+  // superproject's submodules, a scratch clone, anything it initialises are all
+  // separate repositories with separate configs, and `/repo` only ever
+  // configured the one it cloned. A config write would have to find each of
+  // them; the environment is inherited by every git the session starts, and it
+  // outranks all four config levels — so a checkout carrying a name from
+  // whenever it was created no longer decides who commits today.
+  //
+  // Both halves, because they answer different questions: an amend or a rebase
+  // keeps the original author and stamps a fresh committer, and without
+  // `GIT_COMMITTER_*` that one commit ends up half attributed.
+  if (options.author) {
+    env.GIT_AUTHOR_NAME = options.author.name;
+    env.GIT_AUTHOR_EMAIL = options.author.email;
+    env.GIT_COMMITTER_NAME = options.author.name;
+    env.GIT_COMMITTER_EMAIL = options.author.email;
+  }
   if (options.maxSubagentDepth !== undefined)
     env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH = String(options.maxSubagentDepth);
   if (options.maxConcurrentSubagents !== undefined)
