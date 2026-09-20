@@ -528,23 +528,23 @@ function decoded(target: { owner: string; repo: string }): {
 }
 
 /**
- * One reviewer's logins, which GitHub does not spell the same way twice.
+ * The review bot's logins, which GitHub does not spell the same way twice.
  *
- * The same actor — one account id — arrives as `Copilot` from
- * `requested_reviewers` and the issue timeline, and as
+ * One account arrives as `Copilot` from the issue timeline, as
+ * `copilot-pull-request-reviewer` from GraphQL, and as
  * `copilot-pull-request-reviewer[bot]` from `pulls/{n}/reviews`. Compared
- * exactly, the request matches and the review never does, so
- * `repo_pr_review_status` finds a pending request and then, the moment the
- * review lands and clears it, reports "none pending — waiting will not change
- * it". That is the one answer a polling caller stops on, so the mismatch does
- * not degrade the tool, it inverts it.
+ * exactly against the login a caller names, the request matches and the review
+ * never does, so `repo_pr_review_status` reports "none pending — waiting will
+ * not change it" at the moment the review lands. That is the one answer a
+ * polling caller stops on, so the mismatch does not degrade the tool, it
+ * inverts it.
  *
- * Hence a prefix rather than the two known spellings: the reviewer is a family
- * of bots — `copilot-swe-agent[bot]` and the rest — sharing one first word, and
- * an enumeration has to be edited for each new member while a prefix does not.
- * The boundary is what keeps a human login like `copilotfan` out.
+ * An alternation of the spellings that account answers to, and deliberately not
+ * a `copilot-` prefix: `copilot-swe-agent` is a **different** account, one that
+ * opens pull requests rather than reviewing them, so a prefix would let its
+ * request or its authorship answer a question asked about the reviewer.
  */
-const COPILOT_LOGIN = /^copilot\b/;
+const COPILOT_LOGIN = /^copilot(-pull-request-reviewer)?$/;
 
 /**
  * Whether a login from the API is the reviewer the caller asked about.

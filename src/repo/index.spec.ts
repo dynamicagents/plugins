@@ -1839,8 +1839,7 @@ describe("a review, and answering it", () => {
       for (const login of [
         "Copilot",
         "copilot-pull-request-reviewer",
-        "copilot-pull-request-reviewer[bot]",
-        "copilot-swe-agent[bot]"
+        "copilot-pull-request-reviewer[bot]"
       ]) {
         const result = await status({
           graphql: () => reviewRequests(),
@@ -1859,18 +1858,39 @@ describe("a review, and answering it", () => {
       }
     });
 
-    it("does not take a login that merely starts with the word", async () => {
-      // The boundary in the pattern, which separates the reviewer's family of
-      // bots from a person who picked a name near it.
+    it("does not take another account that shares the first word", async () => {
+      // `copilot-swe-agent` opens pull requests rather than reviewing them, and
+      // `copilotfan` is a person. Neither is the review bot, so a `copilot-`
+      // prefix would answer a question about the reviewer with somebody else.
+      for (const login of ["copilot-swe-agent[bot]", "copilotfan"]) {
+        const result = await status({
+          graphql: () => reviewRequests(),
+          rest: {
+            "/pulls/42/reviews": [{ user: { login }, state: "COMMENTED" }]
+          }
+        })();
+        expect(result, login).toContain("waiting will not change it");
+      }
+    });
+
+    it("strips the `[bot]` suffix for an app that is not the reviewer", async () => {
+      // The normalisation is advertised for any app, and the Copilot fixtures
+      // cannot prove it: they would pass through the alternation above even if
+      // stripping stopped working for everybody else.
       const result = await status({
         graphql: () => reviewRequests(),
         rest: {
           "/pulls/42/reviews": [
-            { user: { login: "copilotfan" }, state: "COMMENTED" }
+            {
+              user: { login: "dependabot[bot]" },
+              state: "COMMENTED",
+              submitted_at: "2026-09-17T10:00:00Z"
+            }
           ]
         }
-      })();
-      expect(result).toContain("waiting will not change it");
+      })("dependabot");
+      expect(result).toContain("reviewed");
+      expect(result).not.toContain("waiting will not change it");
     });
 
     it("still finds a reviewer asked for by team", async () => {
