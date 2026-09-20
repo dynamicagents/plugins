@@ -11,7 +11,6 @@ import {
   UNSAFE_BRANCH
 } from "./url.js";
 import { refreshCheckout, resolveDefaultBranch } from "./checkout.js";
-import { truncateOutput } from "../shared/truncate.js";
 
 /**
  * The URL parsing, re-exported from the one entry point.
@@ -21,9 +20,6 @@ import { truncateOutput } from "../shared/truncate.js";
  * though it is implemented in `url.ts`.
  */
 export { parseRepo } from "./url.js";
-
-/** Bounding a diff or a transcript — see `../shared/truncate.ts`. */
-export { truncateOutput };
 
 /**
  * `@dynamicagents/plugins/repo` — clone, commit, push, open a pull request.
@@ -564,6 +560,35 @@ function sameReviewer(a: string, b: string): boolean {
 }
 
 /**
+ * Middle-out truncation, so both the head of a diff and its tail survive.
+ *
+ * Deliberately a **copy** of the computer plugin's function of the same name,
+ * not an import. `npm run verify:exports` fails any subpath whose module graph
+ * reaches a sibling's directory, and its own advice for a shared helper is to
+ * duplicate it — installing `repo` must not drag `computer` (and therefore
+ * `@cloudflare/computer`) into a consumer's bundle. Fifteen lines is a cheaper
+ * price than that coupling, and it is the same reason `exec` is injected here
+ * rather than imported.
+ *
+ * The `half < 1` guard is not padding: without it a small `max` makes `half`
+ * zero or negative, and `slice(-0)` is `slice(0)` — the whole string — so the
+ * function would return *more* than it was given.
+ */
+export function truncateOutput(text: string, max: number): string {
+  if (text.length <= max) return text;
+
+  const marker = (dropped: number) =>
+    `\n\n… [${dropped} characters omitted from the middle] …\n\n`;
+
+  const half = Math.floor((max - marker(text.length).length) / 2);
+  if (half < 1) return text.slice(0, Math.max(0, max));
+
+  return (
+    text.slice(0, half) + marker(text.length - half * 2) + text.slice(-half)
+  );
+}
+
+/**
  * What one container command produced — plus one bit the container did not.
  *
  * `exec` does not only *return* failures, it throws them: `@cloudflare/computer`
@@ -583,12 +608,13 @@ type RunResult = Awaited<ReturnType<RepoExec>> & { unreachable?: true };
 /**
  * What to tell the model when the plumbing, not the command, is the problem.
  *
- * A sibling of the computer plugin's `execLostNote` rather than an import:
- * `verify:exports` fails any subpath whose module graph reaches a sibling's, and
- * installing `repo` must not drag `computer` in behind it. The wording differs
- * anyway, and the difference is the point — that plugin cannot know the lost
- * command was git, and this one does. What a model needs after a lost `git push`
- * is not "re-run it" but whether re-running it is *safe*.
+ * A sibling of the computer plugin's `execLostNote` rather than an import, for
+ * the same reason {@link truncateOutput} is a copy: `verify:exports` fails any
+ * subpath whose module graph reaches a sibling's, and installing `repo` must
+ * not drag `computer` in behind it. The wording differs anyway, and the
+ * difference is the point — that plugin cannot know the lost command was git,
+ * and this one does. What a model needs after a lost `git push` is not "re-run
+ * it" but whether re-running it is *safe*.
  */
 function unreachableNote(err: unknown): string {
   if ((err as { code?: unknown } | null | undefined)?.code === "EEXEC_LOST") {

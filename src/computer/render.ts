@@ -2,7 +2,6 @@ import type {
   WorkspaceClient,
   WorkspaceRuntimeStatus
 } from "@cloudflare/computer";
-import { truncateOutput } from "../shared/truncate.js";
 
 /**
  * Turning a result into the text a model reads.
@@ -16,10 +15,6 @@ import { truncateOutput } from "../shared/truncate.js";
  * the wrong way round is the mistake they are kept apart to prevent.
  */
 
-// Re-exported rather than re-declared: `./computer` is the surface a consumer
-// imports, and it must not move when the file behind it does.
-export { truncateOutput };
-
 /**
  * How much of one matching line the model is shown.
  *
@@ -29,6 +24,31 @@ export { truncateOutput };
  * it reads the region with `sb_read` next.
  */
 const MAX_MATCH_LINE_CHARS = 200;
+
+/**
+ * Middle-out truncation, so both the first error and the final summary survive.
+ *
+ * The guard is not defensive padding. Without it a `max` at or below the marker's
+ * own length makes `half` zero or negative, and `slice(-0)` is `slice(0)` — the
+ * *whole* string — so the function returns more than it was given: 500 characters
+ * in, 543 out at `max: 80`. A silent inversion of the one thing it does,
+ * reachable from a public config field.
+ */
+export function truncateOutput(text: string, max: number): string {
+  if (text.length <= max) return text;
+
+  const marker = (dropped: number) =>
+    `\n\n… [${dropped} characters omitted from the middle] …\n\n`;
+
+  // No budget for two halves plus the marker: keep the head, which is where the
+  // first error is, and say nothing clever.
+  const half = Math.floor((max - marker(text.length).length) / 2);
+  if (half < 1) return text.slice(0, Math.max(0, max));
+
+  return (
+    text.slice(0, half) + marker(text.length - half * 2) + text.slice(-half)
+  );
+}
 
 /**
  * A byte count in the form a model can act on.

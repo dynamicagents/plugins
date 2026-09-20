@@ -23,14 +23,8 @@
  *      bundle grows only with what it imports — and it is the one that rots
  *      silently, because a convenience re-export across two plugins typechecks,
  *      lints, and tests perfectly while quietly doubling every consumer's
- *      bundle. Only a check on the built graph catches it. `shared/` is the one
- *      exception, on the terms check 7 holds it to.
- *   7. **`shared/` stays a leaf**: nothing under it imports anything, relative
- *      or bare. What isolation actually protects is a consumer from a sibling's
- *      *dependencies*, so a module with none costs a bundle only its own bytes
- *      — and that is true only while it imports nothing. One import there lands
- *      in every plugin at once, which is the failure isolation exists to stop.
- *   8. No root barrel: `exports` must have no `"."` entry, for the same reason.
+ *      bundle. Only a check on the built graph catches it.
+ *   7. No root barrel: `exports` must have no `"."` entry, for the same reason.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
@@ -118,15 +112,11 @@ for (const file of walk(path.join(root, "dist"))) {
   }
 }
 
-// --- 5, 6 & 7. realm isolation, plugin isolation, and the shared leaf --------
+// --- 5 & 6. realm isolation, and plugin isolation ----------------------------
 
 /** `./arc-agi` → `dist/arc-agi` — the directory a subpath's files must stay in. */
 const ownDir = (subpath) =>
   path.join(root, "dist", subpath.replace(/^\.\//, ""));
-
-/** The one directory every subpath may reach. Held to check 7 below. */
-const shared = path.join(root, "dist", "shared");
-const inside = (dir, file) => file === dir || file.startsWith(dir + path.sep);
 
 for (const [subpath, target] of subpathEntries) {
   const { files, bare } = reachableFrom(path.join(root, target));
@@ -138,35 +128,23 @@ for (const [subpath, target] of subpathEntries) {
     );
   }
 
-  // A plugin may reach only its own directory, plus `shared/`. `arc-agi`
-  // bundling its grid analysis is fine — that code lives inside `arc-agi/`
-  // precisely because only arc-agi consumes it. Reaching *out* into a sibling is
-  // what must not happen.
+  // A plugin may reach only its own directory. `arc-agi` bundling its grid
+  // analysis is fine — that code lives inside `arc-agi/` precisely because only
+  // arc-agi consumes it. Reaching *out* into a sibling is what must not happen.
   const home = ownDir(subpath);
   const trespass = [...files]
-    .filter((f) => !inside(home, f) && !inside(shared, f))
+    .filter((f) => !f.startsWith(home + path.sep))
     .map((f) => path.relative(root, f));
   if (trespass.length > 0) {
     fail(
       `subpath "${subpath}" reaches outside its own directory: ${trespass.join(", ")}. ` +
-        `Installing one plugin would pull in another's code. Move the helper inside ` +
-        `the only plugin that uses it, or into src/shared/ if it can import nothing.`
+        `Installing one plugin would pull in another's code. Duplicate the helper, ` +
+        `or move it inside the only plugin that uses it.`
     );
   }
 }
 
-for (const file of walk(shared)) {
-  if (!file.endsWith(".js")) continue;
-  for (const spec of relativeImports(readFileSync(file, "utf8"))) {
-    fail(
-      `${path.relative(root, file)} imports "${spec}". Every subpath reaches ` +
-        `shared/, so whatever it imports lands in every consumer's bundle — which ` +
-        `is the coupling plugin isolation exists to prevent. Keep shared/ a leaf.`
-    );
-  }
-}
-
-// --- 8. no root barrel -------------------------------------------------------
+// --- 7. no root barrel -------------------------------------------------------
 
 if (pkg.exports?.["."]) {
   fail(
