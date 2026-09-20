@@ -413,6 +413,33 @@ const REVIEW_THREADS_QUERY = `
     }
   }`;
 
+/**
+ * Who is currently *asked* to review, apps included.
+ *
+ * REST's `pulls/{n}/requested_reviewers` carries `users` and `teams` and no
+ * third key, so a Bot reviewer — Copilot is one — is absent from a request that
+ * is live, and its answer for "Copilot is working on it right now" is byte for
+ * byte its answer for "nobody was ever asked". GraphQL types the requested
+ * reviewer as a union with `Bot` in it, which is what makes the two
+ * distinguishable at all.
+ */
+const REVIEW_REQUESTS_QUERY = `
+  query($owner:String!,$repo:String!,$number:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){
+        reviewRequests(first:${FORGE_PAGE_SIZE}){
+          nodes{
+            requestedReviewer{
+              ... on User{login}
+              ... on Bot{login}
+              ... on Team{slug}
+            }
+          }
+        }
+      }
+    }
+  }`;
+
 /** Which pull request, in which repository, a thread id names. */
 const THREAD_OWNER_QUERY = `
   query($id:ID!){
@@ -498,6 +525,38 @@ function decoded(target: { owner: string; repo: string }): {
     owner: decodeURIComponent(target.owner),
     repo: decodeURIComponent(target.repo)
   };
+}
+
+/**
+ * The review bot's logins, which GitHub does not spell the same way twice.
+ *
+ * One account arrives as `Copilot` from the issue timeline, as
+ * `copilot-pull-request-reviewer` from GraphQL, and as
+ * `copilot-pull-request-reviewer[bot]` from `pulls/{n}/reviews`. Compared
+ * exactly against the login a caller names, the request matches and the review
+ * never does, so `repo_pr_review_status` reports "none pending — waiting will
+ * not change it" at the moment the review lands. That is the one answer a
+ * polling caller stops on, so the mismatch does not degrade the tool, it
+ * inverts it.
+ *
+ * An alternation of the spellings that account answers to, and deliberately not
+ * a `copilot-` prefix: `copilot-swe-agent` is a **different** account, one that
+ * opens pull requests rather than reviewing them, so a prefix would let its
+ * request or its authorship answer a question asked about the reviewer.
+ */
+const COPILOT_LOGIN = /^copilot(-pull-request-reviewer)?$/;
+
+/**
+ * Whether a login from the API is the reviewer the caller asked about.
+ *
+ * `[bot]` is a suffix REST appends to an app's login and GraphQL does not, so it
+ * is never part of the identity — stripping it is what lets a caller name any
+ * app reviewer the way GitHub's UI shows it.
+ */
+function sameReviewer(a: string, b: string): boolean {
+  const bare = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
+  const [x, y] = [bare(a), bare(b)];
+  return COPILOT_LOGIN.test(x) && COPILOT_LOGIN.test(y) ? true : x === y;
 }
 
 /**
@@ -975,9 +1034,10 @@ function repoSurface(
    * nothing there" and is acted on accordingly. That is the whole reason this
    * wrapper exists rather than each caller posting to `/graphql` itself.
    *
-   * Review threads are the only thing here that needs it: resolving one has no
-   * REST equivalent at all, and the threads themselves are not on the issue
-   * timeline that `repo_issue_view` reads.
+   * What needs it is what REST cannot express: resolving a review thread has no
+   * REST equivalent at all, the threads themselves are not on the issue timeline
+   * `repo_issue_view` reads, and a review *request* naming an app is invisible to
+   * REST — see {@link REVIEW_REQUESTS_QUERY}.
    */
   const forgeGraphql = async (
     tool: string,
@@ -1803,7 +1863,6 @@ function repoSurface(
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
         const who = reviewer ?? "Copilot";
-        const login = who.toLowerCase();
 
         // A *pending* request outranks any review already on the pull request,
         // and that ordering is the whole logic here. GitHub clears the request
@@ -1811,19 +1870,32 @@ function repoSurface(
         // asked for, so "still requested" is true now and "has reviewed" is
         // about the past. Reading them the other way round reports a re-review
         // as finished the moment it is asked for.
-        const requested = await forge(
+        const requested = await forgeGraphql(
           "repo_pr_review_status",
-          `/repos/${owner}/${repo}/pulls/${number}/requested_reviewers`
+          REVIEW_REQUESTS_QUERY,
+          { owner, repo, number }
         );
         if (!requested.ok) return bounded(requested.message);
-        const waiting = requested.data as {
-          users?: { login?: string }[];
-          teams?: { slug?: string }[];
-        };
-        const pending = [
-          ...(waiting.users ?? []).map((u) => u.login),
-          ...(waiting.teams ?? []).map((t) => t.slug)
-        ].some((name) => name?.toLowerCase() === login);
+        const waiting = (
+          requested.data as {
+            repository?: {
+              pullRequest?: {
+                reviewRequests?: {
+                  nodes?: {
+                    requestedReviewer?: { login?: string; slug?: string };
+                  }[];
+                };
+              };
+            };
+          }
+        ).repository?.pullRequest?.reviewRequests;
+        if (!waiting)
+          return `#${number} is not a pull request in ${owner}/${repo}`;
+        const pending = (waiting.nodes ?? []).some((n) => {
+          const name =
+            n?.requestedReviewer?.login ?? n?.requestedReviewer?.slug;
+          return !!name && sameReviewer(name, who);
+        });
         if (pending)
           return `${who} has been asked to review #${number} and has not finished.`;
 
@@ -1839,7 +1911,8 @@ function repoSurface(
         }[];
         const submitted = all.filter(
           (r) =>
-            r.user?.login?.toLowerCase() === login &&
+            !!r.user?.login &&
+            sameReviewer(r.user.login, who) &&
             // A `PENDING` review is a draft its author has not sent, and it is
             // visible to whoever holds the token that wrote it. Counting one as
             // finished reports a review nobody has read, which is the answer a
