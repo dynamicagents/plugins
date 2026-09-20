@@ -19,8 +19,8 @@
  * - **Where the views stand** is ordered by measurement, not by cost intuition:
  *   `shapes` for the map, `grid` for exact cells, `region` for fine detail only.
  *   The full grid of a real board is 35 collapsed lines, so `grid` is not the
- *   expensive last resort it reads as, and a maze mapped through `region`
- *   peepholes is what the old ordering bought.
+ *   expensive last resort it reads as; rank it as one and the model maps a
+ *   maze through `region` peepholes rather than reading the board whole.
  * - **Batching** requires a route to be walked against those bands before it is
  *   sent. That check is here rather than in the tool because it is a judgement
  *   about the game's rules — what blocks what — and a tool making it would be

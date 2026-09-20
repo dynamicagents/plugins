@@ -158,10 +158,6 @@ for (const [subpath, target] of subpathEntries) {
 for (const file of walk(shared)) {
   if (!file.endsWith(".js")) continue;
   for (const spec of relativeImports(readFileSync(file, "utf8"))) {
-    const target = spec.startsWith(".")
-      ? path.resolve(path.dirname(file), spec)
-      : null;
-    if (target && inside(shared, target)) continue;
     fail(
       `${path.relative(root, file)} imports "${spec}". Every subpath reaches ` +
         `shared/, so whatever it imports lands in every consumer's bundle — which ` +

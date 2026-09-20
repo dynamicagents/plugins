@@ -226,11 +226,11 @@ describe("installFingerprint", () => {
    * The half a lockfile-only fingerprint is blind to.
    *
    * Consult `package.json` only when there is *no* lockfile and a commit that
-   * adds a `postinstall`, or moves the `packageManager` pin from `pnpm@9` to
-   * `pnpm@10`, matches the stored fingerprint exactly and skips the install. The
-   * tree that produces is quietly wrong rather than absent, and it
-   * surfaces as a missing module in some later build with nothing pointing back
-   * at the install that never ran.
+   * adds a `postinstall`, or moves the `packageManager` pin to a new version,
+   * matches the stored fingerprint exactly and skips the install. The tree
+   * that produces is quietly wrong rather than absent, and it surfaces as a
+   * missing module in some later build with nothing pointing back at the
+   * install that never ran.
    */
   it.each([
     ['{"scripts":{"postinstall":"prisma generate"}}', "a postinstall"],

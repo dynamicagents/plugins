@@ -12,7 +12,7 @@ import { humanMs } from "./render.js";
  *
  * Every *reader*, though, is asking a different question: **can I rely on this
  * workspace right now?** The two diverge, and expressing the second through the
- * first goes wrong in three ways that are each easy to reintroduce:
+ * first goes wrong in ways that are each easy to reintroduce:
  *
  * - A workspace at its storage ceiling is not `skipped`. That variant means
  *   "this checkout has nothing to install" — routine, and about the repository.
