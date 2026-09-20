@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/plugins",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "description": "Optional, composable capabilities for a Dynamic Agent: ARC-AGI-3, browser rendering, a Linux container, git and pull requests, workspace, episodic recall, and pre-turn triage. One subpath per plugin, so a bundle grows only with what it imports.",
   "keywords": [
     "ai-agents",
@@ -91,7 +91,7 @@
   "peerDependencies": {
     "@cloudflare/computer": "^0.3.1",
     "@cloudflare/shell": "^0.4.3",
-    "@dynamicagents/core": ">=0.11.0 <0.12.0",
+    "@dynamicagents/core": ">=0.12.0 <0.13.0",
     "@platformatic/vfs": "^0.4.0",
     "agents": ">=0.24.0 <0.25.0",
     "ai": "^7.0.88",
@@ -115,7 +115,7 @@
     "@cloudflare/shell": "0.4.3",
     "@platformatic/vfs": "^0.4.0",
     "@cloudflare/vitest-plugin": "^1.1.9",
-    "@dynamicagents/core": "git+https://github.com/dynamicagents/core.git#main",
+    "@dynamicagents/core": "^0.12.0",
     "@types/node": "^26.5.1",
     "agents": "^0.24.0",
     "ai": "^7.0.101",
@@ -138,7 +138,6 @@
     "access": "public"
   },
   "allowScripts": {
-    "@dynamicagents/core": true,
     "esbuild": false,
     "fsevents": false,
     "sharp": false,
