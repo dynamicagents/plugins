@@ -25,21 +25,24 @@ import { shellQuote } from "@cloudflare/computer";
  * truncated with both ends kept.
  *
  * Requires a shell that implements it — `bash`, `zsh`, `ksh`, not `sh`/dash. A
- * host setting {@link ComputerConfig.shell} is choosing that shell explicitly.
+ * host setting {@link file://./index.ts ComputerConfig.shell} is choosing that
+ * shell explicitly.
  */
 function wrapped(command: string, shell: string): string {
   return `${shell} -o pipefail -c ${shellQuote(command)}`;
 }
 
 /**
- * Run a command under {@link ComputerConfig.shell} with its two output streams
- * left as they are, or hand it back untouched when no shell is configured.
+ * Run a command under {@link file://./index.ts ComputerConfig.shell} with its
+ * two output streams left as they are, or hand it back untouched when no shell
+ * is configured.
  *
  * This is the variant for a caller that **reads the result in code**: `stdout` is
  * a data channel it compares or parses, and `stderr` is a separate diagnostic.
- * {@link computerExec} is that caller, on behalf of `@dynamicagents/plugins/repo`,
- * which asks git questions like `symbolic-ref --short refs/remotes/origin/HEAD`
- * and `rev-list --count` and needs the answer alone.
+ * {@link file://./index.ts computerExec} is that caller, on behalf of
+ * `@dynamicagents/plugins/repo`, which asks git questions like
+ * `symbolic-ref --short refs/remotes/origin/HEAD` and `rev-list --count` and
+ * needs the answer alone.
  *
  * Two functions rather than one with a flag, because the difference is a change
  * to the *output contract* and a boolean hides it at the call site. Merging the
@@ -53,8 +56,9 @@ export function withShell(command: string, shell: string | undefined): string {
 }
 
 /**
- * Run a command under {@link ComputerConfig.shell} with its two output streams
- * merged into one transcript, in the order they were written.
+ * Run a command under {@link file://./index.ts ComputerConfig.shell} with its
+ * two output streams merged into one transcript, in the order they were
+ * written.
  *
  * This is the variant for a caller whose consumer is **a model reading output**.
  * `sb_exec` is that caller. A project's check is a chain — `wrangler types &&
@@ -71,9 +75,9 @@ export function withShell(command: string, shell: string | undefined): string {
  *
  * With no shell configured there is no wrapper process to redirect, so the
  * command goes to the runtime untouched and the two streams arrive separate.
- * That is not a gap: {@link renderResult} renders them as a labelled
- * `--- stderr ---` block for exactly this case. The transcript is the better
- * answer, not the only supported one.
+ * That is not a gap: {@link file://./render.ts renderResult} renders them as a
+ * labelled `--- stderr ---` block for exactly this case. The transcript is the
+ * better answer, not the only supported one.
  */
 export function withShellTranscript(
   command: string,

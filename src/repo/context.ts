@@ -435,11 +435,11 @@ export function repoContext(
    * has a `!success` branch that says what it was doing at the time. What differs
    * is where a failure can come from.
    *
-   * {@link RepoGit} reports a *git* failure as data — a rejected push, a branch
-   * that does not resolve — so that becomes an ordinary unsuccessful result. A
-   * throw means the host could not be reached at all, which is the `unreachable`
-   * case: nothing ran, and three places in this file read that differently from
-   * an answer.
+   * {@link file://./index.ts RepoGit} reports a *git* failure as data — a
+   * rejected push, a branch that does not resolve — so that becomes an ordinary
+   * unsuccessful result. A throw means the host could not be reached at all,
+   * which is the `unreachable` case: nothing ran, and three places in this file
+   * read that differently from an answer.
    *
    * Serialised with the container commands rather than merely alongside them. A
    * fetch writes refs into the same checkout a `git status` is reading, and the
@@ -562,7 +562,7 @@ export function repoContext(
    * What needs it is what REST cannot express: resolving a review thread has no
    * REST equivalent at all, the threads themselves are not on the issue timeline
    * `repo_issue_view` reads, and a review *request* naming an app is invisible to
-   * REST — see {@link REVIEW_REQUESTS_QUERY}.
+   * REST — see {@link file://./tools-review.ts REVIEW_REQUESTS_QUERY}.
    */
   const forgeGraphql = async (
     tool: string,

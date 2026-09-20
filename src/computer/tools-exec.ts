@@ -65,11 +65,11 @@ export function execTools(ctx: ComputerContext): ToolSet {
        *
        * Two of these sentences are only true when a shell is configured, so the
        * description says whichever is. `withShellTranscript` is a no-op without
-       * {@link ComputerConfig.shell}: no `2>&1`, so the streams arrive separate
-       * and {@link renderResult} labels them; no `-o pipefail`, so `/bin/sh`
-       * reports a pipeline's *last* stage. Promising a transcript and
-       * first-failure semantics there would be the lie `wrapped` explains the
-       * cost of.
+       * {@link file://./index.ts ComputerConfig.shell}: no `2>&1`, so the
+       * streams arrive separate and {@link renderResult} labels them; no
+       * `-o pipefail`, so `/bin/sh` reports a pipeline's *last* stage. Promising
+       * a transcript and first-failure semantics there would be the lie
+       * `wrapped` explains the cost of.
        */
       description:
         "Run a shell command in the container and return its output. Use this for builds, tests, package installs, git, and anything else a terminal can do. " +

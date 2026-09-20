@@ -132,7 +132,8 @@ export type RepoExec = (
  * branch that does not resolve, a repository that is not there — all of it comes
  * back as `ok: false`, because those are answers. A rejection means the host
  * itself could not be reached, which is a different fact and gets a different
- * sentence from every tool in this file. See {@link RunResult}.
+ * sentence from every tool in this file. See
+ * {@link file://./context.ts RunResult}.
  */
 export interface RepoGit {
   /**

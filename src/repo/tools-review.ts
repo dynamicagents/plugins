@@ -169,10 +169,10 @@ function renderThread(t: ReviewThread): string {
 /**
  * The owner and repository as their own names, rather than as REST path segments.
  *
- * {@link forgeRepo} percent-encodes both, because that is what makes a path safe.
- * A GraphQL *variable* is not a path — it is compared against the repository's
- * actual name — so an encoded one would silently stop matching the moment a name
- * contains a character worth encoding.
+ * {@link file://./context.ts forgeRepo} percent-encodes both, because that is
+ * what makes a path safe. A GraphQL *variable* is not a path — it is compared
+ * against the repository's actual name — so an encoded one would silently stop
+ * matching the moment a name contains a character worth encoding.
  */
 function decoded(target: { owner: string; repo: string }): {
   owner: string;
