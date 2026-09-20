@@ -4,8 +4,12 @@
  *
  * Every defect this catches was a real one in this package, and none of them
  * failed `tsc`, `eslint`, or `vitest` — they only surfaced when something
- * outside the repo imported the built output. So they run on `prepack` and
- * `prepublishOnly`, where a failure is still cheap.
+ * outside the repo imported the built output. So they run on `check`, `prepack`
+ * and `prepublishOnly`. `check` is where a failure is cheapest: the publish
+ * gates catch it once the tarball is being built, by which point the change is
+ * already committed.
+ *
+ * They read `dist/`, so anything running them builds first.
  *
  *   1. Every `exports` subpath resolves to a file that actually emitted.
  *   2. No relative import in `dist/` omits its `.js` extension (Node ESM throws

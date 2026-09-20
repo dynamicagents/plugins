@@ -77,7 +77,7 @@
     "types:check": "wrangler types --include-env=false --check && node scripts/verify-runtime-types.mjs",
     "format": "prettier --write .",
     "lint": "eslint .",
-    "check": "npm run verify:peer-ranges && npm run verify:references && npm run types:check && prettier --check . && eslint . && tsc && npm run build",
+    "check": "npm run verify:peer-ranges && npm run verify:references && npm run types:check && prettier --check . && eslint . && tsc && npm run build && npm run verify:exports",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:record": "RECORD=1 vitest run recorded.spec.ts",
@@ -85,7 +85,7 @@
     "verify:references": "node scripts/verify-references.mjs",
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
     "prepack": "npm run build && npm run verify:exports",
-    "prepublishOnly": "npm run check && npm test && npm run verify:exports",
+    "prepublishOnly": "npm run check && npm test",
     "prepare": "husky || true && npm run build"
   },
   "peerDependencies": {
