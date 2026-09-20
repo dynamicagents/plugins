@@ -183,6 +183,16 @@ and a consumer who had to remember a second import is a consumer who can forget 
 The bundle cost is nothing — `sideEffects` is false, so an agent that only calls
 `sb_exec` carries no container backend and no isomorphic-git.
 
+`git.author` answers for commits this object makes with its own git client, and it is
+written into the container's system git config, so a repository the container made for
+itself — a submodule, a `git init` — is attributed rather than nameless.
+
+**`@dynamicagents/plugins/repo` takes its identity separately**, as `RepoConfig.author`,
+and falls back to a generic one when a consumer leaves it unset. Nothing here can reach
+that config and nothing checks the two agree, so a deployment answers both from one
+place: one exported helper that reads the binding, called by the workspace object and
+by the repo plugin's config alike.
+
 `workspaceConfig()` is short because it is the complete answer to "what is different
 about this agent's workspace". Everything else is inherited, and the alternative is a
 second copy of a thousand-line object drifting in whichever direction the one nobody

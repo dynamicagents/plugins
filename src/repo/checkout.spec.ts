@@ -35,14 +35,20 @@ const lost = (): GitAnswer => ({
  */
 function runner(script: Record<string, GitAnswer> = {}) {
   const ran: string[] = [];
-  const plain = async (args: string): Promise<GitAnswer> => {
+  const vars: Record<string, string>[] = [];
+  const plain = async (
+    args: string,
+    _cwd?: string,
+    env?: Record<string, string>
+  ): Promise<GitAnswer> => {
     ran.push(args);
+    if (env) vars.push(env);
     for (const [prefix, answer] of Object.entries(script)) {
       if (args.startsWith(prefix)) return answer;
     }
     return ok();
   };
-  return { plain, ran };
+  return { plain, ran, vars };
 }
 
 describe("resolveDefaultBranch", () => {
@@ -76,6 +82,7 @@ describe("resolveDefaultBranch", () => {
 describe("refreshCheckout", () => {
   const url = "https://github.com/owner/repo";
   const fetchOrigin = async () => ok("fetched");
+  const author = { name: "coder", email: "coder@example.invalid" };
 
   it("fetches and resets a clean checkout of the same repository", async () => {
     const { plain, ran } = runner({
@@ -88,6 +95,7 @@ describe("refreshCheckout", () => {
       dir: "/w/r",
       url,
       branch: undefined,
+      author,
       plain,
       fetchOrigin
     });
@@ -95,6 +103,75 @@ describe("refreshCheckout", () => {
     expect(out.branch).toBe("main");
     expect(out.message).toContain("reused the existing checkout");
     expect(ran.some((c) => c.startsWith("reset --hard"))).toBe(true);
+  });
+
+  /**
+   * The reason the identity is written here at all: a workspace outlives the
+   * configuration it was created under, and a checkout written once at clone
+   * time goes on committing under whatever name was current then.
+   */
+  it("rewrites the identity on every refresh", async () => {
+    const { plain, ran, vars } = runner({
+      "remote get-url": ok(`${url}\n`),
+      "status --porcelain": ok(""),
+      "symbolic-ref": ok("origin/main\n")
+    });
+
+    await refreshCheckout({
+      dir: "/w/r",
+      url,
+      branch: undefined,
+      author,
+      plain,
+      fetchOrigin
+    });
+
+    expect(ran).toContain('config user.name "$GIT_NAME"');
+    expect(ran).toContain('config user.email "$GIT_EMAIL"');
+    expect(vars).toContainEqual({ GIT_NAME: "coder" });
+    expect(vars).toContainEqual({ GIT_EMAIL: "coder@example.invalid" });
+  });
+
+  /**
+   * A refusal leaves the *tree* alone, which is what its sentence promises. An
+   * identity is not tree state, and a tree somebody is midway through changing
+   * is exactly the one about to spend a stale name.
+   */
+  it("rewrites it even where it then refuses the tree", async () => {
+    const { plain, ran } = runner({
+      "remote get-url": ok(`${url}\n`),
+      "status --porcelain": ok(" M src/a.ts\n")
+    });
+
+    await refreshCheckout({
+      dir: "/w/r",
+      url,
+      branch: undefined,
+      author,
+      plain,
+      fetchOrigin
+    });
+
+    expect(ran).toContain('config user.name "$GIT_NAME"');
+    expect(ran.some((c) => c.startsWith("reset"))).toBe(false);
+  });
+
+  /** Nothing is written to a directory holding some other repository. */
+  it("writes no identity into a checkout of another repository", async () => {
+    const { plain, ran } = runner({
+      "remote get-url": ok("https://github.com/owner/other\n")
+    });
+
+    await refreshCheckout({
+      dir: "/w/r",
+      url,
+      branch: undefined,
+      author,
+      plain,
+      fetchOrigin
+    });
+
+    expect(ran.some((c) => c.startsWith("config user."))).toBe(false);
   });
 
   /**
@@ -113,6 +190,7 @@ describe("refreshCheckout", () => {
       dir: "/w/r",
       url,
       branch: undefined,
+      author,
       plain,
       fetchOrigin
     });
@@ -138,6 +216,7 @@ describe("refreshCheckout", () => {
       dir: "/w/r",
       url,
       branch: undefined,
+      author,
       plain,
       fetchOrigin
     });
@@ -168,6 +247,7 @@ describe("refreshCheckout", () => {
         dir: "/w/r",
         url,
         branch: undefined,
+        author,
         plain,
         fetchOrigin
       });
@@ -187,6 +267,7 @@ describe("refreshCheckout", () => {
       dir: "/w/r",
       url,
       branch: undefined,
+      author,
       plain,
       fetchOrigin
     });
@@ -210,6 +291,7 @@ describe("refreshCheckout", () => {
       dir: "/w/r",
       url,
       branch: undefined,
+      author,
       plain,
       fetchOrigin
     });
@@ -229,6 +311,7 @@ describe("refreshCheckout", () => {
       dir: "/w/r",
       url,
       branch: undefined,
+      author,
       plain,
       fetchOrigin
     });
@@ -248,6 +331,7 @@ describe("refreshCheckout", () => {
       dir: "/w/r",
       url,
       branch: undefined,
+      author,
       plain,
       fetchOrigin: async () => failed("could not authenticate")
     });
@@ -272,6 +356,7 @@ describe("refreshCheckout", () => {
       dir: "/w/r",
       url,
       branch: "release",
+      author,
       plain,
       fetchOrigin
     });

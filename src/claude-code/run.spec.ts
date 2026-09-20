@@ -188,6 +188,47 @@ describe("buildLaunch", () => {
     expect(command).toContain(" --output-format stream-json --verbose");
   });
 
+  /**
+   * A session commits in repositories nothing configured — a superproject's
+   * submodules, a scratch clone — and amends and rebases in the one that is
+   * configured. The environment is what every git it starts inherits, and it
+   * outranks a checkout's own config.
+   */
+  it("attributes the session's commits to the configured identity", () => {
+    const { env } = launch({
+      author: { name: "coder", email: "coder@example.invalid" }
+    });
+    expect(env.GIT_AUTHOR_NAME).toBe("coder");
+    expect(env.GIT_AUTHOR_EMAIL).toBe("coder@example.invalid");
+    // Both halves: an amend keeps the author and stamps a fresh committer.
+    expect(env.GIT_COMMITTER_NAME).toBe("coder");
+    expect(env.GIT_COMMITTER_EMAIL).toBe("coder@example.invalid");
+  });
+
+  it("names no identity when the host configured none", () => {
+    expect(Object.keys(launch().env)).not.toContain("GIT_AUTHOR_NAME");
+  });
+
+  /**
+   * The four keys are one answer or they are nothing. A host that set part of
+   * the identity through `env` and the rest through `author` would produce a
+   * commit attributed to two people — the failure `author` exists to end.
+   */
+  it("keeps the identity whole against a host's own GIT_ keys", () => {
+    const { env } = launch({
+      author: { name: "coder", email: "coder@example.invalid" },
+      env: { GIT_AUTHOR_NAME: "somebody else" }
+    });
+    expect(env.GIT_AUTHOR_NAME).toBe("coder");
+    expect(env.GIT_COMMITTER_NAME).toBe("coder");
+  });
+
+  /** And a host that names no identity still gets its own keys through. */
+  it("leaves a host's GIT_ keys alone when it configured no identity", () => {
+    const { env } = launch({ env: { GIT_AUTHOR_NAME: "somebody else" } });
+    expect(env.GIT_AUTHOR_NAME).toBe("somebody else");
+  });
+
   it("passes the placeholder credential and never a real one", () => {
     expect(launch().env.CLAUDE_CODE_OAUTH_TOKEN).toBe(CREDENTIAL_PLACEHOLDER);
   });

@@ -23,6 +23,7 @@ import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflar
 import { MAX_TOOL_CALL_MS } from "@dynamicagents/core";
 import { ContainerTrust } from "./ca-trust.js";
 import { ContainerDeps } from "./container-deps.js";
+import { ContainerGitIdentity } from "./git-identity.js";
 import { InstallJob } from "./install-job.js";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 import { WorkspaceGitHost } from "./git-host.js";
@@ -90,6 +91,7 @@ import type { RepoGitResult } from "../../repo/index.js";
  * - `./install-job.ts` — when a dependency install runs, and every guard on it.
  * - `./sync.ts` — the host's half of syncing, which nothing else will do.
  * - `./ca-trust.ts` — making a container able to speak TLS.
+ * - `./git-identity.ts` — who a container's commits belong to.
  * - `./git-host.ts` — the operations that hold the forge credential.
  *
  * Each takes a small explicit seam, and that is the test: a module that needed
@@ -324,12 +326,19 @@ export interface WorkspaceGitConfig {
    */
   tokenBinding: string;
   /**
-   * Who a commit made on this side is attributed to.
+   * Who a commit is attributed to — on this side, and in the container.
    *
-   * The same pair the repo plugin writes into the checkout's own config at clone
-   * time, so a commit cannot be attributed differently depending on which side
-   * made it. A deployment's fallback for an unset binding belongs where that
-   * binding is read; this takes the resolved answer.
+   * Two things read it: this object's git client, and `./git-identity.ts`,
+   * which writes it into the container's system config so a repository the
+   * container made for itself is attributed rather than nameless.
+   *
+   * **The repo plugin is not one of them.** It resolves `RepoConfig.author`
+   * independently, with a generic fallback of its own, and nothing in either
+   * package checks the two agree — so a commit *can* be attributed differently
+   * depending on which side made it, and the only thing preventing that is a
+   * consumer answering both from one place. A deployment's fallback for an
+   * unset binding belongs where that binding is read; this takes the resolved
+   * answer.
    */
   author: { name: string; email: string };
 }
@@ -634,6 +643,19 @@ export abstract class WorkspaceObjectBase<
     onExit: () => void this.#containerGone()
   });
 
+  /**
+   * The identity every repository in the container starts out attributed to.
+   *
+   * See `./git-identity.ts` for why the container needs one of its own when
+   * `/repo` already configures the checkouts it clones.
+   */
+  readonly #gitIdentity = new ContainerGitIdentity({
+    workspace: () => this.#workspace,
+    author: () => this.#cfg.git.author,
+    tag: () => this.#tag,
+    id: () => this.ctx.id.toString()
+  });
+
   /** Where installs write — see `./container-deps.ts`. */
   readonly #deps = new ContainerDeps({
     workspace: () => this.#workspace,
@@ -645,6 +667,7 @@ export abstract class WorkspaceObjectBase<
   /** Everything believed about a container, dropped when it goes. */
   async #containerGone(): Promise<void> {
     this.#trust.forget();
+    this.#gitIdentity.forget();
     this.#deps.forget();
     await this.#install.containerGone();
   }
@@ -713,6 +736,7 @@ export abstract class WorkspaceObjectBase<
     // Before the first exec, which pushes the whole tree into a new container.
     await this.#purgeSyncedTrees();
     await this.#trust.ensure();
+    await this.#gitIdentity.ensure();
     const found = await this.#deps.ensure(await this.#install.dir());
     if (found) await this.#install.reconcile(found.marker);
   }

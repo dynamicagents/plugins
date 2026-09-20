@@ -87,8 +87,10 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         // that is inert; interpolated into the command string, none of it is.
         const result = await plain(`commit -m "$GIT_COMMIT_MESSAGE"`, dir, {
           GIT_COMMIT_MESSAGE: message,
-          // On the commit as well as in the checkout's config, which only a
-          // checkout `repo_clone` made has: without it git refuses to commit.
+          // On the commit as well as in the checkout's config, and this is
+          // the copy that is current: config is written when a checkout is set
+          // up, and the environment is read at the commit. A workspace that
+          // outlived a change of identity commits under the new one.
           GIT_AUTHOR_NAME: author.name,
           GIT_AUTHOR_EMAIL: author.email,
           GIT_COMMITTER_NAME: author.name,
