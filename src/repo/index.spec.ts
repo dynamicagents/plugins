@@ -1764,97 +1764,191 @@ describe("a review, and answering it", () => {
   });
 
   describe("repo_pr_review_status", () => {
-    it("reports a review still running", async () => {
-      const spy = forgeStub({
-        rest: { "/requested_reviewers": { users: [{ login: "Copilot" }] } }
-      });
-      try {
-        const result = await run(
-          tools(recorder().exec),
-          "repo_pr_review_status",
-          { dir: "/w/r", number: 42 }
-        );
-        expect(result).toContain("has not finished");
-      } finally {
-        spy.mockRestore();
+    /**
+     * The review requests as GraphQL returns them, which is the only place a
+     * requested *app* appears — REST's `requested_reviewers` has `users` and
+     * `teams` and nowhere to put a Bot.
+     */
+    const reviewRequests = (...names: string[]) => ({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewRequests: {
+              nodes: names.map((name) => ({
+                requestedReviewer: { login: name }
+              }))
+            }
+          }
+        }
       }
     });
 
+    const status =
+      (opts: Parameters<typeof forgeStub>[0]) => async (reviewer?: string) => {
+        const spy = forgeStub(opts);
+        try {
+          return await run(tools(recorder().exec), "repo_pr_review_status", {
+            dir: "/w/r",
+            number: 42,
+            ...(reviewer ? { reviewer } : {})
+          });
+        } finally {
+          spy.mockRestore();
+        }
+      };
+
+    it("reports a review still running", async () => {
+      // Under the login the request carries: a Bot, which is why this cannot be
+      // asked of REST at all.
+      const result = await status({
+        graphql: () => reviewRequests("copilot-pull-request-reviewer")
+      })();
+      expect(result).toContain("has not finished");
+      expect(result).not.toContain("waiting will not change it");
+    });
+
     it("reports a review that finished", async () => {
-      const spy = forgeStub({
+      const result = await status({
+        graphql: () => reviewRequests(),
         rest: {
-          "/requested_reviewers": { users: [] },
           "/pulls/42/reviews": [
             {
-              user: { login: "Copilot" },
+              // The spelling `pulls/{n}/reviews` returns — not the
+              // `copilot-pull-request-reviewer` of the request, nor the
+              // `Copilot` the caller asks about.
+              user: { login: "copilot-pull-request-reviewer[bot]" },
               state: "COMMENTED",
               submitted_at: "2026-09-17T10:00:00Z"
             }
           ]
         }
-      });
-      try {
-        const result = await run(
-          tools(recorder().exec),
-          "repo_pr_review_status",
-          { dir: "/w/r", number: 42 }
-        );
-        expect(result).toContain("reviewed");
-        expect(result).toContain("2026-09-17T10:00:00Z");
-        // A review can finish having left nothing, so "finished" is never the
-        // same answer as "had something to say".
-        expect(result).toContain("repo_pr_threads");
-      } finally {
-        spy.mockRestore();
+      })();
+      expect(result).toContain("reviewed");
+      expect(result).toContain("2026-09-17T10:00:00Z");
+      // A review can finish having left nothing, so "finished" is never the
+      // same answer as "had something to say".
+      expect(result).toContain("repo_pr_threads");
+    });
+
+    it("answers the same for every login one account arrives under", async () => {
+      // The whole defect this guards is an *inverted* answer, not a missed one:
+      // compared exactly, the request matches and the review never does, so the
+      // tool reports "none pending — waiting will not change it" at precisely
+      // the moment the review lands. That is where a polling caller stops.
+      for (const login of [
+        "Copilot",
+        "copilot-pull-request-reviewer",
+        "copilot-pull-request-reviewer[bot]"
+      ]) {
+        const result = await status({
+          graphql: () => reviewRequests(),
+          rest: {
+            "/pulls/42/reviews": [
+              {
+                user: { login },
+                state: "COMMENTED",
+                submitted_at: "2026-09-17T10:00:00Z"
+              }
+            ]
+          }
+        })();
+        expect(result, login).toContain("reviewed");
+        expect(result, login).not.toContain("waiting will not change it");
       }
+    });
+
+    it("does not take another account that shares the first word", async () => {
+      // `copilot-swe-agent` opens pull requests rather than reviewing them, and
+      // `copilotfan` is a person. Neither is the review bot, so a `copilot-`
+      // prefix would answer a question about the reviewer with somebody else.
+      for (const login of ["copilot-swe-agent[bot]", "copilotfan"]) {
+        const result = await status({
+          graphql: () => reviewRequests(),
+          rest: {
+            "/pulls/42/reviews": [{ user: { login }, state: "COMMENTED" }]
+          }
+        })();
+        expect(result, login).toContain("waiting will not change it");
+      }
+    });
+
+    it("strips the `[bot]` suffix for an app that is not the reviewer", async () => {
+      // The normalisation is advertised for any app, and the Copilot fixtures
+      // cannot prove it: they would pass through the alternation above even if
+      // stripping stopped working for everybody else.
+      const result = await status({
+        graphql: () => reviewRequests(),
+        rest: {
+          "/pulls/42/reviews": [
+            {
+              user: { login: "dependabot[bot]" },
+              state: "COMMENTED",
+              submitted_at: "2026-09-17T10:00:00Z"
+            }
+          ]
+        }
+      })("dependabot");
+      expect(result).toContain("reviewed");
+      expect(result).not.toContain("waiting will not change it");
+    });
+
+    it("still finds a reviewer asked for by team", async () => {
+      // A team has no login, only a slug — the union's third arm, and the reason
+      // the request is read as login-or-slug rather than login alone.
+      const asked = status({
+        graphql: () => ({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewRequests: {
+                  nodes: [{ requestedReviewer: { slug: "platform" } }]
+                }
+              }
+            }
+          }
+        }),
+        rest: { "/pulls/42/reviews": [] }
+      });
+      expect(await asked("platform")).toContain("has not finished");
+      // And the team is not everybody: the default reviewer is still waiting on
+      // nothing.
+      expect(await asked()).toContain("waiting will not change it");
     });
 
     it("lets a pending request outrank a review already on the pull request", async () => {
       // The ordering that makes a *re-review* read correctly. GitHub clears the
       // request when a review lands and writes a new one when another is asked
       // for, so both present means the old review is not the answer.
-      const spy = forgeStub({
+      const result = await status({
+        graphql: () => reviewRequests("copilot-pull-request-reviewer"),
         rest: {
-          "/requested_reviewers": { users: [{ login: "Copilot" }] },
           "/pulls/42/reviews": [
-            { user: { login: "Copilot" }, state: "COMMENTED" }
+            {
+              user: { login: "copilot-pull-request-reviewer[bot]" },
+              state: "COMMENTED"
+            }
           ]
         }
-      });
-      try {
-        const result = await run(
-          tools(recorder().exec),
-          "repo_pr_review_status",
-          { dir: "/w/r", number: 42 }
-        );
-        expect(result).toContain("has not finished");
-      } finally {
-        spy.mockRestore();
-      }
+      })();
+      expect(result).toContain("has not finished");
     });
 
     it("does not count a draft review as finished", async () => {
       // A PENDING review is one its author has not sent, and it is visible to
       // whoever holds the token that wrote it. Counted as finished, it reports a
       // review nobody has read — which a poll loop acts on by stopping.
-      const spy = forgeStub({
+      const result = await status({
+        graphql: () => reviewRequests(),
         rest: {
-          "/requested_reviewers": { users: [] },
           "/pulls/42/reviews": [
-            { user: { login: "Copilot" }, state: "PENDING" }
+            {
+              user: { login: "copilot-pull-request-reviewer[bot]" },
+              state: "PENDING"
+            }
           ]
         }
-      });
-      try {
-        const result = await run(
-          tools(recorder().exec),
-          "repo_pr_review_status",
-          { dir: "/w/r", number: 42 }
-        );
-        expect(result).not.toContain("reviewed");
-      } finally {
-        spy.mockRestore();
-      }
+      })();
+      expect(result).not.toContain("reviewed");
     });
 
     it("says it does not know when the reviews it read were only the oldest", async () => {
@@ -1862,43 +1956,36 @@ describe("a review, and answering it", () => {
       // *newer* than everything read — which is exactly the review being waited
       // for. A truncated read cannot answer, and must not answer "waiting will
       // not help": that is the one reply a caller ends its polling on.
-      const spy = forgeStub({
+      const result = await status({
+        graphql: () => reviewRequests(),
         rest: {
-          "/requested_reviewers": { users: [] },
           "/pulls/42/reviews": Array.from({ length: 100 }, () => ({
             user: { login: "someone-else" },
             state: "COMMENTED"
           }))
         }
-      });
-      try {
-        const result = await run(
-          tools(recorder().exec),
-          "repo_pr_review_status",
-          { dir: "/w/r", number: 42 }
-        );
-        expect(result).toContain("unknown");
-        expect(result).not.toContain("waiting will not change it");
-      } finally {
-        spy.mockRestore();
-      }
+      })();
+      expect(result).toContain("unknown");
+      expect(result).not.toContain("waiting will not change it");
     });
 
     it("says waiting will not help when nobody was asked", async () => {
-      const spy = forgeStub({
-        rest: { "/requested_reviewers": { users: [] }, "/pulls/42/reviews": [] }
-      });
-      try {
-        const result = await run(
-          tools(recorder().exec),
-          "repo_pr_review_status",
-          { dir: "/w/r", number: 42 }
-        );
-        // The one answer a poll loop must not read as "not yet".
-        expect(result).toContain("waiting will not change it");
-      } finally {
-        spy.mockRestore();
-      }
+      const result = await status({
+        graphql: () => reviewRequests(),
+        rest: { "/pulls/42/reviews": [] }
+      })();
+      // The one answer a poll loop must not read as "not yet".
+      expect(result).toContain("waiting will not change it");
+    });
+
+    it("does not read an unanswerable query as nobody having been asked", async () => {
+      // A GraphQL failure answers 200 with `errors`, so an unguarded read turns
+      // a permission problem into "nobody was ever asked" — the terminal reply.
+      const result = await status({
+        graphql: () => ({ errors: [{ message: "Resource not accessible" }] })
+      })();
+      expect(result).not.toContain("waiting will not change it");
+      expect(result).toContain("Resource not accessible");
     });
   });
 
