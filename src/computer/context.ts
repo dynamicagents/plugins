@@ -31,7 +31,7 @@ export const DEFAULT_CWD = "/workspace";
  *
  * An interval rather than a subscription because the status lives in another
  * Durable Object with no event to wait on. Never slept past the gate itself —
- * see `awaitInstall`.
+ * see {@link awaitAdvisories}.
  */
 const INSTALL_POLL_MS = 3_000;
 

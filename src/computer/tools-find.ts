@@ -136,7 +136,7 @@ export function findTools(ctx: ComputerContext): ToolSet {
      * reads the Durable Object's SQLite, so it answers while the container is
      * being replaced or an install is still running, which is exactly the window
      * the install gate leaves a subagent with nothing to do. It is also why this
-     * tool is not gated: see {@link awaitInstall}.
+     * tool is not gated: see {@link file://./context.ts awaitAdvisories}.
      *
      * Two lesser reasons that still matter. The query arrives as a value rather
      * than through `shellQuote` and a shell that would re-parse it. And the result
