@@ -4,11 +4,8 @@ import { memStore } from "../../test/arc-agi/helpers.js";
 import type { RecipeExecutionResult } from "@dynamicagents/core/subtasks";
 
 /**
- * The plugin's own seams — leasing and enrichment — as the parent drives them.
- *
- * These are the four leaks the predecessor kept in its Durable Object, so what
- * is asserted here is the behaviour that used to live there: that concurrent
- * branches share one card, that a play is opened once, and that a report never
+ * The plugin's own seams — leasing and enrichment — as the parent drives them:
+ * concurrent branches share one card, a play is opened once, and a report never
  * carries a score belonging to a different card.
  */
 

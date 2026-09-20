@@ -13,19 +13,18 @@ export const ARC_GAME_TYPE = "arc-game";
  * a turn budget twice the baseline — a play is a long sequence of cheap decisions,
  * and 20 turns bought roughly ten game actions once inspection was paid for.
  *
- * It used to be "the long recipe", budgeted at 1,000 turns on the reasoning that
- * 25 turns per chunk made 40 durable chunks. That arithmetic assumed a turn under
- * ten seconds. A turn here is a reasoning model plus an ARC HTTP round trip, so
- * real runs took 70-100 chunks, blew the per-branch cap, and were *failed* after
- * hours of unattended play rather than being asked to report. The budget is now
- * time and turns, both enforced directly, and a play ends through the graceful
- * summary — a terminal report with the metrics footer.
+ * **Budget the turns, never the chunks.** A turn here is a reasoning model plus
+ * an ARC HTTP round trip, nothing like the sub-ten-second turn a chunk count is
+ * implicitly sized against: 1,000 turns sliced 25 to a chunk is 40 chunks on
+ * paper and 70-100 in a real run, which blows the per-branch cap and *fails* a
+ * play after hours rather than asking it to report. Time and turns are both
+ * enforced directly, and a play ends through the graceful summary — a terminal
+ * report with the metrics footer.
  *
- * - `historyWindow` bounds context, and it is now the model's *only* memory: the
- *   workspace tools are gone (see below), so a plan that scrolls out of it is
- *   gone. Note it counts *assistant messages* — one per tool call, not one per
- *   game action — so a play spends it several times faster than the number
- *   suggests.
+ * - `historyWindow` bounds context, and it is the model's *only* memory: with no
+ *   workspace tools (see below) a plan that scrolls out of it is gone. Note it
+ *   counts *assistant messages* — one per tool call, not one per game action —
+ *   so a play spends it several times faster than the number suggests.
  * - `reportMetrics` appends the turns/model-calls/wall-clock footer the user
  *   asked to see.
  *
@@ -33,13 +32,12 @@ export const ARC_GAME_TYPE = "arc-game";
  * state kept in the workspace), code-validated by
  * `validateRecipe`/`buildRecipeTools`.
  *
- * It used to also carry `workspace`, on the theory that a small history window
- * needs a file store behind it. Two logged plays say otherwise: `ws_read` was
- * never called once, and the three `ws_write` calls between them were a
- * scratchpad for arithmetic — a use that costs a turn per note and now belongs in
- * `arc_act`'s `note` field, which costs none and stays in the model's own history.
- * The session file is unaffected: the family reaches the workspace through the
- * `ToolFamilyContext` core hands it, not through the tools the model can see.
+ * **No `workspace` family, despite the small history window.** Across two logged
+ * plays `ws_read` was never called and the three `ws_write` calls were a
+ * scratchpad for arithmetic — a note costing a turn apiece, which `arc_act`'s
+ * `note` field carries for free and keeps in the model's own history. The
+ * session file is unaffected: the family reaches the workspace through the
+ * `ToolFamilyContext` core hands it, not through tools the model can see.
  */
 export const ARC_GAME_RECIPE: ResolvedRecipe = {
   key: ARC_GAME_TYPE,

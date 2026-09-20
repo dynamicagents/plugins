@@ -4,7 +4,6 @@ import {
   colorHistogram,
   colorName,
   colorSpans,
-  connectedComponents,
   describeBox,
   describeCell,
   diffGrids,
@@ -237,27 +236,6 @@ describe("locateComponents", () => {
   });
 });
 
-describe("connectedComponents", () => {
-  it("counts 4-connected same-color components, skipping background 0", () => {
-    const summary = connectedComponents(GRID);
-    const byColor = new Map(summary.map((s) => [s.color, s]));
-    expect(byColor.get(1)).toEqual({ color: 1, components: 1, largest: 3 });
-    expect(byColor.get(3)).toEqual({ color: 3, components: 1, largest: 2 });
-    expect(byColor.get(2)).toEqual({ color: 2, components: 1, largest: 1 });
-    expect(byColor.has(0)).toBe(false);
-  });
-
-  it("separates disconnected same-color regions", () => {
-    const grid = [
-      [1, 0, 1],
-      [0, 0, 0],
-      [1, 0, 1]
-    ];
-    const c1 = connectedComponents(grid).find((s) => s.color === 1);
-    expect(c1).toEqual({ color: 1, components: 4, largest: 1 });
-  });
-});
-
 describe("renderShapes", () => {
   it("names each region and says where it is", () => {
     expect(renderShapes(GRID)).toBe(
@@ -313,9 +291,8 @@ describe("renderShapes", () => {
     });
 
     it("gives the walkable floor the same treatment, so corridors are named", () => {
-      // The old line asserted a 50×50 open arena of which 46% was wall — the
-      // more dangerous of the two, since a box that says nothing at least does
-      // not mislead.
+      // A bounding box here would claim a 50×50 open arena of which 46% is
+      // wall — worse than saying nothing, since it misleads rather than omits.
       expect(out).not.toContain("neutral: rows 5-54, cols 9-58");
       expect(out).toContain(
         "neutral: 1380 cells in 4 region(s), 48% of rows 5-62, cols 9-58"

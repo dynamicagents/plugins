@@ -241,20 +241,17 @@ export function triage(config: TriageConfig): AgentPlugin {
   } = config;
 
   /**
-   * Built on first use, never at module scope. Cloudflare evaluates module scope
-   * during `wrangler deploy` to validate the new version, and bindings are not
-   * populated at that point — constructing eagerly makes `createWorkersAI` throw
-   * "you must provide either a binding or credentials". The same laziness
-   * protects a host that builds its runtime early.
+   * Built on first use, never at module scope, for the reason
+   * {@link file://../recall/index.ts} gives on its own provider — and the
+   * gateway goes on the model, never on the provider, for the reason it gives
+   * there too.
+   *
+   * The provider is what is memoized, not the model: the model carries the
+   * channel of the turn it judges, which differs turn to turn.
    *
    * No fallback model: triage fails open, so a second attempt on a different
    * model buys nothing a `true` does not already buy, at twice the latency in
    * front of every turn.
-   *
-   * The provider is what is memoized, not the model: the model carries the
-   * channel of the turn it judges, which differs turn to turn. The gateway goes
-   * on the model and never on the provider — see core's Workers AI runtime for
-   * why setting it on both discards the model's.
    */
   let provider: ReturnType<typeof createWorkersAI> | undefined;
   const classifier = (history: SessionMessage[]): LanguageModel => {
@@ -276,14 +273,13 @@ export function triage(config: TriageConfig): AgentPlugin {
     /**
      * Building the classifier is inside the guarantee, not in front of it.
      *
-     * `shouldReply` catches its own failures, but it can only catch what happens
-     * after it is entered — and `createWorkersAI` throws synchronously when the
-     * binding is missing, before the call is ever made. That threw straight out
-     * of this hook, which is the one outcome the whole design forbids: a triage
-     * outage must degrade to *running the turn*, never to a silent agent.
-     * (`createAgentRuntime` also treats a rejected gate as `true`, so the agent
-     * stayed correct — but a plugin that documents fail-open should not be
-     * relying on its host to make that true.)
+     * `shouldReply` catches its own failures, but only what happens after it is
+     * entered — and `createWorkersAI` throws synchronously when the binding is
+     * missing, before the call is ever made. A throw out of this hook is the one
+     * outcome the whole design forbids: a triage outage must degrade to *running
+     * the turn*, never to a silent agent. A host that also treats a rejected gate
+     * as `true` is a second layer, not a substitute — a plugin documenting
+     * fail-open cannot rely on its host to make that true.
      */
     shouldHandleTurn: async ({ history }) => {
       let model: LanguageModel;

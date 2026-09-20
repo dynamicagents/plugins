@@ -33,9 +33,8 @@ import {
  *
  * The run is spawned under an exec id and left running. Each chunk re-attaches,
  * drains for a bounded window, and returns. That shape is not a preference: a
- * drain owned by an RPC that returns in milliseconds gets disposed mid-command,
- * which is exactly how the dependency install used to die halfway through
- * `npm ci`.
+ * drain owned by an RPC that returns in milliseconds gets disposed mid-command
+ * — the same way a dependency install dies halfway through `npm ci`.
  *
  * ## The cursor
  *
@@ -98,11 +97,10 @@ export function execIdFor(subtaskId: string | number): string {
 /**
  * What the container is given instead of a credential.
  *
- * Claude Code does not validate it locally — proven in the Phase 0c spike, where
- * a run with this exact value succeeded and the proxy log confirmed the
- * container only ever sent the placeholder. The egress gateway swaps in the real
- * credential on the way out, so a `postinstall` script that dumps the
- * environment learns this and nothing else.
+ * Claude Code does not validate it locally: a run with this exact value
+ * succeeds, and the container only ever sends the placeholder. The egress
+ * gateway swaps in the real credential on the way out, so a `postinstall` script
+ * that dumps the environment learns this and nothing else.
  *
  * Shaped like a real token deliberately: something that looks obviously fake
  * invites a future reader to "fix" it by putting the real one there.
@@ -134,13 +132,8 @@ export interface LaunchOptions {
    */
   effort?: EffortLevel;
   /**
-   * Caps on Claude Code's own subagent tree.
-   *
-   * These steer rather than enforce, and the distinction matters: the inner
-   * tree is invisible to Dynamic Agents' scheduler and unreachable by its
-   * cancellation sweep, so a cap it chooses to ignore has no backstop. What
-   * actually bounds the spend is the egress gateway, which every inner call
-   * also crosses.
+   * Caps on Claude Code's own subagent tree — advisory, for the reason
+   * {@link file://./config.ts ClaudeCodeConfig.maxSubagentDepth} gives.
    */
   maxSubagentDepth?: number;
   maxConcurrentSubagents?: number;
@@ -181,27 +174,20 @@ export interface Launch {
  * container is already an arbitrary-code-execution environment by design — the
  * install runs the repo's `postinstall`, the agent runs its test suite. Stripping
  * one door while the others stand open buys nothing and costs the agent its
- * context. (§4 of the design plan, cancelled 2026-08-21.)
+ * context.
  *
- * No `ANTHROPIC_BASE_URL` either, and that one is a genuine simplification over
- * the spike: `http-gateway` egress intercepts transparently, so the client talks
- * to the real hostname and the gateway sees it. Nothing has to be told to use a
- * proxy, which means nothing in the container can be told *not* to.
+ * No `ANTHROPIC_BASE_URL` either: `http-gateway` egress intercepts
+ * transparently, so the client talks to the real hostname and the gateway sees
+ * it. Nothing has to be told to use a proxy, which means nothing in the
+ * container can be told *not* to.
  *
  * ## `--permission-mode`, and the root guard behind it
  *
- * `-p` is headless. There is no terminal, so there is nobody to answer a
- * permission prompt — and Claude Code's headless path does not wait for one, it
- * **auto-denies**. Left unset the mode is `default`, and `default` gates Write,
- * Edit and every Bash command. A session in that state reads the repository
- * perfectly and cannot change one byte of it, while reporting prose that reads
- * like considered reluctance rather than a blocked tool. That cost this
- * deployment a day of "the container is fixed but nothing lands".
- *
- * So the mode is passed explicitly, and {@link DEFAULT_PERMISSION_MODE} is
- * `bypassPermissions` — see
- * {@link file://./config.ts ClaudeCodeConfig.permissionMode} for why the
- * permissive value is the correct default here rather than a concession.
+ * The mode is always passed explicitly, never left to the CLI's `default` — see
+ * {@link file://./config.ts ClaudeCodeConfig.permissionMode} for what an
+ * unset mode does to a headless session, and why
+ * {@link DEFAULT_PERMISSION_MODE} is the permissive value rather than a
+ * concession.
  *
  * **`IS_SANDBOX=1` ships in the same branch as the flag, and separating the two
  * breaks a session harder than passing no flag at all.** The container runs as
@@ -420,11 +406,10 @@ export interface DrainOptions {
    * Called with each note as it is parsed, rather than with all of them when the
    * window ends.
    *
-   * Notes are still returned on the outcome as well — a caller that does not
-   * pass this keeps exactly the old behaviour — so a caller that posts from here
-   * must drop what it is handed back, or the same note is posted twice. The keys
-   * are positional, so the gatekeeper would dedupe it, but paying for the second
-   * post to be discarded is not a plan.
+   * Notes are still returned on the outcome as well, so a caller that posts from
+   * here must drop what it is handed back, or the same note is posted twice. The
+   * keys are positional, so the gatekeeper would dedupe it, but paying for the
+   * second post to be discarded is not a plan.
    *
    * **Never awaited inside the read loop.** A post is a signed round trip to the
    * gatekeeper — measured at ~700 ms — and awaiting one per note would stall
@@ -970,9 +955,9 @@ const STDERR_MAX = 2_000;
  * gives up prints one line and exits, making that line the last thing there is.
  * Keeping both ends costs a few hundred characters and removes the guess.
  *
- * Not a re-implementation of `/computer`'s `truncateOutput`: reaching across the
- * subpath boundary for it would merge two realms `verify:exports` keeps apart,
- * which is the same reason `/repo` carries its own.
+ * Not `truncateOutput`, and the difference is the marker: this runs on every
+ * append, so the cut has to stay a single character rather than a sentence that
+ * would be re-cut and nested on the next one.
  */
 function boundStderr(text: string): string {
   if (text.length <= STDERR_MAX) return text;

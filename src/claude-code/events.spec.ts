@@ -40,10 +40,9 @@ const assistant = (text: string, extra: Record<string, unknown> = {}) =>
 /**
  * A `result` line with the exact field names Claude Code 2.1.238 emits.
  *
- * Copied from the Phase 0b burst (`call-1.json`, 2026-08-20) rather than
- * invented, because every one of these keys is a place a rename would break the
- * cost accounting silently — the run would still succeed and simply report
- * spending nothing.
+ * Copied from a recorded run rather than invented, because every one of these
+ * keys is a place a rename would break the cost accounting silently — the run
+ * would still succeed and simply report spending nothing.
  */
 const RESULT = {
   type: "result",
@@ -405,9 +404,9 @@ describe("toProgress", () => {
   });
 
   /**
-   * The actual bug this pair of tests guards: a turn that only calls tools —
-   * no text block at all — used to post as a bare `[Bash]`, one Slack message
-   * per tool call with nothing a reader could act on. It must produce no note.
+   * A turn that only calls tools — no text block at all — must produce no note.
+   * Rendering the tool name instead posts a bare `[Bash]` per call, one Slack
+   * message each, with nothing a reader can act on.
    */
   it("says nothing for a turn that only calls tools", () => {
     const buffer = line({

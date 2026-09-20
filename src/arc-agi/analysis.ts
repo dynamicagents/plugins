@@ -185,12 +185,6 @@ export interface Component extends Box {
   size: number;
 }
 
-export interface ComponentSummary {
-  color: number;
-  components: number;
-  largest: number;
-}
-
 /**
  * Every 4-connected same-color region, with its bounding box, largest first.
  * Skips {@link BACKGROUND_COLOR}.
@@ -255,42 +249,18 @@ export function locateComponents(grid: number[][]): Component[] {
 }
 
 /**
- * Summarize components per color: how many, and the largest. Derived from
- * {@link locateComponents} so only one flood fill ever runs.
- */
-export function connectedComponents(grid: number[][]): ComponentSummary[] {
-  const perColor = new Map<number, { components: number; largest: number }>();
-  for (const comp of locateComponents(grid)) {
-    const entry = perColor.get(comp.color) ?? { components: 0, largest: 0 };
-    entry.components++;
-    entry.largest = Math.max(entry.largest, comp.size);
-    perColor.set(comp.color, entry);
-  }
-  return [...perColor.entries()]
-    .map(([color, v]) => ({
-      color,
-      components: v.components,
-      largest: v.largest
-    }))
-    .sort((x, y) => y.components - x.components);
-}
-
-/**
  * How much of its bounding box a region actually occupies, 0–1.
  *
- * Boxes are well formed by construction wherever this is used: every caller
- * passes either a {@link Component} from {@link locateComponents} or a
- * {@link unionBox} of those, and a flood fill cannot produce `bottom < top`. So
- * `area` is always at least 1, and the zero-area branch below is unreachable —
- * kept only so a malformed box degrades to 0 instead of dividing by zero.
+ * Every caller passes a {@link Component} from {@link locateComponents} or a
+ * {@link unionBox} of those, and a flood fill cannot produce `bottom < top`, so
+ * `area` is at least 1 and there is nothing to guard against dividing by.
  *
  * The result is deliberately **not** clamped into 0–1. An out-of-range value here
  * could only mean a caller broke that invariant, and the way to learn that is a
  * region classified absurdly, not a number quietly corrected into looking sane.
  */
 export function fillRatio(box: Box, size: number): number {
-  const area = (box.bottom - box.top + 1) * (box.right - box.left + 1);
-  return area === 0 ? 0 : size / area;
+  return size / ((box.bottom - box.top + 1) * (box.right - box.left + 1));
 }
 
 /**
@@ -421,12 +391,12 @@ const SPRAWL_COLORS = 3;
  *
  * A bounding box describes a region only when the region roughly fills it. That
  * holds for the movable pieces and fails for exactly the two things a route
- * depends on: on a real `ls20` board the model was told `off-black: rows 0-63,
- * cols 0-63 (2129 cells)` for the whole maze and `neutral: rows 5-54, cols 9-58
- * (1354 cells)` for the whole floor, both a shade over half-filled. The first says
- * nothing; the second is worse, asserting a 50×50 open arena of which 46% is wall.
- * Blind to both, the play read its route off the boxes and walked into walls, then
- * spent a dozen turns rebuilding the maze through 11×11 `region` peepholes.
+ * depends on: on a real `ls20` board the maze boxes as `off-black: rows 0-63,
+ * cols 0-63 (2129 cells)` and the floor as `neutral: rows 5-54, cols 9-58 (1354
+ * cells)`, both a shade over half-filled. The first says nothing; the second is
+ * worse, asserting a 50×50 open arena of which 46% is wall — and a play reading
+ * its route off those boxes walks into walls, then spends a dozen turns
+ * rebuilding the maze through 11×11 `region` peepholes.
  *
  * So a region that sprawls is rendered as {@link colorSpans} instead — every row
  * band and the columns it occupies, which is the same fact at a resolution that
@@ -675,11 +645,9 @@ export function matchShapes(
  *
  * A click game is the case this exists for. Nothing on such a board ever travels,
  * so both earlier passes — which pair within a color — leave every changed block
- * as a `gone` and an `appeared` at the same coordinates, and a whole play reads as
- * things vanishing and other things materializing where they stood. The logged
- * `ft09` play was told `blue 6×6 at rows 36-41, cols 36-41 is gone; red 6×6
- * appeared at rows 36-41, cols 36-41` twenty times and had to work out for itself,
- * across several turns, that a click toggles a block's color.
+ * as a `gone` and an `appeared` at the same coordinates: `blue 6×6 at rows 36-41,
+ * cols 36-41 is gone; red 6×6 appeared at rows 36-41, cols 36-41`, twenty times
+ * over, with the model left to work out for itself that a click toggles a colour.
  *
  * Box and size together are strong evidence and not proof — two different shapes
  * can share a bounding box and a cell count without sharing a cell — but the
@@ -745,9 +713,8 @@ function describeDestination(change: MovedShape): string {
  * *blocked or refused*: it leads a step only when everything else the delta holds
  * is a {@link ShapeChange} of kind `resized`, which is a counter or a bar doing
  * its own bookkeeping. A step that repainted a block, or made one appear, changed
- * the board — no object travelled, and saying so as `nothing moved` told a logged
- * `ft09` play that twenty clicks which each toggled a 36-cell block had been
- * refused.
+ * the board — no object travelled, and reporting that as `nothing moved` tells a
+ * click game that twenty clicks which each toggled a 36-cell block were refused.
  *
  * Null means *this view has nothing to say* — either no shape can be paired
  * across the frames, or so many changed that they are a repaint
@@ -979,12 +946,11 @@ export function renderGrid(grid: number[][]): string {
  * `firstCol + i`. Padding off-grid columns with spaces instead would shift that
  * mapping by up to `radius` near the left edge.
  *
- * The header used to be the only thing to count from, on the reasoning that a
- * window this narrow does not need a ruler. Logs disagree: asked to place a cell
- * in an 11-wide window, the model counted the characters by hand and got them
- * wrong — "cols 34-38, 5 chars wait that's 10... hmm" — then reasoned on the wrong
- * columns. So the window is ruled too, at {@link REGION_RULER_STEP} rather than
- * {@link renderGrid}'s tens, which a window this size can miss entirely.
+ * **The window is ruled, not just headed.** A model asked to place a cell in an
+ * 11-wide window counts the characters by hand and gets them wrong, then reasons
+ * on the columns it miscounted — so narrow is exactly where the ruler is needed.
+ * It steps at {@link REGION_RULER_STEP} rather than {@link renderGrid}'s tens,
+ * which a window this size can miss entirely.
  */
 export function renderRegion(
   grid: number[][],

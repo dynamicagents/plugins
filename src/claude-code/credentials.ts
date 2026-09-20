@@ -5,15 +5,12 @@
  * ## Why a pool rather than a budget
  *
  * A Claude subscription has two limits that matter here: a rolling 5-hour
- * session bucket and a weekly one. Neither is readable, and 0.5.0 tried to stay
- * under them by *estimating* spend — a counter in dollars, a cap, and a gate
- * that refused to start work when the counter got high.
- *
- * That was the wrong instrument. The estimate is a guess about a bucket nobody
- * can see, and it only moved when a run *ended* (usage is learned from the
- * terminal `result` event), so it was never a cap on spend at all — only a gate
- * on starting. Meanwhile the bucket itself says so, precisely, the moment it is
- * empty: Anthropic answers `429`.
+ * session bucket and a weekly one. Neither is readable, so staying under them by
+ * *estimating* spend is the wrong instrument twice over — the estimate is a
+ * guess about a bucket nobody can see, and it only moves when a run *ends*,
+ * since usage is learned from the terminal `result` event. It is never a cap on
+ * spend, only a gate on starting. The bucket itself says so precisely the moment
+ * it is empty: Anthropic answers `429`.
  *
  * So this module does not predict. It **detects and routes around**: the
  * credential becomes an ordered pool, the gateway uses the first usable entry,

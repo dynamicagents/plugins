@@ -2,6 +2,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { definePlugin } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
+import { truncateOutput } from "../shared/truncate.js";
 
 /**
  * `@dynamicagents/plugins/scratch` — a place to work that is not a repository.
@@ -43,6 +44,9 @@ import type { AgentPlugin } from "@dynamicagents/core";
  * A host that wires neither still gets a working scratchpad, as long as its
  * workspace is not keyed per repository.
  */
+
+/** Bounding what reaches the model — see `../shared/truncate.ts`. */
+export { truncateOutput };
 
 /** Where a scratchpad lives, unless the host says otherwise. */
 export const DEFAULT_SCRATCH_DIR = "/workspace/scratch";
@@ -165,27 +169,6 @@ export interface ScratchConfig {
    * Returning nothing means "no opinion", which is treated as ready.
    */
   afterOpen?: (scratch: Scratchpad) => Promise<ScratchReadiness | void>;
-}
-
-/**
- * Bound what reaches the model, keeping both ends.
- *
- * A copy rather than an import, for the reason {@link ScratchExec} is injected:
- * `verify:exports` fails any subpath that reaches a sibling's files, and `/repo`
- * carries the same copy for the same reason.
- */
-export function truncateOutput(text: string, max: number): string {
-  if (text.length <= max) return text;
-
-  const marker = (dropped: number) =>
-    `\n\n… [${dropped} characters omitted from the middle] …\n\n`;
-
-  const half = Math.floor((max - marker(text.length).length) / 2);
-  if (half < 1) return text.slice(0, Math.max(0, max));
-
-  return (
-    text.slice(0, half) + marker(text.length - half * 2) + text.slice(-half)
-  );
 }
 
 /**

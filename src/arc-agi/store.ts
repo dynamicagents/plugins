@@ -20,11 +20,10 @@ import type { CookieJar, Scorecard } from "./types.js";
  *
  * A plugin must never run drizzle's durable-sqlite **migrator**: it keeps one
  * flat integer journal and one global `__drizzle_migrations` table, which two
- * independently-versioned packages cannot share — the two predecessor agents,
- * both consuming the same `notify_tasks` module, had already forked that journal
- * at index 1. And `drizzle-kit generate` diffs against a snapshot in a single
- * output directory, so a plugin shipping from its own repo cannot produce a
- * correct diff at all.
+ * independently-versioned packages cannot share: two agents consuming the same
+ * module fork that journal at the first index they disagree on. And
+ * `drizzle-kit generate` diffs against a snapshot in a single output directory,
+ * so a plugin shipping from its own repo cannot produce a correct diff at all.
  *
  * None of that touches the **query builder**, which is a typed wrapper over the
  * same `DurableObjectStorage` holding no journal and no connection state. So the

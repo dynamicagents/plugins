@@ -46,12 +46,11 @@ import type { RepoGitResult } from "../../repo/index.js";
 /**
  * A workspace: one Durable Object, one container, one repository.
  *
- * **Shared by every agent in this Worker that has a container**, which today is
- * `coder` and `claude-coder`. Each subclasses {@link WorkspaceObjectBase},
- * supplies a {@link WorkspaceObjectConfig}, and inherits everything else. Keep
- * that seam narrow: it is the complete answer to "what is different about this
- * agent's container", and the alternative is a second copy of this file
- * drifting in whichever direction the object nobody redeployed recently went.
+ * **Shared by every agent in a Worker that has a container.** Each subclasses
+ * {@link WorkspaceObjectBase}, supplies a {@link WorkspaceObjectConfig}, and
+ * inherits everything else. Keep that seam narrow: it is the complete answer to
+ * "what is different about this agent's container", and anything that does not
+ * fit through it becomes a second copy of this file.
  *
  * A directory inside the plugin rather than a subpath beside it, so that one
  * capability stays one import path and a consumer cannot take the tools without
@@ -67,9 +66,7 @@ import type { RepoGitResult } from "../../repo/index.js";
  * `@cloudflare/computer` pairs a SQLite-backed virtual filesystem in *this*
  * object's storage with a container running `computerd`, which mounts it over
  * FUSE at `/workspace`. Commands run against the same tree the Worker reads over
- * RPC, and the tree outlives the container — which is why this replaced
- * `@cloudflare/sandbox`, whose disk died with the container and whose R2
- * snapshot path needed S3 credentials a Workers binding cannot supply.
+ * RPC, and the tree outlives the container.
  *
  * **One repository per object**, because `computer` is strictly 1 DO ↔ 1
  * container: the id derives from caller *and* repository (see `workspaceName`),
@@ -95,9 +92,8 @@ import type { RepoGitResult } from "../../repo/index.js";
  * - `./ca-trust.ts` — making a container able to speak TLS.
  * - `./git-host.ts` — the operations that hold the forge credential.
  *
- * The seam each takes is small and explicit, which is what keeps the split
- * honest: a module that needed the whole object back would be a module that did
- * not want extracting.
+ * Each takes a small explicit seam, and that is the test: a module that needed
+ * the whole object back would be a module that did not want extracting.
  */
 
 /** Where every checkout lives, inside the container and in the VFS. */
@@ -132,9 +128,9 @@ export function workspaceName(callerKey: string, repo?: string): string {
 /**
  * The key the checkout record lives under.
  *
- * Deliberately **not** derived from {@link INSTALL_KEY}: what is on disk and what
- * was installed into it have different lifetimes, and one record cannot answer
- * both. See {@link WorkspaceObjectBase.noteCheckout}.
+ * Deliberately **not** the install record's: what is on disk and what was
+ * installed into it have different lifetimes, and one record cannot answer both.
+ * See {@link WorkspaceObjectBase.noteCheckout}.
  */
 const CHECKOUT_KEY = "checkout";
 
@@ -274,15 +270,6 @@ const SYNCED_TREES_PURGED_KEY = "deps:purged";
 // --- the object -------------------------------------------------------------
 
 /**
- * The container half.
- *
- * `withWorkspaceContainer` adds one method, `getWorkspaceContainer()`, over
- * `this.ctx.container` — the runtime's own container handle. There is no
- * `@cloudflare/containers` `Container` subclass here and so no `sleepAfter`:
- * idle shutdown is this object's job, and it lands on the wake map with
- * everything else.
- */
-/**
  * Named rather than the anonymous class expression an app would write here.
  *
  * This package emits declarations, and `DurableObject` brings `ctx` and `env` in
@@ -292,16 +279,15 @@ const SYNCED_TREES_PURGED_KEY = "deps:purged";
  */
 class WorkspaceContainerHost extends DurableObject<Cloudflare.Env> {}
 
+/**
+ * `withWorkspaceContainer` adds one method, `getWorkspaceContainer()`, over
+ * `this.ctx.container` — the runtime's own container handle. There is no
+ * `@cloudflare/containers` `Container` subclass here and so no `sleepAfter`:
+ * idle shutdown is this object's job, and it lands on the wake map with
+ * everything else.
+ */
 const WorkspaceContainerBase = withWorkspaceContainer(WorkspaceContainerHost);
 
-/**
- * What one workspace object does not share with the next.
- *
- * Everything else about a workspace is identical between agents, which is why
- * this interface is short and why it is worth having at all: a seam this narrow
- * makes "what is different about this agent's container" a question with a
- * complete answer in one place.
- */
 /**
  * The forge credential, and who a commit made on this side is attributed to.
  *
@@ -348,6 +334,14 @@ export interface WorkspaceGitConfig {
   author: { name: string; email: string };
 }
 
+/**
+ * What one workspace object does not share with the next.
+ *
+ * Everything else about a workspace is identical between agents, which is why
+ * this interface is short and why it is worth having at all: a seam this narrow
+ * makes "what is different about this agent's container" a question with a
+ * complete answer in one place.
+ */
 export interface WorkspaceObjectConfig {
   /**
    * The wrangler Durable Object binding this class is bound as.
@@ -444,18 +438,18 @@ export abstract class WorkspaceObjectBase<
     return this.#cfg.label;
   }
 
-  /**
-   * How long an install may run before it is killed.
-   *
-   * Read from the plan wherever an install is bounded, which is why it is a
-   * getter: the fallback has to be the same number every time, and a `??`
-   * repeated at each site is a chance to write a different one.
-   */
   /** This agent's container-idle window — see {@link WorkspaceObjectConfig}. */
   get #containerIdleMs(): number {
     return this.#cfg.containerIdleMs ?? CONTAINER_IDLE_MS;
   }
 
+  /**
+   * How long an install may run before it is killed.
+   *
+   * A getter because the fallback has to be the same number at every site an
+   * install is bounded, and a `??` repeated at each is a chance to write a
+   * different one.
+   */
   get #installTimeoutMs(): number {
     return this.#cfg.installPlan.timeoutMs ?? 20 * 60_000;
   }
@@ -528,12 +522,10 @@ export abstract class WorkspaceObjectBase<
   /**
    * Come back and move the next block of an outstanding pull.
    *
-   * **The callback keeps the name a deployed object already has on disk.** A
-   * schedule row persists its callback by name, and rows written before this
-   * object drove its own pulls say `syncRetry`; the scheduler drops a row whose
-   * callback it cannot find, with one line in the log. Driving a drain is the
-   * right thing to do for such a row anyway, so the name stays and nothing has
-   * to be migrated.
+   * **The callback name is on disk in deployed objects, so it may not change.**
+   * A schedule row persists its callback by name, and the scheduler drops a row
+   * whose callback it cannot find with one line in the log — a rename would
+   * strand every pull already scheduled.
    */
   readonly #syncDrain = namedDeadline({
     storage: this.ctx.storage,
@@ -608,8 +600,7 @@ export abstract class WorkspaceObjectBase<
    * container's outbound HTTP is intercepted on, internal to that loopback.
    *
    * The binding name and the egress policy are the subclass's — see
-   * {@link WorkspaceObjectConfig}, which carries the warnings that used to live
-   * on this comment.
+   * {@link WorkspaceObjectConfig}, which carries the warnings on both.
    */
   #backendMemo?: CloudflareContainerBackend;
 
@@ -677,32 +668,25 @@ export abstract class WorkspaceObjectBase<
    * Open the workspace, and make sure the container behind it can speak TLS and
    * installs onto its own disk.
    *
-   * **Every path that might start a container goes through here**, which is the
-   * fix for a real gap rather than tidiness. The CA install used to hang off
-   * `#beginInstall`, so it reached a container only when that container was also
-   * due a dependency install — and the two are not the same question:
+   * **Every path that might start a container goes through here**, and the CA
+   * install hangs off container *liveness* rather than off the install job.
+   * Whether a container is new and whether it is due dependencies are different
+   * questions: an install declines to arm for a `skipped` or `idle` state,
+   * returns early when one is already in flight, and again when the workspace is
+   * full — so hanging trust off it leaves a replaced container talking to an
+   * untrusted CA with nothing pending that would fix it, and leaves it worst
+   * exactly when egress is what the agent needs to dig itself out.
    *
-   * - the arming above declines to arm for a `skipped` or `idle` install state.
-   *   A repository with nothing to install therefore replaced its container, ran
-   *   every later command against an untrusted CA, and had no install pending to
-   *   fix it.
-   * - `#beginInstall` returns early when an install is already in flight, and
-   *   again when the workspace is full — both *before* the old call site. The
-   *   full-workspace case is the worst of them: egress is exactly what the agent
-   *   needs to dig itself out.
-   *
-   * Tied to container liveness instead. `ctx.container?.running` is read
-   * **before** `ready()`, because `ready()` is what starts a stopped container —
-   * afterwards every container looks running and the distinction is gone.
+   * `ctx.container?.running` is read **before** `ready()`, because `ready()` is
+   * what starts a stopped container — afterwards every container looks running
+   * and the distinction is gone.
    *
    * Cheap enough to sit on the busiest entry point in the object: at most one
    * extra exec per isolate, plus one per container it sees start. An unchanged
    * container costs a boolean.
    *
-   * Private, like everything else in here that is not an RPC. On a Durable
-   * Object `protected` is a typechecker's opinion and not a runtime boundary —
-   * every non-`#` method is reachable over RPC — so a helper that starts
-   * containers is spelled `#`.
+   * Private, like everything else in here that is not an RPC: every non-`#`
+   * method is reachable over RPC — see {@link WorkspaceGitConfig.tokenBinding}.
    *
    * **One start at a time**, because {@link #warmIfCold} makes overlap ordinary:
    * a warm and the first `sb_exec` want the container at the same moment, as do
@@ -802,9 +786,8 @@ export abstract class WorkspaceObjectBase<
       // `createGitClient` binds isomorphic-git to `provider()` — the local
       // SQLite store, not the wire — so a clone, fetch or push executes next to
       // the data it writes, and the container never holds a credential at all.
-      // The alternative it replaces ran credentialed `git` in the container and
-      // had to build a disposable git dir per operation to survive the fact that
-      // git executes whatever `.git/config` and `.git/hooks` name.
+      // Credentialed `git` in the container cannot: it executes whatever
+      // `.git/config` and `.git/hooks` in the checkout name.
       //
       // Needs `@platformatic/vfs`, an optional peer of `@cloudflare/computer`:
       // the adapter that wraps `provider()` into an isomorphic-git FsClient
@@ -1083,11 +1066,9 @@ export abstract class WorkspaceObjectBase<
     //
     // Load-bearing, not defensive. `lastUsedAt` is written by `#touch()` and
     // removed by the `deleteAll()` below, so an *already reclaimed* workspace
-    // reads exactly like a brand new one — and the old `?? 0` turned that into
-    // "idle since the epoch", the most idle a workspace can possibly be. The
-    // weekly sweep therefore re-reclaimed every workspace it had ever reclaimed,
-    // every week, recreating storage just to empty it and logging a reclaim that
-    // did not happen.
+    // reads exactly like a brand new one. Defaulting it to 0 makes both "idle
+    // since the epoch", and the weekly sweep then re-reclaims every workspace it
+    // has ever reclaimed, recreating storage just to empty it again.
     if (lastUsedAt === undefined) return { reclaimed: false, idleMs: 0, bytes };
 
     const idleMs = Date.now() - lastUsedAt;
@@ -1156,7 +1137,7 @@ export abstract class WorkspaceObjectBase<
   /**
    * Whether this object is out of room, and by how much.
    *
-   * Read on **two** paths, and the second is load-bearing. `#beginInstall`
+   * Read on **two** paths, and the second is load-bearing. The install job
    * consults it because an install is the operation that can move the number
    * meaningfully. {@link advisories} consults it on every call, which is what
    * lets a full workspace reach commands that have nothing to do with
@@ -1182,21 +1163,16 @@ export abstract class WorkspaceObjectBase<
    * only once a tree is established, and `scratch_open`, which fires once
    * `git init` has exited 0.
    *
-   * **This is the canonical explanation of why the checkout is recorded apart
-   * from the install**; call sites point here rather than restating it.
-   *
-   * An install is conditional and a checkout is not. `resolveInstallCommand`
-   * skips a checkout it finds nothing to install in — any without a
-   * `package.json` — and a path written only as part of an install is therefore
-   * missing exactly there. What that costs is not a missing optimisation:
-   * {@link checkoutDir} is how a delegated session is told where to work, so a
-   * repository can clone perfectly, report itself correctly through the repo
-   * tools, and never be worked in.
-   *
-   * The install keeps its own context, and should. What to re-run on a cold
-   * container is a different question from what is on disk, with a different
-   * lifetime; one record cannot answer both without one of the answers being
-   * wrong somewhere.
+   * **Why the checkout is recorded apart from the install**, which call sites
+   * point here for rather than restating: an install is conditional and a
+   * checkout is not. `resolveInstallCommand` skips a checkout it finds nothing
+   * to install in — any without a `package.json` — so a path written only as
+   * part of an install is missing exactly there. What that costs is not an
+   * optimisation: {@link checkoutDir} is how a delegated session is told where
+   * to work, so a repository can clone perfectly, report itself correctly
+   * through the repo tools, and never be worked in. The install keeps its own
+   * context for the mirror-image reason — what to re-run on a cold container has
+   * a different lifetime from what is on disk.
    *
    * Returns the probe as well as the path, so a caller learns in one round trip
    * whether the tree is visible rather than discovering it a delegation later.
@@ -1257,9 +1233,8 @@ export abstract class WorkspaceObjectBase<
       recorded: record?.kind,
       // The rest of the record, because this line is read during an incident and
       // "the checkout for acme/spike went missing forty minutes ago" is a
-      // different investigation from a bare path. It is also what these two
-      // fields are *for* — nothing else reads them, and a record carrying state
-      // nobody ever looks at is how the last one drifted.
+      // different investigation from a bare path. It is also the only reader
+      // these two fields have.
       ...(record?.repo ? { repo: record.repo } : {}),
       ...(record ? { ageMs: Date.now() - record.at } : {})
     });

@@ -34,10 +34,9 @@ export function memHandle(): WorkspaceHandle {
  * Build a throwaway {@link ToolFamilyContext} for the arc-game tools, plus the
  * captured progress-event log.
  *
- * No `env`. The predecessor's context carried the Worker `env` and the tools
- * read `env.ARC_API_KEY` out of it; a published package cannot do that, so the
- * key is now an argument to `buildArcGameTools` and this context has nowhere to
- * put one. `apiKey` is returned alongside for the caller to pass through —
+ * No `env`: a published package cannot read `env.ARC_API_KEY` off a Worker
+ * context, so the key is an argument to `buildArcGameTools` and this context has
+ * nowhere to put one. `apiKey` is returned alongside for the caller to pass —
  * defaulting to a placeholder, since under VCR playback the key header is
  * excluded from the cassette and its value is irrelevant. Pass the real key only
  * when recording.

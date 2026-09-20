@@ -28,8 +28,8 @@ describe("parseRepo", () => {
   });
 
   /**
-   * The old pattern was unanchored, so `github.com` occurring anywhere in the
-   * string was a match — including in the *path* of somebody else's host.
+   * Unanchored, `github.com` occurring anywhere in the string matches —
+   * including in the *path* of somebody else's host.
    */
   it.each([
     "https://evil.example.com/github.com/owner/repo",
@@ -68,11 +68,11 @@ describe("parseRepo", () => {
   });
 
   /**
-   * Every transport but https, including the one that used to slip through.
+   * Every transport but https, scp-like syntax included.
    *
-   * scp-like syntax was parsed on its own branch, ahead of the protocol check,
-   * so `git@github.com:owner/repo.git` passed a gate whose refusal message
-   * promises https. Nothing downstream could act on it — isomorphic-git has no
+   * Parsed on its own branch ahead of the protocol check,
+   * `git@github.com:owner/repo.git` passes a gate whose refusal message
+   * promises https. Nothing downstream can act on it — isomorphic-git has no
    * SSH transport — so it failed one step further from the model, which is the
    * worse place for it.
    */

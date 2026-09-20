@@ -61,7 +61,7 @@ import {
 /**
  * This family's key in a Recipe's `toolFamilies`. Exported because it is also
  * what tells the parent a Subtask needs a scorecard leased before it can run —
- * see `resolveRuntime` in the ReactiveAgent DO.
+ * see `resolveRuntime` in `./index.ts`.
  */
 export const ARC_GAME_FAMILY = "arc-game";
 
@@ -70,11 +70,10 @@ export function buildArcGameTools(
   ctx: ToolFamilyContext
 ): RecipeToolSet {
   const { workspace, emitProgress, params } = ctx;
-  // Closed over from the plugin's config, never `ctx.env`. The predecessor
-  // passed the Worker `env` to every tool family, which a published package
-  // cannot do — `Env` is the ambient interface `wrangler types` generates into a
-  // *consumer's* app and does not exist here. Config-at-instantiation is also
-  // the only thing that works on Workers at all, where `env` has no module scope.
+  // Closed over from the plugin's config, never `ctx.env`: a published package
+  // cannot name `Env`, which is the ambient interface `wrangler types` generates
+  // into a *consumer's* app. Config-at-instantiation is also the only thing that
+  // works on Workers at all, where `env` has no module scope.
   const runtime = runtimeAs<ArcRuntime>(ctx.runtime);
 
   // All settled before the model runs — it cannot pick a different game, and it
@@ -492,10 +491,9 @@ export function buildArcGameTools(
     })
   };
 
-  // No `abort` hook: the only external state this family used to hold was the
-  // scorecard, and nothing closes one any more — the API retires an idle card on
-  // its own. A play left unfinished is simply a run the card records as
-  // incomplete.
+  // No `abort` hook: this family holds no external state to release. The API
+  // retires an idle card itself, so a play left unfinished is simply a run the
+  // card records as incomplete.
   return { tools };
 }
 
@@ -504,8 +502,8 @@ export function buildArcGameTools(
  * supply.
  *
  * With `runtime.frame` — this chunk is the one that opened the play — the state
- * is complete and indistinguishable from what a local RESET used to produce.
- * Without it the play already existed, so everything a frame carries is unknown:
+ * is complete. Without it the play already existed, so everything a frame
+ * carries is unknown:
  * empty `availableActions` and a null board, both filled in by the first ACTION.
  * Only `guid` matters for correctness, and it always comes from the parent.
  */

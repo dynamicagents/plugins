@@ -55,9 +55,8 @@ export interface InstallProbe {
  * `npm ci`.
  *
  * `JobState` intersects `TExtra` into its `running`/`done`/`failed` variants
- * instead of nesting it under `meta`, so this alias is byte-identical to the
- * hand-written union it replaced. Every reader still spells `status.command` at
- * the top level and no call site moved.
+ * rather than nesting it under `meta`, so a reader spells `status.command` at
+ * the top level.
  */
 export type InstallState = JobState<{ command: string }>;
 

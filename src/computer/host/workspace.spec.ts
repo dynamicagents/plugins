@@ -20,23 +20,19 @@ import { readyWithin } from "./workspace.js";
 const INSTALL_PLAN = { ...DEFAULT_INSTALL_PLAN, overrides: {} };
 
 /**
- * The install gate, and the two ways it used to hang forever.
+ * The install gate, and the two ways it can hang forever.
  *
  * `running` is the only install state that **blocks work**: `sb_exec` waits on
  * it and then refuses to run anything. Every other state is a fact the subagent
  * can act on — so `running` is the one that must never outlive the command it
- * describes.
+ * describes. A `runtime.exec` that throws on the container's WebSocket is how it
+ * gets orphaned: the record stays `running` with nothing draining it and no
+ * watchdog armed, and every later `sb_exec` waits ninety seconds and runs
+ * nothing until the task dies on its own timeout.
  *
- * It did, in production. A `runtime.exec` that threw on the container's
- * WebSocket left the record saying `running` with nothing draining it and no
- * watchdog armed; every `sb_exec` for the next half hour polled the gate, waited
- * ninety seconds and ran nothing, until the chunk hit the ten-minute step
- * timeout and Workflows retried it into the same wall. The task never reached a
- * terminal state and the gatekeeper never got its callback.
- *
- * Both tests below run **without a container**, which is not a limitation here
- * but the point: the pool cannot start one, so `runtime.exec` fails exactly the
- * way it failed in production.
+ * The tests below run **without a container**, which is not a limitation here
+ * but the point: the pool cannot start one, so `runtime.exec` fails in exactly
+ * that way.
  */
 
 /**
@@ -162,12 +158,12 @@ describe("the install gate", () => {
   });
 
   /**
-   * `repo_clone` starts the install, and a retried chunk starts it again —
-   * three times in fifty seconds, in the run this test comes from. Each spawn
-   * used the same exec id, so it displaced the last, and the displaced
-   * command's drain was still attached: it then wrote *its* verdict over a
-   * record describing an install that was still running. The subagent read a
-   * "dependency install failed" belonging to a command that no longer existed.
+   * `repo_clone` starts the install, and a retried chunk starts it again — three
+   * times in fifty seconds is a real rate. Spawns share an exec id, so each
+   * displaces the last while the displaced command's drain stays attached: it
+   * then writes *its* verdict over a record describing an install that is still
+   * running, and the subagent reads a failure belonging to a command that no
+   * longer exists.
    */
   it("resolves a running record before starting another install", async () => {
     const stub = freshWorkspace("install-reentry");
@@ -247,14 +243,6 @@ describe("the install gate", () => {
     ]);
   });
 
-  /**
-   * A `failed` record is never retried on its own.
-   *
-   * Re-driving it from the gate would loop rather than recover — the install
-   * failed for a reason, and the reason is usually still there. It stays the
-   * subagent's to act on, via the warning the gate renders in front of the next
-   * command.
-   */
   /** Nothing vouches for a tree from the moment it starts being rebuilt. */
   it("drops the tree record, and the retired ones, when a real install starts", async () => {
     const stub = freshWorkspace("install-clears-tree");
@@ -325,8 +313,8 @@ describe("where the work is", () => {
   it("reports a checkout the install had nothing to do in", async () => {
     const stub = freshWorkspace("checkout-no-lockfile");
     const dir = "/workspace/spike";
-    // A repository with a README and no `package.json` — the exact shape that
-    // was permanently undelegatable.
+    // A repository with a README and no `package.json` — the shape the install
+    // resolver skips.
     await seedGitCheckout(stub, dir);
 
     await stub.noteCheckout({ dir, kind: "repo", repo: "acme/spike" });
@@ -363,7 +351,6 @@ describe("where the work is", () => {
    * where that claim has to hold: it has no install to write a context as a side
    * effect — a directory with no `package.json` is exactly what the resolver
    * skips — so without the record it could be created and never delegated into.
-   * The feature is a live assertion of the fix.
    */
   it("reports a scratchpad the same way it reports a checkout", async () => {
     const stub = freshWorkspace("checkout-scratch");
@@ -394,12 +381,12 @@ describe("where the work is", () => {
  * tree is recorded by the install that built it and dropped when that container
  * is seen gone. With no container in this pool, every access sees it gone.
  *
- * It still has to be caught here rather than left to `repo_clone`, which is the
- * gap that cost 99 seconds of `npm ci` inside a round: a follow-up task never
- * calls it, because its checkout is already here. Closing it by probing from the
- * gate cost far more — the install started from a poll that returned in
- * milliseconds, its drain died with that invocation, and the half-written tree
- * took a nine-minute task to unpick.
+ * It still has to be caught here rather than left to `repo_clone`: a follow-up
+ * task never calls it, because its checkout is already here, and the round then
+ * pays 99 seconds of `npm ci` inside itself. Nor can the gate close it by
+ * installing directly — an install started from a poll that returns in
+ * milliseconds loses its drain with that invocation and leaves a half-written
+ * tree.
  *
  * So detection is a local read here, and the install itself belongs to the
  * alarm. These tests cover the detection; the alarm's own handler needs a
@@ -421,9 +408,8 @@ describe("arming an install when the tree is missing", () => {
     options: { tree?: boolean } = {}
   ) {
     // The checkout has to be here too, or the resolver finds no `package.json`,
-    // answers `skip`, and the armed install proves nothing by never reaching a
-    // spawn — which is exactly how the first draft of this passed while testing
-    // half of what it claimed.
+    // answers `skip`, and the armed install never reaches a spawn — passing
+    // while asserting half of what it claims.
     await seedNodeCheckout(stub, dir);
     await runInDurableObject(stub, async (_instance, state) => {
       await state.storage.put("install", {
@@ -457,9 +443,8 @@ describe("arming an install when the tree is missing", () => {
   /**
    * Wait for the armed install to reach a terminal state.
    *
-   * The alarm fires promptly — promptly enough that a first draft of these tests
-   * raced it and read `install:armed` after the handler had already consumed it.
-   * That is the system working, so these assert the settled outcome rather than a
+   * The alarm fires promptly enough to race a read of `install:armed`, which is
+   * the system working — so these assert the settled outcome rather than a
    * marker that is meant to be transient.
    */
   async function settled(stub: DurableObjectStub<TestWorkspaceDO>, ms = 5_000) {
@@ -483,7 +468,7 @@ describe("arming an install when the tree is missing", () => {
     // `failed` is the whole assertion. Getting there means the record left
     // `done` (so arming happened) *and* something tried to spawn an install (so
     // the alarm ran it) — and with no container in the pool, a spawn cannot
-    // succeed. The old code returned `done` here and let a doomed command run.
+    // succeed.
     expect((await settled(stub))?.state).toBe("failed");
   });
 
@@ -495,10 +480,7 @@ describe("arming an install when the tree is missing", () => {
    * failing one has no such property — it lands back on `failed` with the tree
    * still absent, and `__getWorkspaceStub` is the busiest entry point in the
    * object, so without a cooldown it would re-arm on essentially every tool
-   * call.
-   *
-   * This test is the one that caught that: extending arming to `failed` made it
-   * fail, which is the whole reason `INSTALL_ARM_COOLDOWN_MS` exists.
+   * call. That bound is `INSTALL_ARM_COOLDOWN_MS`, and this is what holds it.
    */
   it("does not re-arm again immediately after a failure", async () => {
     const stub = freshWorkspace("arm-cooldown");
@@ -521,11 +503,10 @@ describe("arming an install when the tree is missing", () => {
   /**
    * A failed install must not poison the workspace forever.
    *
-   * Arming originally required `done`, and the gap showed up immediately: a run
-   * whose install failed left that record behind, the next task declined to arm,
-   * and it was rescued only because the parent happened to call `repo_clone`.
-   * Without that coincidence the subagent is back to running `npm ci` by hand
-   * inside the round — the thing all of this exists to prevent.
+   * Arming only for `done` leaves a failed record standing, so the next task
+   * declines to arm and is rescued only if the parent happens to call
+   * `repo_clone` — and without that coincidence the subagent is back to running
+   * `npm ci` by hand inside the round, which is what all of this prevents.
    */
   it("arms for a workspace whose last install failed", async () => {
     const stub = freshWorkspace("arm-after-failure");
@@ -553,7 +534,7 @@ describe("arming an install when the tree is missing", () => {
      * Asserting `failed` would prove nothing — the record went in `failed` and a
      * version that armed nothing would leave it that way. The *message* is what
      * discriminates: the seeded one is invented by this test, and only a real
-     * spawn attempt replaces it with the one `#beginInstall` writes when the
+     * spawn attempt replaces it with the one the install job writes when the
      * container cannot be reached.
      */
     const state = await settled(stub);
@@ -599,7 +580,7 @@ describe("arming an install when the tree is missing", () => {
   /**
    * A caller's very first task: nothing has ever been installed, so there is no
    * record of *where* to install. `repo_clone` and its `afterCheckout` hook own
-   * this case, exactly as they always have.
+   * this case.
    */
   it("arms nothing when no install has ever run", async () => {
     const stub = freshWorkspace("arm-first-task");
@@ -611,17 +592,6 @@ describe("arming an install when the tree is missing", () => {
   });
 });
 
-/**
- * Reclaiming, and the weekly loop it used to run forever.
- *
- * `lastUsedAt` is written by `#touch()` and removed by the `deleteAll()` that
- * reclaiming performs — so a workspace that has *already* been reclaimed reads
- * exactly like one that was never used. Defaulting that to `0` made it look
- * idle since the epoch, which is maximally idle: every weekly sweep re-reclaimed
- * every workspace it had ever reclaimed, recreating storage just to empty it
- * again and logging a reclaim that did not happen. Both the candidate table and
- * the RPC work grew for the lifetime of the caller.
- */
 /**
  * Keeping the workspace level with the container, which nothing else will do.
  *
@@ -718,21 +688,25 @@ describe("draining an outstanding pull", () => {
   });
 });
 
+/**
+ * A reclaimed workspace reads exactly like one nobody ever used, and these hold
+ * the line between them — see `reclaimIfIdle` in `./workspace.ts` for why an
+ * absent `lastUsedAt` must not read as idle.
+ */
 describe("reclaiming an idle workspace", () => {
   it("reports nothing to do for a workspace nothing has ever used", async () => {
     const stub = freshWorkspace("never-used");
 
     const result = await stub.reclaimIfIdle();
 
-    // Not `reclaimed: true` with an epoch-sized `idleMs`, which is what an
-    // absent `lastUsedAt` used to produce.
+    // Not `reclaimed: true` with an epoch-sized `idleMs`.
     expect(result.reclaimed).toBe(false);
     expect(result.idleMs).toBe(0);
   });
 
   it("stays false however long the sweep waits", async () => {
-    // The bug was not a threshold being too low — it was a missing record
-    // reading as "idle forever", so no `maxIdleMs` could ever make it false.
+    // No `maxIdleMs` can rescue a missing record that reads as "idle forever",
+    // so the threshold is not where this is decided.
     const stub = freshWorkspace("never-used-zero-threshold");
 
     expect((await stub.reclaimIfIdle(0)).reclaimed).toBe(false);
@@ -740,7 +714,7 @@ describe("reclaiming an idle workspace", () => {
 
   /**
    * The other half: a workspace that has been used is still reclaimable, so the
-   * fix above cannot have been "never reclaim anything".
+   * rule above cannot collapse into "never reclaim anything".
    */
   it("still reclaims one that was used and then went idle", async () => {
     const stub = freshWorkspace("used-then-idle");
@@ -770,8 +744,8 @@ describe("the interception CA command", () => {
 
   /**
    * A newline ends a command in sh, so an `&&` or `||` opening a line is a
-   * syntax error rather than the continuation it looks like. The operators have
-   * to trail. This is the exact mistake the first draft made.
+   * syntax error rather than the continuation it looks like: the operators have
+   * to trail.
    */
   it("never opens a line with a shell operator", () => {
     for (const line of lines) {
@@ -791,19 +765,16 @@ describe("the interception CA command", () => {
 });
 
 /**
- * When the CA gets installed, and the gap that made it not happen.
+ * The CA is trusted on container liveness, never on install state.
  *
- * The trust used to hang off `#beginInstall`, which quietly made it conditional
- * on the container also being due a dependency install. Those are not the same
- * question, and a `skipped` workspace is where they come apart: the resolver
- * found nothing to install, so `#armInstallIfCold` deliberately never arms, so
- * nothing ever calls `#beginInstall` again — and every command in every
- * replacement container runs against an untrusted CA, failing TLS with an error
- * that names no cause.
+ * Those are not the same question, and a `skipped` workspace is where they come
+ * apart: the resolver found nothing to install, so nothing ever arms an install
+ * again — and every command in every replacement container would run against an
+ * untrusted CA, failing TLS with an error that names no cause.
  *
  * These run **without a container**, like the rest of this file, so the trust
- * command cannot succeed. That is fine and is the point: what regressed was
- * whether it is *attempted*, and an attempt is observable either way.
+ * command cannot succeed. That is the point: what is asserted is whether it is
+ * *attempted*, and an attempt is observable either way.
  */
 describe("trusting the interception CA", () => {
   /** Every outcome of the trust step logs; a skipped one logs nothing at all. */
@@ -834,10 +805,9 @@ describe("trusting the interception CA", () => {
   });
 
   /**
-   * `#beginInstall` returns early when the workspace is full, and the old call
-   * site sat below that return — so the one situation where the agent most needs
-   * working egress to dig itself out was the one that never got a CA. Reaching
-   * the object at all is now enough.
+   * An install refuses to begin when the workspace is full — which is the one
+   * situation where the agent most needs working egress to dig itself out. So
+   * the trust must not sit behind that refusal: reaching the object is enough.
    */
   it("happens before anything that can refuse an install", async () => {
     const stub = freshWorkspace("ca-before-refusals");
@@ -846,8 +816,7 @@ describe("trusting the interception CA", () => {
     try {
       using ws = await openWorkspace(stub);
       void ws;
-      // No checkout, no install record, nothing armed — the paths that used to
-      // carry the trust are all inert here.
+      // No checkout, no install record, nothing armed.
       expect(await storedInstall(stub)).toBeUndefined();
       expect(attempts(warn.mock.calls)).toBeGreaterThan(0);
     } finally {
@@ -964,12 +933,6 @@ describe("the filesystem stub", () => {
 });
 
 /**
- * The scheduler's rows, read from storage. A schedule is a row in the lifecycle's
- * job queue under the scheduler's capability, its callback name in `fn`. No
- * table at all is no rows: storage that was just wiped has not had the queue
- * recreated yet.
- */
-/**
  * Bring a deadline forward to now, so `alarm()` actually runs its handler.
  *
  * The suite cannot wait out an idle window, and a deadline that is not due is a
@@ -985,6 +948,12 @@ function forceDue(state: DurableObjectState, callback: string): number {
   ).rowsWritten;
 }
 
+/**
+ * The scheduler's rows, read from storage. A schedule is a row in the lifecycle's
+ * job queue under the scheduler's capability, its callback name in `fn`. No
+ * table at all is no rows: storage that was just wiped has not had the queue
+ * recreated yet.
+ */
 function scheduleRows(
   state: DurableObjectState
 ): { id: string; callback: string }[] {
@@ -1002,13 +971,9 @@ function scheduleRows(
 }
 
 /**
- * What the scheduler rewrite could break quietly, and what a passing suite would
- * not otherwise notice.
- *
- * A schedule is a row the scheduler mints an id for, not a keyed upsert, so
- * moving a deadline leaves a second row unless it cancels the first. `#touch()`
- * runs on every entry point, which makes this the busiest path in the object and
- * the one where an extra row per call compounds fastest.
+ * A schedule is a minted row rather than a keyed upsert — see `IDLE_RECLAIM_ID`
+ * in `./workspace.ts` — so moving a deadline leaves a second row unless it
+ * cancels the first, and `#touch()` runs on every entry point.
  *
  * Counted through storage rather than through a scheduler handle, because the
  * count is the durable consequence and a handle would only report what the code

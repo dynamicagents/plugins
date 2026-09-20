@@ -4,14 +4,11 @@ import type { DelegationNames } from "@dynamicagents/core";
  * Everything the **main agent** is told about ARC-AGI-3 — the counterpart to
  * {@link file://./soul.ts}, which is what the *subagent* playing a game is told.
  *
- * Both blocks used to be hand-written inside `agent/` (`prompt.ts`'s
- * `ARC_CAPABILITY` and a `## Playing an ARC-AGI-3 game` section of
- * `turn.ts`'s round contract). The main agent's system prompt is soul +
- * round contract concatenated, so it read ARC advice twice per round from two
- * files with no reason to agree — and they had stopped agreeing: one said to
- * delegate a subtask per game, the other said to delegate exactly one subtask and
- * nothing else. They are one file now, and the guidance below follows the
- * capability block.
+ * **The capability block and the delegation guidance stay in this one file.** A
+ * main agent's system prompt is soul plus round contract concatenated, so split
+ * across two files they are two statements of the same advice with no reason to
+ * agree — and the way they disagree is one telling the model to delegate a
+ * subtask per game while the other allows exactly one.
  */
 
 /**

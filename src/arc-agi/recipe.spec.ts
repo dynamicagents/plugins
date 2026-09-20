@@ -10,10 +10,9 @@ import { ARC_GAME_RECIPE, ARC_GAME_SPEC, ARC_GAME_TYPE } from "./recipe.js";
 import { arcAgi } from "./index.js";
 
 /**
- * The recipe used to be reached through a module-level registry keyed by type.
- * It now arrives on the plugin's `subtaskType`, so these specs resolve it the
- * way a host does — through a runtime built from the installed plugins — which
- * exercises the composition rather than asserting on a constant beside it.
+ * The recipe arrives on the plugin's `subtaskType`, so these specs resolve it
+ * the way a host does — through a runtime built from the installed plugins —
+ * which exercises the composition rather than asserting on a constant beside it.
  */
 
 const SUBAGENT_LIMITS = DEFAULT_CORE_CONFIG.subagentLimits;
@@ -38,11 +37,8 @@ describe("ARC_GAME_RECIPE", () => {
     expect(recipe.key).toBe(ARC_GAME_TYPE);
     expect(recipe.enabled).toBe(true);
     expect(recipe.reportMetrics).toBe(true);
-    // It used to carry `workspace` too, so the model could keep notes in files.
-    // Across two logged plays it wrote three and read none, at a turn apiece; the
-    // `note` field of `arc_act` carries a plan for free instead. The session file
-    // is untouched by this — the family reaches the workspace through its context,
-    // not through tools a model can call.
+    // No `workspace` family — see `./recipe.ts` for why a note belongs in
+    // `arc_act`'s `note` field instead of in a file.
     expect(recipe.toolFamilies).toEqual(["arc-game"]);
   });
 
@@ -56,14 +52,10 @@ describe("ARC_GAME_RECIPE", () => {
   });
 
   it("buys more turns than the baseline, and stops short of the chunk cap", () => {
-    // It used to be "the long recipe" at 1,000 turns, sliced 25 to a chunk on the
-    // theory that made 40 durable chunks. Real turns here — a reasoning model plus
-    // an ARC HTTP round trip — are far slower than that arithmetic assumed, so runs
-    // took 70-100 chunks, blew the per-branch cap, and were killed after hours
-    // instead of reporting. The correction was not to leave a play on the baseline:
-    // 20 turns bought about ten game actions once inspection was paid for. It is
-    // the *shape* of the old number that was wrong, and 39 is the most a recipe can
-    // ask for while a yielding chunk still costs a turn.
+    // Both bounds are real. The baseline's 20 turns buys about ten game actions
+    // once inspection is paid for, so a play needs more; and a turn budget past
+    // the chunk cap is a run killed after hours instead of asked to report, since
+    // a yielding chunk still costs a turn. See `./recipe.ts`.
     expect(ARC_GAME_RECIPE.limits.maxTurns).toBeGreaterThan(
       SUBAGENT_LIMITS.maxTurns
     );
@@ -143,10 +135,9 @@ describe("what ARC_GAME_SPEC tells the main agent", () => {
   });
 
   it("owns both halves of it, so neither can drift from the other", () => {
-    // Both used to be hand-written in `agent/` — the capability in the soul, the
-    // guidance in the round contract — and they ended up disagreeing: one said to
-    // delegate a subtask per game, the other said exactly one subtask and nothing
-    // else. They are declared together now, and they agree.
+    // Split across the soul and the round contract, these are two statements of
+    // the same advice with no reason to agree — one allowing a subtask per game,
+    // the other exactly one. Declared together, they agree.
     expect(ARC_GAME_SPEC.capability).toContain(
       "one `arc-game` subtask per game"
     );

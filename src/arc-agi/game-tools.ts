@@ -5,12 +5,11 @@ import type { ArcClient } from "./client.js";
 /**
  * The **main agent's** ARC tool: the game catalogue, and nothing else.
  *
- * It used to also own the scorecard lifecycle — open a card, name it in each
- * play's params, close it for the score. That modelled a lifecycle the API
- * already manages (it auto-closes an idle card), and made every play depend on
- * the model getting the bookkeeping right. The card is now leased by the recipe
- * (see {@link file://./scorecard.ts}) and never named here, so the only thing the
- * main agent still needs from ARC is the exact game id to delegate a play with.
+ * **No scorecard lifecycle here.** The API retires an idle card itself, so a
+ * card opened, named and closed by the model is a lifecycle modelled twice with
+ * every play depending on the model's bookkeeping. The card is leased by the
+ * recipe (see {@link file://./scorecard.ts}) and never named here, so the only
+ * thing the main agent needs from ARC is the exact game id to delegate with.
  *
  * Handlers are exported separately from the `tool()` wiring so they unit-test
  * without an LLM, and the client is closed over so it is never model input.

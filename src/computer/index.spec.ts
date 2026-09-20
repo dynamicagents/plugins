@@ -557,9 +557,9 @@ describe("sb_edit", () => {
 /**
  * The budget is enforced where the bytes are read, not after they have all
  * arrived in the isolate — which is the whole point of the range-addressable
- * read the runtime offers. The stub honours the range, so a
- * regression to `readFile(path, "utf8")` fails these rather than passing them
- * with the old memory profile intact.
+ * read the runtime offers. The stub honours the range, so a regression to
+ * `readFile(path, "utf8")` fails these rather than passing them with the whole
+ * file in the isolate.
  */
 describe("sb_read", () => {
   const path = "/workspace/repo/big.log";
@@ -618,13 +618,13 @@ describe("sb_ls", () => {
   });
 
   /**
-   * The regression this retires. `ls` is a prefix scan with no bound: it returned
-   * every path in the subtree, the isolate held all of them, and the character ceiling
-   * then discarded most — the same read-everything-then-discard shape the
-   * `readdir` limit was introduced to fix one arm above. `find` takes a limit, so
-   * asserting one arrived is asserting the walk stops early.
+   * `ls` is a prefix scan with no bound: it returns every path in the subtree,
+   * the isolate holds all of them, and the character ceiling then discards most
+   * — the read-everything-then-discard shape the `readdir` limit rules out one
+   * arm above. `find` takes a limit, so asserting one arrived is asserting the
+   * walk stops early.
    */
-  it("bounds a recursive listing at the source, and no longer scans the whole subtree", async () => {
+  it("bounds a recursive listing at the source rather than scanning the whole subtree", async () => {
     const { workspace, finds, calls } = stub();
     const tools = buildComputerTools(workspace, config);
 
@@ -1045,10 +1045,10 @@ describe("offsets that survive filtering", () => {
 /**
  * Reaching a region the default read will not show.
  *
- * Before this, a file whose middle was dropped had no route back to it except
- * `sb_exec` with `sed` — which needs a live container, the exact dependency these
- * tools exist to remove. The same hole made "narrow it" the advice for a capped
- * 40,000-character minified line, where narrowing cannot possibly help.
+ * Without a window, a file whose middle was dropped has no route back to it but
+ * `sb_exec` with `sed` — which needs a live container, the exact dependency
+ * these tools exist to remove — and "narrow it" is the only advice left for a
+ * capped 40,000-character minified line, where narrowing cannot possibly help.
  */
 describe("sb_read windows", () => {
   const path = "/workspace/repo/bundle.js";
@@ -1434,10 +1434,10 @@ describe("the advisory gate on sb_exec", () => {
   });
 
   /**
-   * Both true at once, which the single-slot record this replaced could not
-   * represent: it kept whichever was written last and silently dropped the
-   * other. A command that waits out the install and never hears about the
-   * ceiling comes back to a workspace that still cannot keep its work.
+   * Both true at once, which a single slot cannot represent: it keeps whichever
+   * was written last and silently drops the other, so a command that waits out
+   * the install and never hears about the ceiling comes back to a workspace that
+   * still cannot keep its work.
    */
   it("reports a full workspace and an install together", async () => {
     const { tools, execs } = gated([
@@ -1825,7 +1825,7 @@ describe("which way the workspace is opened", () => {
   /**
    * The **fourth argument** is what is optional, not the host method:
    * `WorkspaceHost.__getWorkspaceFsStub` is required. A caller passing one
-   * opener gets the old behaviour rather than a file tool with nothing to open.
+   * opener gets that opener everywhere, not a file tool with nothing to open.
    */
   it("falls back to the one opener when a host passes only one", async () => {
     const inner = stub();
