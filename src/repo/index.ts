@@ -413,6 +413,33 @@ const REVIEW_THREADS_QUERY = `
     }
   }`;
 
+/**
+ * Who is currently *asked* to review, apps included.
+ *
+ * REST's `pulls/{n}/requested_reviewers` carries `users` and `teams` and no
+ * third key, so a Bot reviewer — Copilot is one — is absent from a request that
+ * is live, and its answer for "Copilot is working on it right now" is byte for
+ * byte its answer for "nobody was ever asked". GraphQL types the requested
+ * reviewer as a union with `Bot` in it, which is what makes the two
+ * distinguishable at all.
+ */
+const REVIEW_REQUESTS_QUERY = `
+  query($owner:String!,$repo:String!,$number:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){
+        reviewRequests(first:${FORGE_PAGE_SIZE}){
+          nodes{
+            requestedReviewer{
+              ... on User{login}
+              ... on Bot{login}
+              ... on Team{slug}
+            }
+          }
+        }
+      }
+    }
+  }`;
+
 /** Which pull request, in which repository, a thread id names. */
 const THREAD_OWNER_QUERY = `
   query($id:ID!){
@@ -1007,9 +1034,10 @@ function repoSurface(
    * nothing there" and is acted on accordingly. That is the whole reason this
    * wrapper exists rather than each caller posting to `/graphql` itself.
    *
-   * Review threads are the only thing here that needs it: resolving one has no
-   * REST equivalent at all, and the threads themselves are not on the issue
-   * timeline that `repo_issue_view` reads.
+   * What needs it is what REST cannot express: resolving a review thread has no
+   * REST equivalent at all, the threads themselves are not on the issue timeline
+   * `repo_issue_view` reads, and a review *request* naming an app is invisible to
+   * REST — see {@link REVIEW_REQUESTS_QUERY}.
    */
   const forgeGraphql = async (
     tool: string,
@@ -1842,19 +1870,32 @@ function repoSurface(
         // asked for, so "still requested" is true now and "has reviewed" is
         // about the past. Reading them the other way round reports a re-review
         // as finished the moment it is asked for.
-        const requested = await forge(
+        const requested = await forgeGraphql(
           "repo_pr_review_status",
-          `/repos/${owner}/${repo}/pulls/${number}/requested_reviewers`
+          REVIEW_REQUESTS_QUERY,
+          { owner, repo, number }
         );
         if (!requested.ok) return bounded(requested.message);
-        const waiting = requested.data as {
-          users?: { login?: string }[];
-          teams?: { slug?: string }[];
-        };
-        const pending = [
-          ...(waiting.users ?? []).map((u) => u.login),
-          ...(waiting.teams ?? []).map((t) => t.slug)
-        ].some((name) => !!name && sameReviewer(name, who));
+        const waiting = (
+          requested.data as {
+            repository?: {
+              pullRequest?: {
+                reviewRequests?: {
+                  nodes?: {
+                    requestedReviewer?: { login?: string; slug?: string };
+                  }[];
+                };
+              };
+            };
+          }
+        ).repository?.pullRequest?.reviewRequests;
+        if (!waiting)
+          return `#${number} is not a pull request in ${owner}/${repo}`;
+        const pending = (waiting.nodes ?? []).some((n) => {
+          const name =
+            n?.requestedReviewer?.login ?? n?.requestedReviewer?.slug;
+          return !!name && sameReviewer(name, who);
+        });
         if (pending)
           return `${who} has been asked to review #${number} and has not finished.`;
 
