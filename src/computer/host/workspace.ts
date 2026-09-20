@@ -1073,6 +1073,51 @@ export abstract class WorkspaceObjectBase<
   }
 
   /**
+   * Stop the container, and **keep everything on disk**.
+   *
+   * The counterpart to {@link reclaimIfIdle}, and the difference is the whole
+   * reason both exist. A reclaim is for a workspace nobody wants again: it empties
+   * storage, so the checkout and the dependency tree go with the container. This is
+   * for a workspace that will be worked in again — the next task on the same
+   * repository has to skip the clone and the install, which is the cost the whole
+   * design is arranged around.
+   *
+   * **Why a caller needs this at all.** The idle deadline would eventually do it,
+   * but it cannot be tuned down to meet a cost target: `containerIdleMs` must
+   * exceed the longest command the agent allows, and a container that outlives its
+   * work by that much bills for the difference. So a host that knows the work is
+   * finished says so, and the deadline goes back to being a backstop for the case
+   * where nothing got to say anything.
+   *
+   * Deliberately does **not** touch: `#touch()` would push the very deadline this
+   * is standing in for.
+   *
+   * `released: false` means the container is still up and the standing deadline
+   * still owns it — an install is running, or a pull is still moving blocks. Both
+   * resolve themselves: the drain re-arms the deadline to come back and finish,
+   * which is the same path `#onContainerIdle` takes.
+   */
+  async releaseContainer(): Promise<{ released: boolean }> {
+    // An install in flight is "in use" even though nothing has called in.
+    // Same rule, and same reason, as `#onContainerIdle`.
+    const install = await this.#install.read();
+    if (install.state === "running") return { released: false };
+
+    // Never stop a container with a pull still moving: that is what turns an
+    // outstanding write from late into lost. `#drainBeforeStop` carries the
+    // reasoning and re-arms the deadline when it defers.
+    const lastUsedAt = (await this.ctx.storage.get<number>("lastUsedAt")) ?? 0;
+    if (await this.#drainBeforeStop(lastUsedAt, 0)) return { released: false };
+
+    // Dropped rather than left standing: the container is about to be gone, and an
+    // alarm that fires afterwards logs a stop against a container that is not
+    // running. `#touch` re-arms it the next time this workspace is used.
+    await this.#containerIdle.clear();
+    await this.#stopContainer("idle");
+    return { released: true };
+  }
+
+  /**
    * Throw this workspace away if nothing has touched it for `maxIdleMs`.
    *
    * Re-checks the clock rather than trusting the caller: the alarm may have been

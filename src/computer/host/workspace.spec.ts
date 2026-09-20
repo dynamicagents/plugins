@@ -1196,3 +1196,54 @@ describe("waiting on a container start", () => {
     }
   });
 });
+
+/**
+ * Releasing a container without throwing the workspace away.
+ *
+ * The distinction from `reclaimIfIdle` is the only reason this exists, and it is
+ * invisible from the outside: both leave no container running. What separates them
+ * is what is still on disk afterwards — and getting it wrong costs the next task a
+ * fresh clone and a full dependency install, silently, because nothing fails.
+ */
+describe("releasing a container", () => {
+  it("keeps the checkout, which is what makes it not a reclaim", async () => {
+    const stub = freshWorkspace("release-keeps-storage");
+    const dir = "/workspace/api";
+    await seedNodeCheckout(stub, dir);
+    await stub.noteCheckout({ dir, repo: "acme/api", kind: "repo" });
+
+    expect(await stub.releaseContainer()).toEqual({ released: true });
+
+    // The whole point: the next task on this repository skips the clone and the
+    // install. A `reclaimIfIdle` here would answer `undefined`.
+    expect(await stub.checkoutDir()).toBe(dir);
+  });
+
+  it("refuses while an install is still running", async () => {
+    const stub = freshWorkspace("release-during-install");
+    const dir = "/workspace/api";
+    await seedNodeCheckout(stub, dir);
+
+    // An install in flight is "in use" even though nothing has called in —
+    // stopping the container under it throws the work away and leaves the gate
+    // closed until something notices.
+    await runInDurableObject(stub, (_instance, state) =>
+      state.storage.put("install", {
+        state: "running",
+        command: "npm ci --no-audit --no-fund",
+        startedAt: Date.now()
+      } satisfies InstallState)
+    );
+
+    expect(await stub.releaseContainer()).toEqual({ released: false });
+  });
+
+  it("is safe on a workspace nothing has ever opened", async () => {
+    // Reached on a task that failed before it cloned anything. Nothing to stop and
+    // nothing to drain, and a teardown that threw here would be reported against
+    // the task rather than against itself.
+    const stub = freshWorkspace("release-never-used");
+
+    expect(await stub.releaseContainer()).toEqual({ released: true });
+  });
+});

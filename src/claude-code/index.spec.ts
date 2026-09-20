@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { claudeCode, claudeCodeSession } from "./index.js";
-import { CLAUDE_CODE_TYPE, WORKSPACE_RUNTIME_KEY } from "./recipe.js";
+import {
+  claudeCode,
+  claudeCodeRead,
+  claudeCodeSession,
+  permissionModeForType
+} from "./index.js";
+import { READ_ONLY_PERMISSION_MODE } from "./config.js";
+import {
+  CLAUDE_CODE_READ_TYPE,
+  CLAUDE_CODE_TYPE,
+  WORKSPACE_RUNTIME_KEY
+} from "./recipe.js";
 // The one cross-realm import in this folder, and it exists to hold two
 // declarations of the same string together — see the assertion below.
 import { WORKSPACE_RUNTIME_KEY as COMPUTER_KEY } from "../computer/index.js";
@@ -18,9 +28,22 @@ function memoryStore(): CredentialStore {
   };
 }
 
+/** Every workspace a spec's `subtaskWorkspace` was asked to make, then reclaim. */
+const reclaimed: string[] = [];
+
 const config = (over: Partial<Parameters<typeof claudeCode>[0]> = {}) => ({
   credentials: () => [CREDENTIAL],
   workspaceName: () => "caller|acme/api",
+  // What a host does with these is its own — see the config's doc. What a spec
+  // needs is that the ids reach them, and that the name is the same twice.
+  subtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) =>
+    `caller|<subtask:${ctx.taskId}:${ctx.subtaskId}>`,
+  reclaimSubtaskWorkspace: async (ctx: {
+    taskId: string;
+    subtaskId: number;
+  }) => {
+    reclaimed.push(`${ctx.taskId}:${ctx.subtaskId}`);
+  },
   ...over
 });
 
@@ -43,11 +66,37 @@ const context = {
  * Durable Object holding the checkout it was told to work in.
  */
 describe("resolveRuntime", () => {
-  it("hands the subtask the workspace its parent resolved", async () => {
+  it("hands a writing subtask a workspace of its own", async () => {
     const plugin = claudeCode(config());
     await expect(plugin.resolveRuntime?.(context)).resolves.toEqual({
-      [WORKSPACE_RUNTIME_KEY]: "caller|acme/api"
+      [WORKSPACE_RUNTIME_KEY]: "caller|<subtask:task-1:3>"
     });
+  });
+
+  it("gives one subtask the same workspace on every chunk", async () => {
+    const plugin = claudeCode(config());
+
+    // Core calls this once per **chunk**, not once per run. A name that moved
+    // between chunks would hand chunk two a different container than chunk one
+    // and strand the work in the first.
+    const first = await plugin.resolveRuntime?.(context);
+    const second = await plugin.resolveRuntime?.(context);
+    expect(second).toEqual(first);
+  });
+
+  it("gives two subtasks of one task different workspaces", async () => {
+    const plugin = claudeCode(config());
+
+    const three = await plugin.resolveRuntime?.(context);
+    const four = await plugin.resolveRuntime?.({ ...context, subtaskId: 4 });
+    expect(three).not.toEqual(four);
+  });
+
+  it("hands a reading subtask the parent's workspace, to share its container", async () => {
+    const plugin = claudeCodeRead(config());
+    await expect(
+      plugin.resolveRuntime?.({ ...context, type: CLAUDE_CODE_READ_TYPE })
+    ).resolves.toEqual({ [WORKSPACE_RUNTIME_KEY]: "caller|acme/api" });
   });
 
   /**
@@ -58,7 +107,7 @@ describe("resolveRuntime", () => {
    */
   it("reads the thunk each time, so a repository switch is picked up", async () => {
     let repo = "acme/api";
-    const plugin = claudeCode(
+    const plugin = claudeCodeRead(
       config({ workspaceName: () => `caller|${repo}` })
     );
 
@@ -68,6 +117,41 @@ describe("resolveRuntime", () => {
     await expect(plugin.resolveRuntime?.(context)).resolves.toEqual({
       [WORKSPACE_RUNTIME_KEY]: "caller|acme/cli"
     });
+  });
+});
+
+describe("onSettled", () => {
+  it("reclaims the writing subtask's own workspace, keyed on its ids", async () => {
+    reclaimed.length = 0;
+    const plugin = claudeCode(config());
+
+    await plugin.onSettled?.({ ...context, subtaskId: 7 });
+    expect(reclaimed).toEqual(["task-1:7"]);
+  });
+
+  /**
+   * The reading type shares the **parent's** workspace, which outlives every
+   * subtask that read in it. A hook here would reclaim the checkout and the
+   * dependency tree the next task is counting on.
+   */
+  it("is absent on the reading plugin, which owns no workspace", () => {
+    expect(claudeCodeRead(config()).onSettled).toBeUndefined();
+  });
+});
+
+describe("permissionModeForType", () => {
+  it("pairs the reading type with a mode that cannot edit", () => {
+    expect(permissionModeForType(CLAUDE_CODE_READ_TYPE)).toBe(
+      READ_ONLY_PERMISSION_MODE
+    );
+  });
+
+  /**
+   * `undefined`, not the writing mode: the launch builder owns that default, and
+   * resolving it here would write the flag from two places.
+   */
+  it("leaves every other type to the launch builder's default", () => {
+    expect(permissionModeForType(CLAUDE_CODE_TYPE)).toBeUndefined();
   });
 
   /**

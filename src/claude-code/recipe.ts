@@ -4,6 +4,17 @@ import type { ResolvedRecipe, SubtaskTypeSpec } from "@dynamicagents/core";
 export const CLAUDE_CODE_TYPE = "claude-code";
 
 /**
+ * The Subtask type a "find out how this works" request decomposes into.
+ *
+ * The same CLI, in the same container, under a permission mode that cannot edit —
+ * see `READ_ONLY_PERMISSION_MODE`. Two types rather than a param because the
+ * difference is not a setting a model should pick: it decides whether the subtask
+ * needs a container of its own, and a model choosing that would be choosing how
+ * much the round costs.
+ */
+export const CLAUDE_CODE_READ_TYPE = "claude-code-read";
+
+/**
  * The key this plugin writes the workspace name under, for the facet to read
  * back off `SubtaskRuntime`.
  *
@@ -87,6 +98,67 @@ export const CLAUDE_CODE_CAPABILITY = [
   "It cannot ask you anything mid-run. Anything it would need to ask, decide",
   "first — or ask the user yourself before delegating."
 ].join("\n");
+
+/**
+ * The read-only recipe. Inert for the same reasons as {@link CLAUDE_CODE_RECIPE},
+ * which carries the argument.
+ *
+ * A separate `key`, because a recipe key is what the execution fingerprint is
+ * built from: sharing one would make a reading subtask and a writing subtask with
+ * the same prompt look like the same work, and the second would be served the
+ * first one's cached result.
+ */
+export const CLAUDE_CODE_READ_RECIPE: ResolvedRecipe = {
+  ...CLAUDE_CODE_RECIPE,
+  key: CLAUDE_CODE_READ_TYPE,
+  soul: [
+    "This recipe does not drive a model loop.",
+    "",
+    "A subtask of this type runs the Claude Code CLI inside the agent's",
+    "workspace container, in a permission mode that cannot edit the tree. The",
+    "system prompt, the tool loop and the context management all belong to that",
+    "process. Nothing reads this text — it exists because a recipe must declare a",
+    "soul, and a placeholder that looked like a prompt would invite someone to",
+    "tune it."
+  ].join("\n")
+};
+
+/**
+ * What the main agent is told about reading, as against changing.
+ *
+ * The one thing it must land is that the answer comes back as *findings*: a
+ * session that cannot edit but believes it should will spend its whole budget
+ * trying, and report the failure rather than the answer.
+ */
+export const CLAUDE_CODE_READ_CAPABILITY = [
+  "## Reading code",
+  "",
+  "You can hand a question about the code to a Claude Code session running in",
+  "your workspace container. It reads, searches and runs read-only commands, and",
+  "reports what it found. **It cannot change anything** — the tree it is given is",
+  "not writable, so asking it to make an edit wastes the whole session.",
+  "",
+  "Use it for what you would otherwise have to read yourself: how something is",
+  "wired, where a behaviour comes from, whether an approach fits the codebase.",
+  "Ask for the findings you need, and say what you will do with them — a question",
+  "with a purpose comes back usefully specific.",
+  "",
+  "These are cheap enough to run several at once against independent questions,",
+  "and each still costs a session's startup — so one question per subtask, not",
+  "one file per subtask.",
+  "",
+  "It cannot ask you anything mid-run."
+].join("\n");
+
+export const CLAUDE_CODE_READ_SPEC: SubtaskTypeSpec = {
+  key: CLAUDE_CODE_READ_TYPE,
+  description:
+    "Investigate the checked-out code with a Claude Code session that cannot change it, and report findings.",
+  /** No params, for the reason {@link CLAUDE_CODE_SPEC} gives. */
+  params: null,
+  capability: CLAUDE_CODE_READ_CAPABILITY,
+  recipe: CLAUDE_CODE_READ_RECIPE
+};
 
 export const CLAUDE_CODE_SPEC: SubtaskTypeSpec = {
   key: CLAUDE_CODE_TYPE,

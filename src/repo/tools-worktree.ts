@@ -30,10 +30,16 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
 
     repo_diff: tool({
       description:
-        "Show the current diff. Read this before committing — it is the cheapest way to catch an edit that did more than you intended. Pass stat:true first on a large change to see which files moved and by how much, then read the full diff of what matters.",
+        "Show a diff. With no ref, the uncommitted changes in the checkout — read this before committing, it is the cheapest way to catch an edit that did more than you intended. With a ref, everything that ref adds, which is how you review work that arrived on a branch rather than in your own tree. Pass stat:true first on a large change to see which files moved and by how much, then read the full diff of what matters.",
       inputSchema: z.object({
         dir: z.string().describe("Checkout directory"),
         staged: z.boolean().optional().describe("Show staged changes instead"),
+        ref: z
+          .string()
+          .optional()
+          .describe(
+            "Review a ref instead of the working tree — e.g. 'origin/coder/add-json-flag'. Fetch it first; a ref this checkout has never seen cannot be diffed."
+          ),
         stat: z
           .boolean()
           .optional()
@@ -41,18 +47,42 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
             "Summarise as a per-file changed-line count instead of the full patch"
           )
       }),
-      execute: async ({ dir, staged, stat }) => {
+      execute: async ({ dir, staged, stat, ref }) => {
+        // Shape-checked for the same reason `repo_push` checks a branch: a ref is
+        // model-authored, and `git diff -x` reads a leading `-` as an option
+        // rather than a name. `UNSAFE_BRANCH` already refuses that and the
+        // traversal spellings.
+        if (ref !== undefined && UNSAFE_BRANCH.test(ref))
+          return `"${ref}" is not a plain ref — pass something like "origin/coder/add-json-flag"`;
+
         const flags = [staged ? "--staged" : "", stat ? "--stat" : ""]
           .filter(Boolean)
           .join(" ");
-        const result = await plain(`diff ${flags}`, dir);
+        // Three dots, so this is what the ref *added* since it and HEAD diverged
+        // rather than every difference between two branches: HEAD moving on must
+        // not show up as the branch reverting things.
+        //
+        // The ref goes in an env var and is never interpolated — see `shell`'s
+        // `vars`, which carries why. A `--` would not be enough on its own here,
+        // because the injection this prevents is a second shell command.
+        const result = ref
+          ? await plain(`diff ${flags} "$REPO_REF"...HEAD --`, dir, {
+              REPO_REF: ref
+            })
+          : await plain(`diff ${flags}`, dir);
         // Same reasoning as `repo_status`: "(no diff)" and "the diff could not
         // be read" are opposite answers, and this is the tool a reviewing agent
         // trusts most.
         if (!result.success) {
           logFailure("repo_diff", result);
           return bounded(
-            `could not read the diff in ${dir}: ${result.stderr || result.stdout}`
+            ref
+              ? // Names the ref and the likely cause: the common failure is a ref
+                // this checkout has never fetched, and "unknown revision" on its
+                // own does not say that.
+                `could not diff "${ref}" in ${dir} — fetch it first if it has not ` +
+                  `been fetched: ${result.stderr || result.stdout}`
+              : `could not read the diff in ${dir}: ${result.stderr || result.stdout}`
           );
         }
         // Truncated from the middle rather than the end: the head of a diff and
