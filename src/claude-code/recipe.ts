@@ -1,5 +1,5 @@
-import { z } from "zod";
 import type { ResolvedRecipe, SubtaskTypeSpec } from "@dynamicagents/core";
+import { CLAUDE_CODE_PARAMS } from "./params.js";
 
 /** The Subtask type a "make this change" request decomposes into. */
 export const CLAUDE_CODE_TYPE = "claude-code";
@@ -189,17 +189,9 @@ export const CLAUDE_CODE_SPEC: SubtaskTypeSpec = {
    * host resolves it against the branches its own subtasks made before anything
    * runs — see {@link file://./config.ts ClaudeCodeConfig.subtaskWorkspace}.
    *
-   * Defaulted to `""` rather than optional, because core's params are strings;
-   * the delegate tool still advertises it as optional.
+   * The schema is in `./params.ts`, which says why it is a module of its own.
    */
-  params: z.object({
-    continue: z
-      .string()
-      .default("")
-      .describe(
-        "The branch an earlier claude-code subtask's report named, to add to that work; omit to start a new branch"
-      )
-  }),
+  params: CLAUDE_CODE_PARAMS,
   paramsHelp:
     "optional param `continue` (a branch from an earlier claude-code report, to keep working on it)",
   capability: CLAUDE_CODE_CAPABILITY,
