@@ -82,7 +82,7 @@ export interface ClaudeCodeConfig {
   /**
    * The workspace one **write** subtask runs in, ready to be worked in.
    *
-   * A write session gets a workspace of its own, keyed per subtask, because two
+   * A write session gets a workspace no other live session shares, because two
    * autonomous sessions in one container are two agents editing one working tree
    * — each running the project's test suite over the other's half-finished edits.
    * The isolation boundary is the one the platform already draws: `computer` pairs
@@ -90,44 +90,54 @@ export interface ClaudeCodeConfig {
    * filesystem.
    *
    * **The consumer answers this, not the plugin**, for the same reason
-   * `workspaceName` is a thunk: which Durable Object a name resolves to, and how a
-   * fresh one acquires a checkout, are facts about a deployment. Cloning needs a
-   * remote url, a directory convention and a host allowlist, all of which belong
-   * to `/repo` — a plugin reaching across to another plugin's knowledge is how two
-   * copies of it start to drift.
+   * `workspaceName` is a thunk: which Durable Object a name resolves to, and how
+   * one acquires a checkout, are facts about a deployment. Cloning needs a remote
+   * url, a directory convention and a host allowlist, all of which belong to
+   * `/repo` — a plugin reaching across to another plugin's knowledge is how two
+   * copies of it start to drift. A host may keep these workspaces and hand them
+   * out again; what it may not do is hand one to two live subtasks.
    *
-   * **The name must be a pure function of `taskId` and `subtaskId`.** Core calls
-   * `resolveRuntime` once per *chunk*, not once per run, so a name minted fresh
-   * would hand chunk two a different container than chunk one and strand the work
-   * in the first.
+   * **One subtask gets one name on every chunk.** Core calls `resolveRuntime`
+   * once per *chunk*, not once per run, so a second answer would hand chunk two a
+   * different container than chunk one and strand the work in the first.
+   *
+   * `continue` is the branch the delegating model asked to add to, from an
+   * earlier subtask's report — the host decides whether it may, and which
+   * workspace holds it. Absent, the subtask starts a branch of its own.
    *
    * Resolving is expected to be idempotent and is awaited: returning means the
-   * workspace is addressable and has a checkout. Arming a dependency install is a
-   * legitimate part of that, but awaiting one is not — an install is minutes and
-   * this sits in front of the session that is waiting for it.
+   * workspace is addressable and has a checkout on the subtask's branch. Arming a
+   * dependency install is a legitimate part of that, but awaiting one is not — an
+   * install is minutes and this sits in front of the session that is waiting.
    */
   subtaskWorkspace: (ctx: {
     taskId: string;
     subtaskId: number;
+    continue?: string;
   }) => Promise<string>;
 
   /**
-   * Throw away the workspace {@link subtaskWorkspace} made, now the execution is
-   * over.
+   * The execution is over, whatever its outcome — let the workspace go to the
+   * next subtask.
    *
-   * Nothing else is coming. A Durable Object is never reclaimed by the platform and
-   * a namespace cannot be enumerated from a Worker, so a per-subtask workspace left
-   * alone keeps a container billing until its idle deadline and its storage forever.
-   * That deadline cannot be tuned down to meet the cost, either — it has to exceed
-   * the longest command the session may run.
-   *
-   * **Must key on the same `taskId` and `subtaskId`**, or it reclaims a workspace
-   * that is not this subtask's.
-   *
-   * Called for every terminal outcome, so it has to tolerate a workspace that was
-   * never created — a subtask can fail before `subtaskWorkspace` ever resolved.
+   * Called for every terminal outcome, so it has to tolerate a subtask that
+   * never resolved a workspace. **Must key on the same `taskId` and
+   * `subtaskId`**, or it releases a workspace another subtask holds.
    */
-  reclaimSubtaskWorkspace: (ctx: {
+  releaseSubtaskWorkspace: (ctx: {
+    taskId: string;
+    subtaskId: number;
+  }) => Promise<void>;
+
+  /**
+   * The execution was cut short — canceled, or failed at its step — so what it
+   * committed is not work anybody asked to keep.
+   *
+   * Called before {@link releaseSubtaskWorkspace}, on those paths only. A session
+   * that ended by reporting a failure is not one of them: it said what it did,
+   * and its commits stay for the parent to judge.
+   */
+  abortSubtaskWorkspace: (ctx: {
     taskId: string;
     subtaskId: number;
   }) => Promise<void>;

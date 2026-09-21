@@ -7,6 +7,7 @@ import {
   attachRun,
   drainRun,
   execIdFor,
+  followUpExecIdFor,
   freshCursor,
   isExecLost,
   killRun,
@@ -192,6 +193,35 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     },
 
     /**
+     * Give a finished writing session one more turn, and drain its first window.
+     *
+     * `sessionId` is the one its `result` line reported. The transcript is on the
+     * container's disk, so this must run in the workspace the session did. Later
+     * windows go through {@link resume} with the cursor this returns, like any
+     * other session's.
+     */
+    async followUp(
+      runtime: SessionRuntime,
+      subtaskId: string | number,
+      sessionId: string,
+      prompt: string,
+      dir: string,
+      sinks: Sinks = {}
+    ): Promise<DrainOutcome> {
+      const execId = followUpExecIdFor(subtaskId);
+      using handle = await startRun(runtime, {
+        ...launch(prompt, dir),
+        resume: sessionId,
+        execId,
+        timeoutMs
+      });
+      return await settle(
+        runtime,
+        await drainRun(handle, freshCursor(execId), { windowMs, ...sinks })
+      );
+    },
+
+    /**
      * Re-attach to a running session and drain one more window.
      *
      * **A session whose container was replaced is reported, not thrown.** The
@@ -260,6 +290,9 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       subtaskId: string | number
     ): Promise<void> {
       const execId = execIdFor(subtaskId);
+      // First, and allowed to fail: most sessions never had a follow-up, and
+      // one that did has usually finished its first exec already.
+      await killRun(runtime, followUpExecIdFor(subtaskId)).catch(() => {});
       await killRun(runtime, execId);
       await closeCopy(runtime, execId);
     },
@@ -368,31 +401,39 @@ export function claudeCode(config: ClaudeCodeConfig): AgentPlugin {
     // plugin's runtime generic to this one key, which then fails to accept a
     // plain `SubtaskRuntime` anywhere else.
     resolveRuntime: async (ctx): Promise<Record<string, unknown>> => ({
-      // A workspace of this subtask's own, not the parent's — two writing
-      // sessions in one container edit one working tree. See
+      // A workspace no other live session shares — two writing sessions in one
+      // container edit one working tree. See
       // {@link file://./config.ts ClaudeCodeConfig.subtaskWorkspace}, which also
-      // carries why the name must be a pure function of these two ids.
+      // carries why one subtask must get one name on every chunk.
       [WORKSPACE_RUNTIME_KEY]: await config.subtaskWorkspace({
         taskId: ctx.taskId,
-        subtaskId: ctx.subtaskId
+        subtaskId: ctx.subtaskId,
+        // `""` is the schema's default: no branch asked for.
+        ...(ctx.params.continue ? { continue: ctx.params.continue } : {})
       })
     }),
 
     /**
-     * The workspace was this execution's alone, so it goes when the execution does.
+     * An execution cut short leaves commits nobody asked to keep. Before
+     * {@link onSettled}, which core runs after this on the same paths.
+     */
+    onAbort: async (ctx): Promise<void> => {
+      await config.abortSubtaskWorkspace({
+        taskId: ctx.taskId,
+        subtaskId: ctx.subtaskId
+      });
+    },
+
+    /**
+     * The execution is over, so its workspace can go to the next subtask.
      *
      * `onSettled` rather than `onAbort`: this has to run on the **success** path
      * above all, which is the one an abort hook never sees. Core contains a throw
-     * here, so a container that cannot be stopped does not fail a subtask that
+     * here, so a workspace that cannot be released does not fail a subtask that
      * worked.
-     *
-     * Reclaim rather than release — there is nothing in it worth keeping, and
-     * emptying its storage is what stops an ephemeral workspace accumulating. The
-     * *parent's* workspace is the opposite case and takes `releaseContainer`
-     * instead; the workspace host carries that distinction.
      */
     onSettled: async (ctx): Promise<void> => {
-      await config.reclaimSubtaskWorkspace({
+      await config.releaseSubtaskWorkspace({
         taskId: ctx.taskId,
         subtaskId: ctx.subtaskId
       });

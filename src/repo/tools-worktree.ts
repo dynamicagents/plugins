@@ -10,6 +10,7 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
   const {
     author,
     bounded,
+    config,
     fetchOrigin,
     logFailure,
     plain,
@@ -111,6 +112,12 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         message: z.string().describe("Commit message")
       }),
       execute: async ({ dir, message }) => {
+        const refused = await config.beforeWrite?.({
+          tool: "repo_commit",
+          dir
+        });
+        if (refused) return refused;
+
         // Checked rather than fired and forgotten. A failed `add` leaves the
         // index holding less than the model believes, and the commit that
         // follows still succeeds — so the round reports a commit that quietly
@@ -217,6 +224,14 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         if (!remote)
           return `${dir} has no origin on an allowed host — clone it with repo_clone first`;
 
+        const refused = await config.beforeWrite?.({
+          tool: "repo_push",
+          dir,
+          branch,
+          url: remote.url
+        });
+        if (refused) return refused;
+
         // Switch to the branch, or create it — but never *reset* it.
         //
         // `-b`, never `-B`: `-B` is create-or-reset, so on a branch that already
@@ -310,6 +325,15 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         if (!result.success) {
           logFailure("repo_push", result);
           return bounded(`push failed: ${result.stderr || result.stdout}`);
+        }
+        try {
+          await config.afterPush?.({ dir, branch, commit: tip.stdout.trim() });
+        } catch (err) {
+          console.warn("[repo] afterPush failed", {
+            dir,
+            branch,
+            err: String(err)
+          });
         }
 
         // What `--set-upstream` would do as a side effect of the push, written

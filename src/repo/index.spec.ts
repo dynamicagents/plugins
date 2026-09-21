@@ -2419,3 +2419,155 @@ describe("repo_fetch", () => {
     expect(result).toMatch(/fetch failed: .*authentication refused/);
   });
 });
+
+describe("a host that keeps worktrees", () => {
+  const worktrees = () => {
+    const asked: string[] = [];
+    return {
+      asked,
+      seam: {
+        list: async () => {
+          asked.push("list");
+          return "listed";
+        },
+        use: async (branch?: string) => {
+          asked.push(`use ${branch ?? "(checkout)"}`);
+          return "switched";
+        },
+        release: async (branch: string) => {
+          asked.push(`release ${branch}`);
+          return "released";
+        }
+      }
+    };
+  };
+  const plugin = (config: Partial<RepoConfig>) =>
+    repo({
+      exec: recorder().exec,
+      git: gitRecorder().git,
+      token: () => TOKEN,
+      ...config
+    });
+
+  it("gives the main agent the switch, and never a delegated subtask", async () => {
+    const { seam } = worktrees();
+    const withSeam = plugin({ worktrees: seam });
+    const main = await withSeam.mainAgentTools?.({} as never);
+    expect(Object.keys(main ?? {})).toEqual(
+      expect.arrayContaining(["repo_worktree", "repo_worktrees"])
+    );
+    const family = withSeam.toolFamilies?.repo?.({ runtime: {} } as never);
+    const delegated = family && "tools" in family ? family.tools : {};
+    expect(Object.keys(delegated)).not.toContain("repo_worktree");
+    expect(Object.keys(delegated)).not.toContain("repo_worktrees");
+
+    const without = await plugin({}).mainAgentTools?.({} as never);
+    expect(Object.keys(without ?? {})).not.toContain("repo_worktree");
+  });
+
+  it("passes the host's answers through, and checks a branch's shape first", async () => {
+    const { asked, seam } = worktrees();
+    const main = (await plugin({ worktrees: seam }).mainAgentTools?.(
+      {} as never
+    )) as ToolSet;
+
+    expect(await run(main, "repo_worktrees", {})).toBe("listed");
+    expect(
+      await run(main, "repo_worktrees", { release: "claude-coder/t/1" })
+    ).toBe("released");
+    expect(
+      await run(main, "repo_worktree", { branch: "claude-coder/t/1" })
+    ).toBe("switched");
+    expect(await run(main, "repo_worktree", {})).toBe("switched");
+    expect(await run(main, "repo_worktree", { branch: "--help" })).toMatch(
+      /not a plain branch name/
+    );
+    expect(asked).toEqual([
+      "list",
+      "release claude-coder/t/1",
+      "use claude-coder/t/1",
+      "use (checkout)"
+    ]);
+  });
+
+  it("lets the host refuse a commit before anything is staged", async () => {
+    const { exec, calls } = recorder();
+    const result = await run(
+      tools(exec, {
+        beforeWrite: async ({ tool }) =>
+          tool === "repo_commit" ? "a session is still working here" : undefined
+      }),
+      "repo_commit",
+      { dir: "/w/r", message: "m" }
+    );
+
+    expect(result).toBe("a session is still working here");
+    expect(calls).toEqual([]);
+  });
+
+  it("lets the host refuse a push, telling it the origin", async () => {
+    const { exec } = recorder();
+    const { git, gitCalls } = gitRecorder();
+    const seen: unknown[] = [];
+    const result = await run(
+      tools(exec, {
+        git,
+        beforeWrite: async (write) => {
+          seen.push(write);
+          return "that origin is not the one this worktree was cloned from";
+        }
+      }),
+      "repo_push",
+      { dir: "/w/r", branch: "coder/x" }
+    );
+
+    expect(result).toBe(
+      "that origin is not the one this worktree was cloned from"
+    );
+    expect(seen).toEqual([
+      {
+        tool: "repo_push",
+        dir: "/w/r",
+        branch: "coder/x",
+        url: "https://github.com/o/r"
+      }
+    ]);
+    expect(gitCalls).toEqual([]);
+  });
+
+  it("tells the host what a landed push put on the remote", async () => {
+    const { exec } = recorder();
+    const pushed: unknown[] = [];
+    const result = await run(
+      tools(exec, {
+        afterPush: async (push) => {
+          pushed.push(push);
+        }
+      }),
+      "repo_push",
+      { dir: "/w/r", branch: "coder/x" }
+    );
+
+    expect(result).toBe("pushed coder/x");
+    expect(pushed).toEqual([
+      { dir: "/w/r", branch: "coder/x", commit: "1f0cd15e0f7c8b" }
+    ]);
+  });
+
+  it("still reports a landed push when the host's bookkeeping throws", async () => {
+    const { exec } = recorder();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await run(
+      tools(exec, {
+        afterPush: async () => {
+          throw new Error("storage gone");
+        }
+      }),
+      "repo_push",
+      { dir: "/w/r", branch: "coder/x" }
+    );
+    warn.mockRestore();
+
+    expect(result).toBe("pushed coder/x");
+  });
+});

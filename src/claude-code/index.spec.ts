@@ -3,6 +3,7 @@ import { claudeCode, claudeCodeRead, claudeCodeSession } from "./index.js";
 import { DEFAULT_PERMISSION_MODE } from "./config.js";
 import {
   CLAUDE_CODE_READ_TYPE,
+  CLAUDE_CODE_SPEC,
   CLAUDE_CODE_TYPE,
   WORKSPACE_RUNTIME_KEY
 } from "./recipe.js";
@@ -23,21 +24,28 @@ function memoryStore(): CredentialStore {
   };
 }
 
-/** Every workspace a spec's `subtaskWorkspace` was asked to make, then reclaim. */
-const reclaimed: string[] = [];
+/** What a spec's seams were asked, in order. */
+const seamCalls: string[] = [];
 
 const config = (over: Partial<Parameters<typeof claudeCode>[0]> = {}) => ({
   credentials: () => [CREDENTIAL],
   workspaceName: () => "caller|acme/api",
   // What a host does with these is its own — see the config's doc. What a spec
   // needs is that the ids reach them, and that the name is the same twice.
-  subtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) =>
-    `caller|<subtask:${ctx.taskId}:${ctx.subtaskId}>`,
-  reclaimSubtaskWorkspace: async (ctx: {
+  subtaskWorkspace: async (ctx: {
+    taskId: string;
+    subtaskId: number;
+    continue?: string;
+  }) =>
+    `caller|<subtask:${ctx.taskId}:${ctx.subtaskId}${ctx.continue ? `:${ctx.continue}` : ""}>`,
+  releaseSubtaskWorkspace: async (ctx: {
     taskId: string;
     subtaskId: number;
   }) => {
-    reclaimed.push(`${ctx.taskId}:${ctx.subtaskId}`);
+    seamCalls.push(`release ${ctx.taskId}:${ctx.subtaskId}`);
+  },
+  abortSubtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) => {
+    seamCalls.push(`abort ${ctx.taskId}:${ctx.subtaskId}`);
   },
   ...over
 });
@@ -79,6 +87,25 @@ describe("resolveRuntime", () => {
     expect(second).toEqual(first);
   });
 
+  it("passes the branch a subtask continues, and nothing for the default", async () => {
+    const plugin = claudeCode(config());
+
+    await expect(
+      plugin.resolveRuntime?.({
+        ...context,
+        params: { continue: "claude-coder/task-0/2" }
+      })
+    ).resolves.toEqual({
+      [WORKSPACE_RUNTIME_KEY]: "caller|<subtask:task-1:3:claude-coder/task-0/2>"
+    });
+    // The schema's default for an omitted param.
+    await expect(
+      plugin.resolveRuntime?.({ ...context, params: { continue: "" } })
+    ).resolves.toEqual({
+      [WORKSPACE_RUNTIME_KEY]: "caller|<subtask:task-1:3>"
+    });
+  });
+
   it("gives two subtasks of one task different workspaces", async () => {
     const plugin = claudeCode(config());
 
@@ -115,22 +142,40 @@ describe("resolveRuntime", () => {
   });
 });
 
-describe("onSettled", () => {
-  it("reclaims the writing subtask's own workspace, keyed on its ids", async () => {
-    reclaimed.length = 0;
+describe("onAbort and onSettled", () => {
+  it("releases the writing subtask's workspace, keyed on its ids", async () => {
+    seamCalls.length = 0;
     const plugin = claudeCode(config());
 
     await plugin.onSettled?.({ ...context, subtaskId: 7 });
-    expect(reclaimed).toEqual(["task-1:7"]);
+    expect(seamCalls).toEqual(["release task-1:7"]);
+  });
+
+  it("aborts the writing subtask's work, keyed on its ids", async () => {
+    seamCalls.length = 0;
+    const plugin = claudeCode(config());
+
+    await plugin.onAbort?.({ ...context, subtaskId: 7 });
+    expect(seamCalls).toEqual(["abort task-1:7"]);
   });
 
   /**
    * The reading type shares the **parent's** workspace, which outlives every
-   * subtask that read in it. A hook here would reclaim the checkout and the
-   * dependency tree the next task is counting on.
+   * subtask that read in it, and its copy is the session driver's to delete.
    */
   it("is absent on the reading plugin, which owns no workspace", () => {
-    expect(claudeCodeRead(config()).onSettled).toBeUndefined();
+    const plugin = claudeCodeRead(config());
+    expect(plugin.onSettled).toBeUndefined();
+    expect(plugin.onAbort).toBeUndefined();
+  });
+});
+
+describe("the writing type's params", () => {
+  it("defaults continue to empty, so a delegation may omit it", () => {
+    expect(CLAUDE_CODE_SPEC.params?.parse({})).toEqual({ continue: "" });
+    expect(
+      CLAUDE_CODE_SPEC.params?.parse({ continue: "claude-coder/t/1" })
+    ).toEqual({ continue: "claude-coder/t/1" });
   });
 });
 
@@ -354,13 +399,32 @@ describe("where a session runs", () => {
     expect(calls).toEqual([]);
   });
 
+  it("resumes a finished session under its own id, in the checkout", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await claudeCodeSession(config())
+      .followUp(runtime, 1, "sess-1", "one more thing", "/workspace/r")
+      .catch(() => {});
+
+    expect(calls.map((c) => c.options.id)).toEqual([
+      "claude-code-run:1:follow-up"
+    ]);
+    expect(calls[0]?.options.cwd).toBe("/workspace/r");
+    expect(calls[0]?.command).toContain("--resume sess-1");
+    expect(calls[0]?.command).toContain("'one more thing'");
+  });
+
   /** A session stopped with no drain attached has nobody else to close it. */
   it("deletes the copy when a session is stopped", async () => {
     const { calls, killed, runtime } = launchRecorder();
 
     await claudeCodeSession(config()).stop(runtime, 1);
 
-    expect(killed).toEqual(["claude-code-run:1"]);
+    // A follow-up turn runs under its own id, and is stopped with the session.
+    expect(killed).toEqual([
+      "claude-code-run:1:follow-up",
+      "claude-code-run:1"
+    ]);
     expect(calls.map((c) => c.options.id)).toEqual([
       "claude-code-run:1:uncopy"
     ]);

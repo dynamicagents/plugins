@@ -6,6 +6,7 @@ import { cloneTools } from "./tools-clone.js";
 import { forgeTools } from "./tools-forge.js";
 import { reviewTools } from "./tools-review.js";
 import { worktreeTools } from "./tools-worktree.js";
+import { worktreesTools } from "./tools-worktrees.js";
 
 /**
  * The URL parsing, re-exported from the one entry point.
@@ -273,6 +274,63 @@ export interface RepoConfig {
     owner: string;
     repo: string;
   }) => void;
+  /**
+   * Asked before `repo_commit` or `repo_push` changes anything. A string refuses
+   * with that sentence; `undefined` lets it through.
+   *
+   * For a host whose checkouts something else may be working in, or may have
+   * rewritten — a delegated session that has not finished, a `.git/config` a
+   * session had a shell over. Only the host knows either, and a refusal here is
+   * the only place the model hears it before the write lands. `url` is the
+   * origin a push would go to, read from the checkout.
+   */
+  beforeWrite?: (write: {
+    tool: "repo_commit" | "repo_push";
+    dir: string;
+    branch?: string;
+    url?: string;
+  }) => Promise<string | undefined>;
+  /**
+   * Called once a push has landed, with the commit it put on the remote.
+   *
+   * A throw is caught and logged: the push happened, and the model must be told
+   * so whatever a host's bookkeeping does.
+   */
+  afterPush?: (push: {
+    dir: string;
+    branch: string;
+    commit: string;
+  }) => Promise<void>;
+  /**
+   * The worktrees a host keeps for delegated work, and the way between them.
+   *
+   * Set, the main agent gets `repo_worktrees` and `repo_worktree`; delegated
+   * subtasks never do, because a switch moves the main agent's own tools. See
+   * {@link RepoWorktrees}.
+   */
+  worktrees?: RepoWorktrees;
+}
+
+/**
+ * Checkouts a host keeps apart from the main one — each holding a branch its
+ * writing subtasks committed on — and the switch that points every repo tool at
+ * one of them.
+ *
+ * The host renders every answer: which worktrees exist, where their checkouts
+ * sit and what is safe to do in them are its facts, and a sentence is what the
+ * model reads.
+ */
+export interface RepoWorktrees {
+  /** Every worktree, with its branch and state. */
+  list(): Promise<string>;
+  /**
+   * Point every repo tool — and whatever else the host routes the same way — at
+   * the worktree holding `branch`, or back at the main checkout when it is absent.
+   * Answers what the model now has in front of it.
+   */
+  use(branch?: string): Promise<string>;
+  /** Give up `branch`'s worktree, and the unpushed work in it. */
+  release(branch: string): Promise<string>;
 }
 
 /** What {@link RepoConfig.afterCheckout} is told about a checkout. */
@@ -337,7 +395,12 @@ export function repo(config: RepoConfig): AgentPlugin {
   return definePlugin({
     key: "repo",
 
-    mainAgentTools: () => buildRepoTools(config),
+    // The worktree switch is the main agent's alone: it moves where the main
+    // agent's own tools run, which no delegated subtask may decide.
+    mainAgentTools: () => ({
+      ...buildRepoTools(config),
+      ...(config.worktrees ? worktreesTools(config.worktrees) : {})
+    }),
 
     // The runtime state goes through to `exec` untouched, so a delegated
     // subtask's git commands run in the same container its parent cloned into.
@@ -356,6 +419,11 @@ export function repo(config: RepoConfig): AgentPlugin {
       "- `repo_issue_view` reads an issue or pull request with its comments, `repo_pr_view` shows a pull request's state and the files it touches, and `repo_pr_comment` leaves a comment. All three act on the repository you have checked out — read the issue a task refers to before guessing what it asks for.",
       "- `repo_pr_review_status` says whether a reviewer has finished. Ask it before reading a review: one that has not landed has left nothing, so an empty list of threads means nothing yet rather than nothing to do.",
       "- `repo_pr_threads` reads the review threads — the comments left on particular lines, which are not on the timeline `repo_issue_view` shows. `repo_pr_thread_reply` answers one and resolves it. Answer every thread: say what you changed and where, or why you did not, and resolve it either way so the record says what happened.",
+      ...(config.worktrees
+        ? [
+            "- `repo_worktrees` lists the worktrees your writing subtasks committed in — each one's branch, whether a session is still in it, whether its commits are pushed — and releases one you will not keep. `repo_worktree` points every repo tool and your file reads at the worktree holding a branch, so you review, push and open the pull request from there; call it with no branch to come back to your own checkout."
+          ]
+        : []),
       "Never push to the default branch. Finish by opening a pull request and reporting its URL."
     ].join("\n"),
 
