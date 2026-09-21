@@ -503,6 +503,7 @@ export {
   CLAUDE_EXEC_PREFIX,
   CREDENTIAL_PLACEHOLDER,
   execIdFor,
+  followUpExecIdFor,
   freshCursor
 } from "./run.js";
 export type {
