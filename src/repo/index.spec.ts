@@ -2277,3 +2277,85 @@ describe("GitHub Enterprise", () => {
     );
   });
 });
+
+/**
+ * Reviewing a ref instead of the working tree.
+ *
+ * The case this exists for is work that arrived on a branch rather than in the
+ * reviewer's own tree — a subtask that pushed from a container of its own. The
+ * security property is the same one the rest of this file is about: the ref is
+ * model-authored, so it must reach git as a value and never as command text.
+ */
+describe("diffing a ref", () => {
+  it("passes the ref as an env var, never as command text", async () => {
+    const { exec, calls } = recorder({
+      diff: { stdout: "diff --git a/a b/a" }
+    });
+    await run(tools(exec), "repo_diff", {
+      dir: "/w/r",
+      ref: "origin/coder/add-json-flag"
+    });
+
+    const call = calls.find((c) => c.command.includes("diff"));
+    expect(call?.command).toContain('"$REPO_REF"');
+    // The value itself must not appear in the command string at all — that is
+    // what keeps a ref from being read as a second shell command.
+    expect(call?.command).not.toContain("origin/coder/add-json-flag");
+    expect(call?.options?.env).toMatchObject({
+      REPO_REF: "origin/coder/add-json-flag"
+    });
+  });
+
+  /**
+   * Three dots, and **the reviewed ref on the right**. `git diff A...B` compares
+   * the merge base to `B`, so this is what the branch added since it diverged.
+   * Reversed, it reports what the reviewer's own HEAD gained — the "the branch
+   * reverted things" reading the range exists to avoid.
+   */
+  it("asks for what the ref added, not what HEAD did", async () => {
+    const { exec, calls } = recorder({ diff: { stdout: "" } });
+    await run(tools(exec), "repo_diff", { dir: "/w/r", ref: "origin/x" });
+
+    expect(calls.some((c) => c.command.includes('HEAD..."$REPO_REF"'))).toBe(
+      true
+    );
+  });
+
+  it("refuses a ref that is not a plain ref, before running anything", async () => {
+    const { exec, calls } = recorder({ diff: { stdout: "" } });
+    const result = await run(tools(exec), "repo_diff", {
+      dir: "/w/r",
+      ref: "-x"
+    });
+
+    // `git diff -x` reads the leading dash as an option. Refused on shape, and
+    // refused *before* git is reached.
+    expect(result).toContain("not a plain ref");
+    expect(calls.some((c) => c.command.includes("diff"))).toBe(false);
+  });
+
+  it("says a ref may need fetching when git cannot resolve it", async () => {
+    const { exec } = recorder({
+      diff: { success: false, stdout: "fatal: bad revision 'origin/nope'" }
+    });
+    const result = await run(tools(exec), "repo_diff", {
+      dir: "/w/r",
+      ref: "origin/nope"
+    });
+
+    // A failed diff must never read as "no changes" — this is the tool a
+    // reviewing agent trusts most, and the common cause is a ref never fetched.
+    expect(result).not.toBe("(no diff)");
+    expect(result).toContain("origin/nope");
+    expect(result).toContain("fetch it first");
+  });
+
+  it("still diffs the working tree when no ref is given", async () => {
+    const { exec, calls } = recorder({ diff: { stdout: "d" } });
+    await run(tools(exec), "repo_diff", { dir: "/w/r" });
+
+    const call = calls.find((c) => c.command.includes("diff"));
+    expect(call?.command).not.toContain("REPO_REF");
+    expect(call?.command).not.toContain("HEAD");
+  });
+});

@@ -115,7 +115,7 @@
     "@cloudflare/shell": "0.4.3",
     "@platformatic/vfs": "^0.4.0",
     "@cloudflare/vitest-plugin": "^1.1.9",
-    "@dynamicagents/core": "^0.12.0",
+    "@dynamicagents/core": "git+https://github.com/dynamicagents/core.git#main",
     "@types/node": "^26.5.1",
     "agents": "^0.24.0",
     "ai": "^7.0.101",
@@ -138,6 +138,7 @@
     "access": "public"
   },
   "allowScripts": {
+    "github:dynamicagents/core": true,
     "esbuild": false,
     "fsevents": false,
     "sharp": false,

@@ -29,6 +29,21 @@ export type PermissionMode =
 export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 
 /**
+ * What a read-only session runs under.
+ *
+ * `plan` rather than a narrower-sounding mode because the note above is the whole
+ * point: **every** mode but `bypassPermissions` produces a session that cannot
+ * edit the checkout it was given. That is a liability for a session meant to write
+ * and exactly the property wanted here, so the mode is not a restriction bolted on
+ * — it is the same mode, read the other way round.
+ *
+ * `acceptEdits` would be wrong for the opposite reason to the usual one: it still
+ * denies `npm ci`, git and the test suite, so it is neither a writing session nor
+ * a clean reading one.
+ */
+export const READ_ONLY_PERMISSION_MODE: PermissionMode = "plan";
+
+/**
  * The effort levels `claude --effort` accepts.
  *
  * Spelled out for a sharper reason than {@link PermissionMode}: an unrecognised
@@ -78,6 +93,59 @@ export interface ClaudeCodeConfig {
    * name somebody else's.
    */
   workspaceName: () => string;
+
+  /**
+   * The workspace one **write** subtask runs in, ready to be worked in.
+   *
+   * A write session gets a workspace of its own, keyed per subtask, because two
+   * autonomous sessions in one container are two agents editing one working tree
+   * — each running the project's test suite over the other's half-finished edits.
+   * The isolation boundary is the one the platform already draws: `computer` pairs
+   * one Durable Object with one container, so a different name is a different
+   * filesystem.
+   *
+   * **The consumer answers this, not the plugin**, for the same reason
+   * `workspaceName` is a thunk: which Durable Object a name resolves to, and how a
+   * fresh one acquires a checkout, are facts about a deployment. Cloning needs a
+   * remote url, a directory convention and a host allowlist, all of which belong
+   * to `/repo` — a plugin reaching across to another plugin's knowledge is how two
+   * copies of it start to drift.
+   *
+   * **The name must be a pure function of `taskId` and `subtaskId`.** Core calls
+   * `resolveRuntime` once per *chunk*, not once per run, so a name minted fresh
+   * would hand chunk two a different container than chunk one and strand the work
+   * in the first.
+   *
+   * Resolving is expected to be idempotent and is awaited: returning means the
+   * workspace is addressable and has a checkout. Arming a dependency install is a
+   * legitimate part of that, but awaiting one is not — an install is minutes and
+   * this sits in front of the session that is waiting for it.
+   */
+  subtaskWorkspace: (ctx: {
+    taskId: string;
+    subtaskId: number;
+  }) => Promise<string>;
+
+  /**
+   * Throw away the workspace {@link subtaskWorkspace} made, now the execution is
+   * over.
+   *
+   * Nothing else is coming. A Durable Object is never reclaimed by the platform and
+   * a namespace cannot be enumerated from a Worker, so a per-subtask workspace left
+   * alone keeps a container billing until its idle deadline and its storage forever.
+   * That deadline cannot be tuned down to meet the cost, either — it has to exceed
+   * the longest command the session may run.
+   *
+   * **Must key on the same `taskId` and `subtaskId`**, or it reclaims a workspace
+   * that is not this subtask's.
+   *
+   * Called for every terminal outcome, so it has to tolerate a workspace that was
+   * never created — a subtask can fail before `subtaskWorkspace` ever resolved.
+   */
+  reclaimSubtaskWorkspace: (ctx: {
+    taskId: string;
+    subtaskId: number;
+  }) => Promise<void>;
 
   /** Which model the session runs. Unset, Claude Code picks its own default. */
   model?: string;
