@@ -188,8 +188,8 @@ export async function refreshCheckout({
   // `reset --hard` below touches a submodule's tree without
   // `--recurse-submodules`, so a submodule that has moved past its pin — which
   // is what a superproject looks like after its own sync — is not work this
-  // refresh could lose. Counted as dirty, it refused every refresh of such a
-  // checkout, and a host's `afterCheckout` never learned it was there.
+  // refresh could lose. Counted as dirty, it would refuse every refresh of such
+  // a checkout, and a host's `afterCheckout` would never learn it is there.
   const dirty = await plain("status --porcelain --ignore-submodules=all", dir);
   if (!dirty.success) {
     return {

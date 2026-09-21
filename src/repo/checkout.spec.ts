@@ -209,8 +209,8 @@ describe("refreshCheckout", () => {
   /**
    * A superproject after its own sync: every submodule past its pin. Neither
    * `checkout` nor `reset --hard` touches a submodule's tree, so that is not work
-   * a refresh could lose — and read as dirty, it refused every refresh of such a
-   * checkout.
+   * a refresh could lose — and read as dirty, it would refuse every refresh of
+   * such a checkout.
    */
   it("does not count submodules that moved past their pins as uncommitted work", async () => {
     const { plain, ran } = runner({

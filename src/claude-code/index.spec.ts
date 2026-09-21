@@ -163,7 +163,7 @@ describe("where a session runs", () => {
    * Answers the copy scripts, and refuses the launch once it has recorded it —
    * the launch is what is under test.
    */
-  function launchRecorder() {
+  function launchRecorder(isolated = true) {
     const calls: {
       command: string;
       options: { id?: string; cwd?: string; env?: Record<string, string> };
@@ -179,7 +179,10 @@ describe("where a session runs", () => {
         ) => {
           calls.push({ command, options });
           if (options.id?.endsWith(":copy"))
-            return finished(options.id, `tree=${COPIED}\ndeps=1/1\n`);
+            return finished(
+              options.id,
+              `tree=${COPIED}\ndeps=1/1\nupper=disk\nisolated=${isolated ? "yes" : "no"}\n`
+            );
           if (options.id?.endsWith(":uncopy")) return finished(options.id, "");
           throw new Error("stop here — the launch is what is under test");
         },
@@ -212,8 +215,38 @@ describe("where a session runs", () => {
   });
 
   /**
-   * The isolation is the copy, so a reading session no longer needs a mode that
-   * refuses edits — and every such mode refuses the suite and the build too.
+   * A working directory is not a boundary: the session runs as root, and its
+   * brief may name the original by absolute path.
+   */
+  it("launches a reading session where the workspace is read-only", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await claudeCodeSession(config())
+      .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
+      .catch(() => {});
+
+    expect(calls[1]?.command).toMatch(
+      /^unshare --mount --propagation private -- sh -c '.*' sh claude -p /
+    );
+    expect(calls[1]?.options.env?.CLAUDE_READ_ONLY).toBe("/workspace");
+  });
+
+  it("launches it in the copy alone where the container refuses the namespace", async () => {
+    const { calls, runtime } = launchRecorder(false);
+
+    await claudeCodeSession(config())
+      .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
+      .catch(() => {});
+
+    expect(calls[1]?.command).toMatch(/^claude -p /);
+    expect(calls[1]?.options.cwd).toBe(COPIED);
+    expect(calls[1]?.command).toContain("Do not write under");
+  });
+
+  /**
+   * The copy and the read-only namespace are the isolation, so a reading session
+   * needs no mode that refuses edits — and every such mode refuses the suite and
+   * the build too.
    */
   it("launches a reading session under the same mode as a writing one", async () => {
     const { calls, runtime } = launchRecorder();
@@ -238,6 +271,7 @@ describe("where a session runs", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.options.cwd).toBe("/workspace/r");
+    expect(calls[0]?.command).toMatch(/^claude -p /);
     expect(calls[0]?.command).toContain(
       `--permission-mode ${DEFAULT_PERMISSION_MODE}`
     );

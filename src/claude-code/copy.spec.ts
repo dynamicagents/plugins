@@ -7,12 +7,13 @@ import {
   CLOSE_SCRIPT,
   COPY_ROOT,
   OPEN_SCRIPT,
+  WORKSPACE_MOUNT,
   closeCopy,
   copyDirFor,
   copyNote,
   openCopy
 } from "./copy.js";
-import type { SessionRuntime } from "./run.js";
+import { READ_ONLY_LAUNCH, type SessionRuntime } from "./run.js";
 
 type Event = WorkspaceRuntimeEvent<"utf8">;
 
@@ -62,7 +63,8 @@ function recorder(reply: (call: Call) => WorkspaceRuntimeExecHandle<"utf8">) {
   return { calls, runtime };
 }
 
-const READY = "tree=/var/tmp/claude-read/claude-code-run_3/tree\ndeps=2/2\n";
+const READY =
+  "tree=/var/tmp/claude-read/claude-code-run_3/tree\ndeps=2/2\nupper=disk\nisolated=yes\n";
 
 describe("where a copy lives", () => {
   /**
@@ -71,7 +73,7 @@ describe("where a copy lives", () => {
    * reason for a copy.
    */
   it("is on container disk, never under the workspace mount", () => {
-    expect(COPY_ROOT.startsWith("/workspace")).toBe(false);
+    expect(COPY_ROOT.startsWith(WORKSPACE_MOUNT)).toBe(false);
     expect(copyDirFor("claude-code-run:3").startsWith(`${COPY_ROOT}/`)).toBe(
       true
     );
@@ -99,7 +101,9 @@ describe("openCopy", () => {
 
     expect(copy).toEqual({
       dir: "/var/tmp/claude-read/claude-code-run_3/tree",
-      deps: { laid: 2, found: 2 }
+      source: "/workspace/dev-agents",
+      deps: { laid: 2, found: 2 },
+      isolated: true
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.source).toBe(OPEN_SCRIPT);
@@ -111,7 +115,10 @@ describe("openCopy", () => {
         COPY: `${COPY_ROOT}/claude-code-run_3`,
         COPY_ROOT,
         // The session ceiling plus the sweep margin, in minutes.
-        STALE_MIN: "30"
+        STALE_MIN: "30",
+        // The probe runs the same script the launch will.
+        WORKSPACE: WORKSPACE_MOUNT,
+        READ_ONLY_LAUNCH
       }
     });
   });
@@ -153,6 +160,27 @@ describe("openCopy", () => {
    * building one copy would each delete what the other was making, so the retry
    * waits on the first instead.
    */
+  /**
+   * A session that could write the original through an absolute path is only
+   * held back by its brief, so a copy that could not get the namespace says so.
+   */
+  it("reports a container that refused the read-only namespace", async () => {
+    const { runtime } = recorder((call) =>
+      finished(
+        call.options.id ?? "",
+        READY.replace("isolated=yes", "isolated=no")
+      )
+    );
+
+    const copy = await openCopy(runtime, {
+      execId: "claude-code-run:3",
+      source: "/workspace/r",
+      timeoutMs: 60_000
+    });
+
+    expect(copy.isolated).toBe(false);
+  });
+
   it("waits on a copy a previous attempt is still making", async () => {
     const attached: string[] = [];
     const runtime = {
@@ -219,6 +247,18 @@ describe("the scripts", () => {
     expect(OPEN_SCRIPT).toContain("submodule foreach --quiet --recursive");
   });
 
+  /** A copy of HEAD alone would answer questions about code nobody has. */
+  it("carry the parent's uncommitted changes to tracked files", () => {
+    expect(OPEN_SCRIPT).toContain("diff --binary --ignore-submodules=all HEAD");
+    expect(OPEN_SCRIPT).toContain("apply --binary");
+  });
+
+  it("probe the namespace with the script the launch runs", () => {
+    expect(OPEN_SCRIPT).toContain(
+      'sh -c "$READ_ONLY_LAUNCH" sh test ! -w "$SRC"'
+    );
+  });
+
   it("lay dependency trees as overlays, never as bind mounts of the parent's", () => {
     expect(OPEN_SCRIPT).toContain("mount -t overlay overlay");
     expect(OPEN_SCRIPT).not.toContain("mount --bind");
@@ -233,17 +273,39 @@ describe("the scripts", () => {
 });
 
 describe("copyNote", () => {
+  const copy = {
+    dir: "/var/tmp/claude-read/claude-code-run_3/tree",
+    source: "/workspace/r",
+    deps: { found: 1, laid: 1 },
+    isolated: true
+  };
+
   it("says the final message is the deliverable", () => {
-    expect(copyNote({ found: 1, laid: 1 })).toMatch(
+    expect(copyNote(copy)).toMatch(
       /final message is the whole of what you deliver/
     );
-    expect(copyNote({ found: 1, laid: 1 })).not.toMatch(/Install them/);
+    expect(copyNote(copy)).not.toMatch(/Install them/);
+  });
+
+  /** A brief that names the original by absolute path has to be translatable. */
+  it("maps the original's paths onto the copy", () => {
+    expect(copyNote(copy)).toContain(
+      "`/workspace/r` itself is read-only to you. Where your brief names a path under it, use the same path under `/var/tmp/claude-read/claude-code-run_3/tree`."
+    );
+  });
+
+  it("asks a session with no namespace not to write the original", () => {
+    expect(copyNote({ ...copy, isolated: false })).toContain(
+      "**Do not write under `/workspace/r`**"
+    );
   });
 
   it("says when the dependency trees did not come across", () => {
-    expect(copyNote({ found: 2, laid: 0 })).toMatch(
+    expect(copyNote({ ...copy, deps: { found: 2, laid: 0 } })).toMatch(
       /were not carried into this copy/
     );
-    expect(copyNote({ found: 2, laid: 1 })).toMatch(/Some dependency trees/);
+    expect(copyNote({ ...copy, deps: { found: 2, laid: 1 } })).toMatch(
+      /Some dependency trees/
+    );
   });
 });

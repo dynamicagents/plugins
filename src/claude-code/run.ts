@@ -159,6 +159,39 @@ export interface LaunchOptions {
    * {@link file://./config.ts ClaudeCodeConfig.author}.
    */
   author?: { name: string; email: string };
+
+  /**
+   * A path the session must not be able to write under, however it names it.
+   *
+   * Set for a reading session, whose working directory is a throwaway copy while
+   * the tree it copied — and every other checkout — stays mounted where its brief
+   * may name it by absolute path. The session runs in a mount namespace of its
+   * own in which every mount under this path is read-only; see
+   * {@link READ_ONLY_LAUNCH}.
+   */
+  readOnly?: string;
+}
+
+/**
+ * Remount everything under `$CLAUDE_READ_ONLY` read-only, then become the command
+ * after it.
+ *
+ * Run inside `unshare --mount --propagation private`, so the remount is this
+ * process tree's view alone: the parent's tools, other sessions and the workspace
+ * sync see the same mounts, writable, as before. `remount,bind` changes only the
+ * per-mount flag, so it applies to the workspace's FUSE mount and to each
+ * dependency tree bound under it alike, and never touches what they hold.
+ *
+ * No single quote anywhere in it, because it travels inside one.
+ */
+export const READ_ONLY_LAUNCH =
+  'while read -r _ mnt _; do case "$mnt" in "$CLAUDE_READ_ONLY"|"$CLAUDE_READ_ONLY"/*) ' +
+  'mount -o remount,bind,ro "$mnt" || { echo "claude-read: could not make $mnt read-only" >&2; exit 97; };; ' +
+  'esac; done < /proc/self/mounts; exec "$@"';
+
+/** `command`, run in a namespace where `readOnly`'s mounts cannot be written. */
+export function readOnlyLaunch(command: string): string {
+  return `unshare --mount --propagation private -- sh -c '${READ_ONLY_LAUNCH}' sh ${command}`;
 }
 
 export interface Launch {
@@ -284,7 +317,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
     );
 
   return {
-    command: argv.join(" "),
+    command: options.readOnly ? readOnlyLaunch(argv.join(" ")) : argv.join(" "),
     // The last three are applied **after** the host's environment rather than
     // before it. For the placeholder that makes the guard above a second line
     // rather than the only one; for `IS_SANDBOX` it means a host cannot unset
@@ -302,6 +335,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
         ? { IS_SANDBOX: "1" }
         : undefined),
       ...gitIdentityEnv(options.author),
+      ...(options.readOnly ? { CLAUDE_READ_ONLY: options.readOnly } : {}),
       [RESERVED_ENV_KEY]: CREDENTIAL_PLACEHOLDER
     }
   };

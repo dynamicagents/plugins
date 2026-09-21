@@ -21,7 +21,7 @@ import {
   DEFAULT_WINDOW_MS,
   type ClaudeCodeConfig
 } from "./config.js";
-import { closeCopy, copyNote, openCopy } from "./copy.js";
+import { closeCopy, copyNote, openCopy, WORKSPACE_MOUNT } from "./copy.js";
 import {
   CLAUDE_CODE_READ_SPEC,
   CLAUDE_CODE_READ_TYPE,
@@ -170,7 +170,10 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       // `using`, so the attachment is released even when the drain throws.
       using handle = await startRun(runtime, {
         ...(copy
-          ? launch(`${prompt}\n\n${copyNote(copy.deps)}`, copy.dir)
+          ? {
+              ...launch(`${prompt}\n\n${copyNote(copy)}`, copy.dir),
+              ...(copy.isolated ? { readOnly: WORKSPACE_MOUNT } : {})
+            }
           : launch(prompt, dir)),
         execId,
         timeoutMs

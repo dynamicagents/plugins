@@ -11,6 +11,7 @@ import {
   freshCursor,
   startRun,
   CREDENTIAL_PLACEHOLDER,
+  READ_ONLY_LAUNCH,
   type DrainCursor,
   type SessionRuntime
 } from "./run.js";
@@ -167,6 +168,29 @@ describe("buildLaunch", () => {
     // Without `--verbose`, stream-json emits only the final result — which would
     // make every progress note in this package arrive at once, at the end.
     expect(launch().command).toContain("--output-format stream-json --verbose");
+  });
+
+  /**
+   * A reading session's copy is its working directory, which is no boundary for
+   * a root process whose brief may name the original by absolute path.
+   */
+  it("runs a read-only launch in a namespace of its own, then becomes claude", () => {
+    const { command, env } = launch({ readOnly: "/workspace" });
+
+    expect(command).toBe(
+      `unshare --mount --propagation private -- sh -c '${READ_ONLY_LAUNCH}' sh ${launch().command}`
+    );
+    expect(env.CLAUDE_READ_ONLY).toBe("/workspace");
+    // `exec`, so the stop signal a session is sent lands on claude itself.
+    expect(READ_ONLY_LAUNCH).toContain('exec "$@"');
+    // It travels inside single quotes.
+    expect(READ_ONLY_LAUNCH).not.toContain("'");
+  });
+
+  it("leaves an ordinary launch alone", () => {
+    const { command, env } = launch();
+    expect(command.startsWith("claude -p ")).toBe(true);
+    expect(env.CLAUDE_READ_ONLY).toBeUndefined();
   });
 
   /**

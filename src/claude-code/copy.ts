@@ -2,6 +2,7 @@ import {
   attachRun,
   freshCursor,
   isExecBusy,
+  READ_ONLY_LAUNCH,
   type SessionRuntime
 } from "./run.js";
 
@@ -23,14 +24,23 @@ import {
  * and all of it is deleted when the session ends. No permission mode is asked to
  * hold that line; see {@link file://./index.ts claudeCodeRead}.
  *
+ * **A working directory is not a boundary on its own.** The session runs as root,
+ * and its brief may name the original by absolute path — so it is launched in a
+ * mount namespace in which everything under the workspace mount is read-only:
+ * reads of the original still work, a write fails there instead of landing. See
+ * `READ_ONLY_LAUNCH` in `./run.ts`. A container that refuses the namespace runs
+ * the session with the copy as its working directory only, and says so in the
+ * log and in the brief.
+ *
  * What the copy holds:
  *
  * - **A git checkout** is recreated rather than copied: a fresh repository whose
  *   objects come from the parent's through `alternates`, so nothing is copied but
  *   the working tree, with the parent's branches, remote-tracking refs and tags,
- *   on the parent's branch. Its refs are its own, so a session that moves a
- *   branch moves nobody else's. Every populated submodule gets the same, at the
- *   commit the parent has checked out. Files git does not track are not carried.
+ *   on the parent's branch, with the parent's uncommitted changes to tracked
+ *   files applied. Its refs are its own, so a session that moves a branch moves
+ *   nobody else's. Every populated submodule gets the same, at the commit the
+ *   parent has checked out. Files git does not track are not carried.
  * - **Anything else** — a scratchpad — is copied, `node_modules` excepted.
  * - **Dependency trees** are overlays: the parent's tree underneath, this copy's
  *   writes on top. A kernel that refuses the overlay leaves the tree absent
@@ -45,6 +55,14 @@ import {
  * Object — the one thing a copy exists to avoid.
  */
 export const COPY_ROOT = "/var/tmp/claude-read";
+
+/**
+ * The workspace mount, which a reading session sees read-only.
+ *
+ * The same `/workspace` {@link COPY_ROOT} is kept out of: it holds the original
+ * and every other checkout this container serves.
+ */
+export const WORKSPACE_MOUNT = "/workspace";
 
 /**
  * The copy one session works in: a pure function of its exec id.
@@ -139,6 +157,12 @@ recreate() {
   else
     git -C "$to" checkout --quiet --detach "$(git -C "$from" rev-parse HEAD)" || return 1
   fi
+  # What the parent has changed and not committed, staged or not. Submodules are
+  # each recreated at their own HEAD, so their pointers are not this diff's.
+  if ! git -C "$from" diff --quiet --ignore-submodules=all HEAD 2>/dev/null; then
+    git -C "$from" diff --binary --ignore-submodules=all HEAD |
+      git -C "$to" apply --binary --whitespace=nowarn || return 1
+  fi
 }
 
 # Sessions end by the container runtime's ceiling, so a copy past it is nobody's.
@@ -203,7 +227,20 @@ for lower in $(awk -v p="$SRC/" 'index($2, p) == 1 && $2 ~ /\\/node_modules$/ { 
   fi
 done
 
-printf 'tree=%s\\ndeps=%s/%s\\nupper=%s\\n' "$tree" "$laid" "$found" "$upper" > "$COPY/.ready"
+# Whether the session can be launched with the original read-only: the script
+# the launch runs, asked whether the original is still writable afterwards. A
+# workspace that is not a mount of its own would pass the remount and protect
+# nothing, so the question is the tree, not the command.
+if CLAUDE_READ_ONLY="$WORKSPACE" unshare --mount --propagation private -- \\
+  sh -c "$READ_ONLY_LAUNCH" sh test ! -w "$SRC" 2>"$COPY/.refused"; then
+  isolated=yes
+else
+  isolated=no
+  echo "claude-read: no read-only namespace: $(cat "$COPY/.refused")" >&2
+fi
+
+printf 'tree=%s\\ndeps=%s/%s\\nupper=%s\\nisolated=%s\\n' \\
+  "$tree" "$laid" "$found" "$upper" "$isolated" > "$COPY/.ready"
 cat "$COPY/.ready"
 `;
 
@@ -216,8 +253,12 @@ if [ -e "$COPY" ]; then close_copy "$COPY"; fi
 export interface ReadingCopy {
   /** Where the session runs — the copy of the parent's checkout. */
   dir: string;
+  /** The checkout it copies, which the session may name by absolute path. */
+  source: string;
   /** The parent's dependency trees, and how many of them the copy could overlay. */
   deps: { found: number; laid: number };
+  /** Whether the session can be launched with the workspace read-only. */
+  isolated: boolean;
 }
 
 /** Run a short script in the container to completion, bounded by `timeoutMs`. */
@@ -281,14 +322,17 @@ export async function openCopy(
   options: { execId: string; source: string; timeoutMs: number }
 ): Promise<ReadingCopy> {
   const copy = copyDirFor(options.execId);
+  const source = options.source.replace(/\/+$/, "");
   const ran = await runScript(
     runtime,
     `${options.execId}:copy`,
     OPEN_SCRIPT,
     {
-      SRC: options.source.replace(/\/+$/, ""),
+      SRC: source,
       COPY: copy,
       COPY_ROOT,
+      WORKSPACE: WORKSPACE_MOUNT,
+      READ_ONLY_LAUNCH,
       STALE_MIN: String(
         Math.ceil(options.timeoutMs / 60_000) + SWEEP_MARGIN_MIN
       ),
@@ -299,24 +343,30 @@ export async function openCopy(
   const dir = /^tree=(.+)$/m.exec(ran.stdout)?.[1];
   const deps = /^deps=(\d+)\/(\d+)$/m.exec(ran.stdout);
   const upper = /^upper=(\w+)$/m.exec(ran.stdout)?.[1];
+  const isolated = /^isolated=yes$/m.test(ran.stdout);
   if (ran.code !== 0 || !dir || !deps) {
     throw new Error(
       `claude-code: could not make a copy of ${options.source} for a reading ` +
         `session (exit ${ran.code}): ${ran.stderr.trim() || ran.stdout.trim() || "no output"}`
     );
   }
-  const result = {
+  const result: ReadingCopy = {
     dir,
-    deps: { laid: Number(deps[1]), found: Number(deps[2]) }
+    source,
+    deps: { laid: Number(deps[1]), found: Number(deps[2]) },
+    isolated
   };
   // Which way the dependency trees went is the fact about a copy worth
   // watching: a kernel that refuses overlays turns every reading session into
   // one that installs its own, and `upper` says whether their writes went to
   // disk or had to go to memory.
-  console.info("[claude-code] reading copy ready", {
+  // `isolated: false` is the one worth alerting on: that session can write the
+  // original through an absolute path, and only its brief asks it not to.
+  (isolated ? console.info : console.warn)("[claude-code] reading copy ready", {
     execId: options.execId,
     ...result.deps,
     upper,
+    isolated,
     ...(ran.stderr.trim() ? { stderr: ran.stderr.trim().slice(0, 500) } : {})
   });
   return result;
@@ -363,14 +413,20 @@ export async function closeCopy(
  * to use it well: it can run anything, and nothing it changes survives — so its
  * final message is the whole deliverable.
  */
-export function copyNote(deps: ReadingCopy["deps"]): string {
+export function copyNote(copy: ReadingCopy): string {
+  const { deps } = copy;
   const lines = [
     "## You are working in a throwaway copy",
     "",
-    "This is a private copy of the checkout, made for this task alone. Run whatever",
-    "helps — tests, builds, installs, registry queries. Nothing you change here",
-    "reaches the original or any other session, and all of it is deleted when you",
-    "finish, so there is nothing to commit, push or clean up.",
+    `Your working directory, \`${copy.dir}\`, is a private copy of \`${copy.source}\`,`,
+    "made for this task alone. Run whatever helps — tests, builds, installs,",
+    "registry queries. Nothing you change here reaches the original or any other",
+    "session, and all of it is deleted when you finish, so there is nothing to",
+    "commit, push or clean up.",
+    "",
+    copy.isolated
+      ? `\`${copy.source}\` itself is read-only to you. Where your brief names a path under it, use the same path under \`${copy.dir}\`.`
+      : `**Do not write under \`${copy.source}\`** — it is the original, and other sessions are reading it. Where your brief names a path under it, use the same path under \`${copy.dir}\`.`,
     "",
     "**Your final message is the whole of what you deliver.** Anything you edit is",
     "discarded, so put what you found in that message."
