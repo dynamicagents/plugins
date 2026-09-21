@@ -235,6 +235,30 @@ describe("what a caller is told when git answers", () => {
   });
 });
 
+/**
+ * A fetch takes every branch, but isomorphic-git still resolves one ref against
+ * the remote's list — the current branch's upstream, unless told otherwise. A
+ * checkout left on a branch whose remote branch was deleted when its pull
+ * request merged then failed every fetch, refresh included.
+ */
+describe("what a fetch resolves against the remote", () => {
+  it("asks for the remote's HEAD, never the current branch's upstream", async () => {
+    const fetch = vi.fn(async () => ({ defaultBranch: "refs/heads/main" }));
+    const git = { fetch } as unknown as GitClient;
+
+    const result = await hostWith(git, TOKEN).fetch({
+      url: "https://github.com/acme/super.git",
+      dir: "/workspace/super",
+      allowedHosts: ALLOWED
+    });
+
+    expect(result.ok).toBe(true);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.objectContaining({ remoteRef: "HEAD", singleBranch: false })
+    );
+  });
+});
+
 describe("describeGitError", () => {
   it("is the message alone when there is no cause", () => {
     expect(describeGitError(new Error("push rejected"))).toBe("push rejected");

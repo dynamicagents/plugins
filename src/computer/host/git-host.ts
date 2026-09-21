@@ -119,6 +119,13 @@ export class WorkspaceGitHost {
         prune: true,
         tags: false,
         singleBranch: false,
+        // Every branch is fetched, but isomorphic-git still resolves one ref
+        // against the remote's list, and left to itself it picks the current
+        // branch's upstream. A checkout left on a branch whose pull request
+        // merged — and whose remote branch went with it — then fails every
+        // fetch with `Could not find refs/heads/<branch>`. The remote's HEAD
+        // is always listed.
+        remoteRef: "HEAD",
         ...(req.depth ? { depth: req.depth } : {})
       });
       return `fetched ${req.url} (default branch ${result.defaultBranch ?? "unknown"})`;
