@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { claudeCode, claudeCodeRead, claudeCodeSession } from "./index.js";
 import {
-  claudeCode,
-  claudeCodeRead,
-  claudeCodeSession,
-  permissionModeForType
-} from "./index.js";
-import { READ_ONLY_PERMISSION_MODE } from "./config.js";
+  DEFAULT_PERMISSION_MODE,
+  READ_ONLY_PERMISSION_MODE
+} from "./config.js";
 import {
   CLAUDE_CODE_READ_TYPE,
   CLAUDE_CODE_TYPE,
@@ -139,19 +137,61 @@ describe("onSettled", () => {
   });
 });
 
-describe("permissionModeForType", () => {
-  it("pairs the reading type with a mode that cannot edit", () => {
-    expect(permissionModeForType(CLAUDE_CODE_READ_TYPE)).toBe(
-      READ_ONLY_PERMISSION_MODE
+/**
+ * The mode a session actually launches under, read off the command line it builds.
+ *
+ * Asserted here rather than on a helper, because "a host could pass the wrong one"
+ * is the failure that matters and only the launch boundary can rule it out: a
+ * reading session that got the writing mode would edit the checkout it shares with
+ * its parent, and would report that as success.
+ */
+describe("the permission mode a session starts under", () => {
+  /** Captures the argv `start` builds, then refuses to go further. */
+  function launchRecorder() {
+    const commands: string[] = [];
+    return {
+      commands,
+      runtime: {
+        exec: async (command: unknown) => {
+          commands.push(
+            typeof command === "string" ? command : JSON.stringify(command)
+          );
+          throw new Error("stop here — the launch is what is under test");
+        },
+        getExec: async () => {
+          throw new Error("not called");
+        },
+        killExec: async () => {}
+      } as unknown as Parameters<
+        ReturnType<typeof claudeCodeSession>["start"]
+      >[0]
+    };
+  }
+
+  it("gives a reading subtask a mode that cannot edit", async () => {
+    const { commands, runtime } = launchRecorder();
+    const session = claudeCodeSession(config());
+
+    await session
+      .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
+      .catch(() => {});
+
+    expect(commands[0]).toContain(
+      `--permission-mode ${READ_ONLY_PERMISSION_MODE}`
     );
   });
 
-  /**
-   * `undefined`, not the writing mode: the launch builder owns that default, and
-   * resolving it here would write the flag from two places.
-   */
-  it("leaves every other type to the launch builder's default", () => {
-    expect(permissionModeForType(CLAUDE_CODE_TYPE)).toBeUndefined();
+  it("leaves a writing subtask on the mode that can", async () => {
+    const { commands, runtime } = launchRecorder();
+    const session = claudeCodeSession(config());
+
+    await session
+      .start(runtime, 1, CLAUDE_CODE_TYPE, "change this", "/workspace/r")
+      .catch(() => {});
+
+    expect(commands[0]).toContain(
+      `--permission-mode ${DEFAULT_PERMISSION_MODE}`
+    );
   });
 
   /**

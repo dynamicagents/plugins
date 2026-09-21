@@ -2307,15 +2307,16 @@ describe("diffing a ref", () => {
   });
 
   /**
-   * Three dots, not two: what the branch *added* since it diverged. With two,
-   * every commit the reviewer's own HEAD gained since would show up as the branch
-   * reverting things.
+   * Three dots, and **the reviewed ref on the right**. `git diff A...B` compares
+   * the merge base to `B`, so this is what the branch added since it diverged.
+   * Reversed, it reports what the reviewer's own HEAD gained — the "the branch
+   * reverted things" reading the range exists to avoid.
    */
-  it("asks for the symmetric-difference range", async () => {
+  it("asks for what the ref added, not what HEAD did", async () => {
     const { exec, calls } = recorder({ diff: { stdout: "" } });
     await run(tools(exec), "repo_diff", { dir: "/w/r", ref: "origin/x" });
 
-    expect(calls.some((c) => c.command.includes('"$REPO_REF"...HEAD'))).toBe(
+    expect(calls.some((c) => c.command.includes('HEAD..."$REPO_REF"'))).toBe(
       true
     );
   });

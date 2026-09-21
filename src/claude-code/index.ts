@@ -92,6 +92,22 @@ import {
  * the {@link DrainCursor} the caller persists between chunks, so this holds none
  * and a fresh isolate picks up exactly where the last one stopped.
  */
+/**
+ * Which permission mode a subtask type runs under.
+ *
+ * **Not a setting, and deliberately not reachable by a host.** The pairing of a
+ * type to a mode is the entire difference between the two types this package
+ * declares, and every mode but `bypassPermissions` produces a session that cannot
+ * edit its checkout — so a host able to supply this could, by omitting it, hand a
+ * reading subtask the ability to edit the tree it shares with its parent.
+ *
+ * `undefined` means the writing default, which `buildLaunch` owns: resolving it
+ * here as well would write the flag from two places.
+ */
+function permissionModeForType(type: string): PermissionMode | undefined {
+  return type === CLAUDE_CODE_READ_TYPE ? READ_ONLY_PERMISSION_MODE : undefined;
+}
+
 export function claudeCodeSession(config: ClaudeCodeConfig) {
   const windowMs = config.windowMs ?? DEFAULT_WINDOW_MS;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -145,15 +161,20 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     async start(
       runtime: SessionRuntime,
       subtaskId: string | number,
+      type: string,
       prompt: string,
       dir: string,
-      sinks: Sinks = {},
-      permissionMode?: PermissionMode
+      sinks: Sinks = {}
     ): Promise<DrainOutcome> {
       const execId = execIdFor(subtaskId);
       // `using`, so the attachment is released even when the drain throws.
       using handle = await startRun(runtime, {
-        ...launch(prompt, dir, permissionMode),
+        // Derived from the subtask type **here**, never taken from the caller.
+        // A host able to pass it is a host able to omit it, and what it would
+        // fall through to is the writing mode — so a reading subtask would edit
+        // the checkout it shares with its parent, which is the one guarantee
+        // that type makes.
+        ...launch(prompt, dir, permissionModeForType(type)),
         execId,
         timeoutMs
       });
@@ -303,14 +324,21 @@ export function claudeCode(config: ClaudeCodeConfig): AgentPlugin {
     subtaskType: CLAUDE_CODE_SPEC,
 
     /**
-     * Hand each subtask the workspace its parent is working in.
+     * Hand each writing subtask a workspace of its **own**.
+     *
+     * Not the parent's: two writing sessions in one container are two autonomous
+     * agents editing one working tree. The host answers which object that is and
+     * puts a checkout in it — see
+     * {@link file://./config.ts ClaudeCodeConfig.subtaskWorkspace}, which carries
+     * the whole argument, including why the name must be a pure function of these
+     * two ids.
      *
      * This runs on the **parent** — core dispatches `resolveRuntime` to the
-     * plugin that declared the subtask type, which is this one — so
-     * `workspaceName()` resolves here and would throw in the facet, where
-     * `callerKey()` is deliberately unavailable. Whatever this returns arrives
-     * at `executeChunk` as its `runtime` argument, and the host reads the name
-     * back out with {@link WORKSPACE_RUNTIME_KEY}.
+     * plugin that declared the subtask type, which is this one — so the host's
+     * seam resolves here and would throw in the facet, where `callerKey()` is
+     * deliberately unavailable. Whatever this returns arrives at `executeChunk`
+     * as its `runtime` argument, and the host reads the name back out with
+     * {@link WORKSPACE_RUNTIME_KEY}.
      *
      * Without it a delegated session has no way to address the Durable Object
      * holding the checkout it was told to work in — and it cannot be a subtask
@@ -386,20 +414,6 @@ export function claudeCodeRead(config: ClaudeCodeConfig): AgentPlugin {
       [WORKSPACE_RUNTIME_KEY]: config.workspaceName()
     })
   });
-}
-
-/**
- * Which permission mode a subtask type runs under.
- *
- * Here rather than in the host, because the pairing of type to mode is what makes
- * these two types different and it must not be answerable twice. A host reads it
- * off the request's type; `claude-code-read` is the only one that is not the
- * writing default.
- */
-export function permissionModeForType(
-  type: string
-): PermissionMode | undefined {
-  return type === CLAUDE_CODE_READ_TYPE ? READ_ONLY_PERMISSION_MODE : undefined;
 }
 
 export { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";

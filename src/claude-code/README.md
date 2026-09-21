@@ -217,8 +217,25 @@ readonly #session = claudeCodeSession({
       this.env.CLAUDE_CODE_OAUTH_TOKEN_1,
       this.env.CLAUDE_CODE_OAUTH_TOKEN_2
     ].filter(Boolean),
-  // How a delegated session finds this workspace — see below.
+  // How a *reading* subtask finds this workspace — see below. A reading session
+  // shares it, because the checkout and the dependency tree are already here.
   workspaceName: () => this.#name(),
+  // A *writing* subtask gets a workspace of its own instead: two autonomous
+  // sessions in one container edit one working tree. The host answers which
+  // object that is, because cloning into a fresh one needs a remote url, a
+  // directory convention and a host allowlist — all of which belong to `/repo`.
+  //
+  // The name must be a pure function of these two ids: core resolves runtime
+  // once per *chunk*, so a name that moved would hand chunk two a different
+  // container than chunk one.
+  subtaskWorkspace: async ({ taskId, subtaskId }) =>
+    this.#prepareSubtaskWorkspace(`<subtask:${taskId}:${subtaskId}>`),
+  // And gives it back when the execution settles, whatever its outcome. Nothing
+  // else will: a Durable Object is never reclaimed by the platform, and a
+  // namespace cannot be enumerated from a Worker. Must tolerate a workspace that
+  // was never created — a subtask can fail before one was resolved.
+  reclaimSubtaskWorkspace: async ({ taskId, subtaskId }) =>
+    this.#reclaimSubtaskWorkspace(`<subtask:${taskId}:${subtaskId}>`),
   // Who the session's own commits, amends and rebases are attributed to. The
   // same pair the workspace's `git.author` takes: a session commits in
   // repositories nothing configured, and a checkout's config is a value frozen
@@ -344,7 +361,11 @@ protected override async executeChunk(...): Promise<RecipeChunkResult> {
   };
   const outcome = cursor
     ? await session.resume(runtime, cursor, sinks)
-    : await session.start(runtime, subtaskId, prompt, dir, sinks);
+    // The subtask's `type` is required, and the permission mode is derived from
+    // it inside the session rather than passed: a host able to supply the mode is
+    // a host able to omit it, and what it falls through to is the writing one —
+    // so a reading subtask would edit the checkout it shares with its parent.
+    : await session.start(runtime, subtaskId, type, prompt, dir, sinks);
 
   await this.ctx.storage.put(CURSOR_KEY, outcome.cursor);
   // Empty, because `onProgress` already posted them. Returning them here as well

@@ -58,15 +58,17 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         const flags = [staged ? "--staged" : "", stat ? "--stat" : ""]
           .filter(Boolean)
           .join(" ");
-        // Three dots, so this is what the ref *added* since it and HEAD diverged
-        // rather than every difference between two branches: HEAD moving on must
-        // not show up as the branch reverting things.
+        // `HEAD...<ref>`, and the order is the whole point: `git diff A...B`
+        // compares the merge base of the two to **B**, so the reviewed ref has to
+        // be on the right. Reversed, this reports what the reviewer's own HEAD
+        // gained since the branch diverged — which is the "the branch reverted
+        // things" reading it exists to avoid, printed with confidence.
         //
         // The ref goes in an env var and is never interpolated — see `shell`'s
         // `vars`, which carries why. A `--` would not be enough on its own here,
         // because the injection this prevents is a second shell command.
         const result = ref
-          ? await plain(`diff ${flags} "$REPO_REF"...HEAD --`, dir, {
+          ? await plain(`diff ${flags} HEAD..."$REPO_REF" --`, dir, {
               REPO_REF: ref
             })
           : await plain(`diff ${flags}`, dir);

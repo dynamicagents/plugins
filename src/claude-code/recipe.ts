@@ -7,7 +7,8 @@ export const CLAUDE_CODE_TYPE = "claude-code";
  * The Subtask type a "find out how this works" request decomposes into.
  *
  * The same CLI, in the same container, under a permission mode that cannot edit —
- * see `READ_ONLY_PERMISSION_MODE`. Two types rather than a param because the
+ * see {@link file://./config.ts READ_ONLY_PERMISSION_MODE}. Two types rather than
+ * a param because the
  * difference is not a setting a model should pick: it decides whether the subtask
  * needs a container of its own, and a model choosing that would be choosing how
  * much the round costs.
