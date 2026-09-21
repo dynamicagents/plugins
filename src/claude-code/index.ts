@@ -171,7 +171,10 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       using handle = await startRun(runtime, {
         ...(copy
           ? {
-              ...launch(`${prompt}\n\n${copyNote(copy)}`, copy.dir),
+              // Started in the original and moved into the copy by the command:
+              // the copy is on container disk, where no exec can start.
+              ...launch(`${prompt}\n\n${copyNote(copy)}`, dir),
+              workdir: copy.dir,
               ...(copy.isolated ? { readOnly: WORKSPACE_MOUNT } : {})
             }
           : launch(prompt, dir)),

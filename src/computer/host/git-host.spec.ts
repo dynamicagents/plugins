@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AuthCallback, GitClient } from "@cloudflare/computer/git";
-import { WorkspaceGitHost } from "./git-host.js";
+import { describeGitError, WorkspaceGitHost } from "./git-host.js";
 
 /**
  * The credential boundary, driven directly.
@@ -200,5 +200,49 @@ describe("what a caller is told when git answers", () => {
       code: "HttpError",
       message: "could not resolve host"
     });
+  });
+
+  /**
+   * `@cloudflare/computer/git` reports several unrelated failures as "not a git
+   * repository" — a missing ref among them — and keeps what actually failed on
+   * `cause`, which a Durable Object boundary drops. A checkout that plainly is
+   * a repository cannot be diagnosed from the wrapper's sentence alone.
+   */
+  it("carries what actually failed, not only the wrapper's reading of it", async () => {
+    const cause = Object.assign(new Error("Could not find HEAD."), {
+      name: "NotFoundError"
+    });
+    const err = Object.assign(
+      new Error("not a git repository: /workspace/super", { cause }),
+      { code: "ENOTAREPO" }
+    );
+    const git = {
+      fetch: vi.fn(async () => {
+        throw err;
+      })
+    } as unknown as GitClient;
+    const result = await hostWith(git, TOKEN).fetch({
+      url: "https://github.com/acme/super.git",
+      dir: "/workspace/super",
+      allowedHosts: ALLOWED
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: "ENOTAREPO",
+      message:
+        "not a git repository: /workspace/super ← NotFoundError: Could not find HEAD."
+    });
+  });
+});
+
+describe("describeGitError", () => {
+  it("is the message alone when there is no cause", () => {
+    expect(describeGitError(new Error("push rejected"))).toBe("push rejected");
+  });
+
+  it("stops at a cause that repeats, and at a non-error", () => {
+    const inner = new Error("x");
+    expect(describeGitError(new Error("x", { cause: inner }))).toBe("x");
+    expect(describeGitError("plain string")).toBe("plain string");
   });
 });

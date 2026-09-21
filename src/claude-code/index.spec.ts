@@ -209,7 +209,11 @@ describe("where a session runs", () => {
       "claude-code-run:1"
     ]);
     expect(calls[0]?.options.env?.SRC).toBe("/workspace/r");
-    expect(calls[1]?.options.cwd).toBe(COPIED);
+    // An exec's cwd is resolved against the workspace's filesystem, where the
+    // copy — on container disk — does not exist. It starts in the original and
+    // the command moves into the copy before it becomes claude.
+    expect(calls[1]?.options.cwd).toBe("/workspace/r");
+    expect(calls[1]?.options.env?.CLAUDE_WORKDIR).toBe(COPIED);
     // Told where it is, since its edits are discarded and its report is not.
     expect(calls[1]?.command).toContain("throwaway copy");
   });
@@ -238,8 +242,10 @@ describe("where a session runs", () => {
       .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
       .catch(() => {});
 
-    expect(calls[1]?.command).toMatch(/^claude -p /);
-    expect(calls[1]?.options.cwd).toBe(COPIED);
+    expect(calls[1]?.command).toMatch(
+      /^cd "\$CLAUDE_WORKDIR" && exec claude -p /
+    );
+    expect(calls[1]?.options.env?.CLAUDE_WORKDIR).toBe(COPIED);
     expect(calls[1]?.command).toContain("Do not write under");
   });
 

@@ -187,10 +187,34 @@ describe("buildLaunch", () => {
     expect(READ_ONLY_LAUNCH).not.toContain("'");
   });
 
+  /**
+   * An exec's cwd is resolved against the workspace's own filesystem, so one on
+   * container disk is refused before anything spawns. The shell moves there
+   * instead, and `exec`s so a stop signal still lands on claude.
+   */
+  it("moves into a workdir the exec could not have started in", () => {
+    const { command, env } = launch({ workdir: "/var/tmp/claude-read/x/tree" });
+
+    expect(command).toBe(`cd "$CLAUDE_WORKDIR" && exec ${launch().command}`);
+    expect(env.CLAUDE_WORKDIR).toBe("/var/tmp/claude-read/x/tree");
+  });
+
+  it("moves into the workdir inside the read-only namespace too", () => {
+    const { command, env } = launch({
+      readOnly: "/workspace",
+      workdir: "/var/tmp/claude-read/x/tree"
+    });
+
+    expect(command.startsWith("unshare ")).toBe(true);
+    expect(READ_ONLY_LAUNCH).toContain('cd "${CLAUDE_WORKDIR:-.}" || exit 96');
+    expect(env.CLAUDE_WORKDIR).toBe("/var/tmp/claude-read/x/tree");
+  });
+
   it("leaves an ordinary launch alone", () => {
     const { command, env } = launch();
     expect(command.startsWith("claude -p ")).toBe(true);
     expect(env.CLAUDE_READ_ONLY).toBeUndefined();
+    expect(env.CLAUDE_WORKDIR).toBeUndefined();
   });
 
   /**

@@ -121,8 +121,20 @@ const RESERVED_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
 export interface LaunchOptions {
   /** The subtask's prompt — the whole of what this session is asked to do. */
   prompt: string;
-  /** Where the checkout is. The session runs with this as its cwd. */
+  /**
+   * Where the checkout is. The session runs with this as its cwd, unless
+   * {@link LaunchOptions.workdir} says otherwise.
+   */
   dir: string;
+  /**
+   * Where the session runs when that is not somewhere the exec can start.
+   *
+   * An exec's cwd is resolved against the workspace's own filesystem before
+   * anything spawns, so a directory on container disk — a reading session's
+   * copy — is refused there as "no such path". The exec starts in `dir` and the
+   * command changes into this before it becomes claude.
+   */
+  workdir?: string;
   model?: string;
   /**
    * How hard the model thinks, per turn. Unset, the model's own default.
@@ -187,7 +199,8 @@ export interface LaunchOptions {
 export const READ_ONLY_LAUNCH =
   'while read -r _ mnt _; do case "$mnt" in "$CLAUDE_READ_ONLY"|"$CLAUDE_READ_ONLY"/*) ' +
   'mount -o remount,bind,ro "$mnt" || { echo "claude-read: could not make $mnt read-only" >&2; exit 97; };; ' +
-  'esac; done < /proc/self/mounts; exec "$@"';
+  "esac; done < /proc/self/mounts; " +
+  'cd "${CLAUDE_WORKDIR:-.}" || exit 96; exec "$@"';
 
 /** `command`, run in a namespace where `readOnly`'s mounts cannot be written. */
 export function readOnlyLaunch(command: string): string {
@@ -317,7 +330,13 @@ export function buildLaunch(options: LaunchOptions): Launch {
     );
 
   return {
-    command: options.readOnly ? readOnlyLaunch(argv.join(" ")) : argv.join(" "),
+    // `exec` in every shape, so the stop signal a session is sent lands on
+    // claude itself rather than on a shell in front of it.
+    command: options.readOnly
+      ? readOnlyLaunch(argv.join(" "))
+      : options.workdir
+        ? `cd "$CLAUDE_WORKDIR" && exec ${argv.join(" ")}`
+        : argv.join(" "),
     // The last three are applied **after** the host's environment rather than
     // before it. For the placeholder that makes the guard above a second line
     // rather than the only one; for `IS_SANDBOX` it means a host cannot unset
@@ -336,6 +355,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
         : undefined),
       ...gitIdentityEnv(options.author),
       ...(options.readOnly ? { CLAUDE_READ_ONLY: options.readOnly } : {}),
+      ...(options.workdir ? { CLAUDE_WORKDIR: options.workdir } : {}),
       [RESERVED_ENV_KEY]: CREDENTIAL_PLACEHOLDER
     }
   };
