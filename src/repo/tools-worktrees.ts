@@ -16,6 +16,8 @@ import { UNSAFE_BRANCH } from "./url.js";
 export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
   const refuse = (branch: string) =>
     `"${branch}" is not a plain branch name — pass it as the subtask's report named it`;
+  const unsafe = (branch: string) =>
+    branch === "" || UNSAFE_BRANCH.test(branch);
 
   return {
     repo_worktrees: tool({
@@ -29,7 +31,7 @@ export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
       }),
       execute: async ({ release }) => {
         if (release === undefined) return await worktrees.list();
-        if (UNSAFE_BRANCH.test(release)) return refuse(release);
+        if (unsafe(release)) return refuse(release);
         return await worktrees.release(release);
       }
     }),
@@ -46,8 +48,7 @@ export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
           )
       }),
       execute: async ({ branch }) => {
-        if (branch !== undefined && UNSAFE_BRANCH.test(branch))
-          return refuse(branch);
+        if (branch !== undefined && unsafe(branch)) return refuse(branch);
         return await worktrees.use(branch);
       }
     })

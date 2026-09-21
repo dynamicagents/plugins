@@ -65,13 +65,15 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
       execute: async ({ dir, staged, stat, ref, base }) => {
         if (ref !== undefined && base !== undefined)
           return "pass `ref` or `base`, not both — `ref` is what another ref adds, `base` is what this checkout's commits add";
-        if (base !== undefined && UNSAFE_BRANCH.test(base))
+        if (base !== undefined && (base === "" || UNSAFE_BRANCH.test(base)))
           return `"${base}" is not a plain ref — pass something like "origin/main"`;
         // Shape-checked for the same reason `repo_push` checks a branch: a ref is
         // model-authored, and `git diff -x` reads a leading `-` as an option
         // rather than a name. `UNSAFE_BRANCH` already refuses that and the
         // traversal spellings.
-        if (ref !== undefined && UNSAFE_BRANCH.test(ref))
+        // Empty is refused with the rest: it reads as "no ref" below, and the
+        // working tree's diff would be reported as the ref's.
+        if (ref !== undefined && (ref === "" || UNSAFE_BRANCH.test(ref)))
           return `"${ref}" is not a plain ref — pass something like "origin/coder/add-json-flag"`;
 
         const flags = [staged ? "--staged" : "", stat ? "--stat" : ""]

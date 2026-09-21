@@ -208,6 +208,13 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       dir: string,
       sinks: Sinks = {}
     ): Promise<DrainOutcome> {
+      // Without one, `--resume` would be dropped and a new session started
+      // under the follow-up's id — unrelated work, reported as the follow-up.
+      if (!sessionId) {
+        throw new Error(
+          "claude-code: a follow-up needs the session id its result reported"
+        );
+      }
       const execId = followUpExecIdFor(subtaskId);
       using handle = await startRun(runtime, {
         ...launch(prompt, dir),

@@ -414,6 +414,21 @@ describe("where a session runs", () => {
     expect(calls[0]?.command).toContain("'one more thing'");
   });
 
+  it("refuses a follow-up with no session id rather than starting a new session", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await expect(
+      claudeCodeSession(config()).followUp(
+        runtime,
+        1,
+        "",
+        "more",
+        "/workspace/r"
+      )
+    ).rejects.toThrow(/needs the session id/);
+    expect(calls).toEqual([]);
+  });
+
   /** A session stopped with no drain attached has nobody else to close it. */
   it("deletes the copy when a session is stopped", async () => {
     const { calls, killed, runtime } = launchRecorder();

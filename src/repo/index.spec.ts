@@ -2342,6 +2342,12 @@ describe("diffing a ref", () => {
     expect(
       await run(tools(exec), "repo_diff", { dir: "/w/r", base: "-x" })
     ).toContain("not a plain ref");
+    // Empty would read as "no ref" and report the working tree's diff instead.
+    for (const input of [{ base: "" }, { ref: "" }]) {
+      expect(
+        await run(tools(exec), "repo_diff", { dir: "/w/r", ...input })
+      ).toContain("not a plain ref");
+    }
     expect(calls.some((c) => c.command.includes("diff"))).toBe(false);
   });
 
@@ -2504,6 +2510,13 @@ describe("a host that keeps worktrees", () => {
     ).toBe("switched");
     expect(await run(main, "repo_worktree", {})).toBe("switched");
     expect(await run(main, "repo_worktree", { branch: "--help" })).toMatch(
+      /not a plain branch name/
+    );
+    // Empty is no branch at all, not the host's to interpret.
+    expect(await run(main, "repo_worktree", { branch: "" })).toMatch(
+      /not a plain branch name/
+    );
+    expect(await run(main, "repo_worktrees", { release: "" })).toMatch(
       /not a plain branch name/
     );
     expect(asked).toEqual([
