@@ -49,6 +49,12 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
           .describe(
             "Review a ref instead of the working tree — e.g. 'origin/coder/add-json-flag'. Fetch it first; a ref this checkout has never seen cannot be diffed."
           ),
+        base: z
+          .string()
+          .optional()
+          .describe(
+            "Review what this checkout's own commits add since a ref — e.g. 'origin/main' — the other direction from `ref`. For a branch a subtask committed in a worktree you have switched into."
+          ),
         stat: z
           .boolean()
           .optional()
@@ -56,7 +62,11 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
             "Summarise as a per-file changed-line count instead of the full patch"
           )
       }),
-      execute: async ({ dir, staged, stat, ref }) => {
+      execute: async ({ dir, staged, stat, ref, base }) => {
+        if (ref !== undefined && base !== undefined)
+          return "pass `ref` or `base`, not both — `ref` is what another ref adds, `base` is what this checkout's commits add";
+        if (base !== undefined && UNSAFE_BRANCH.test(base))
+          return `"${base}" is not a plain ref — pass something like "origin/main"`;
         // Shape-checked for the same reason `repo_push` checks a branch: a ref is
         // model-authored, and `git diff -x` reads a leading `-` as an option
         // rather than a name. `UNSAFE_BRANCH` already refuses that and the
@@ -80,18 +90,25 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
           ? await plain(`diff ${flags} HEAD..."$REPO_REF" --`, dir, {
               REPO_REF: ref
             })
-          : await plain(`diff ${flags}`, dir);
+          : base
+            ? // The same rule from the other side: the checkout's HEAD on the
+              // right, so what is reported is what its commits add.
+              await plain(`diff ${flags} "$REPO_BASE"...HEAD --`, dir, {
+                REPO_BASE: base
+              })
+            : await plain(`diff ${flags}`, dir);
         // Same reasoning as `repo_status`: "(no diff)" and "the diff could not
         // be read" are opposite answers, and this is the tool a reviewing agent
         // trusts most.
         if (!result.success) {
           logFailure("repo_diff", result);
+          const named = ref ?? base;
           return bounded(
-            ref
+            named
               ? // Names the ref and the likely cause: the common failure is a ref
                 // this checkout has never fetched, and "unknown revision" on its
                 // own does not say that.
-                `could not diff "${ref}" in ${dir} — fetch it first if it has not ` +
+                `could not diff "${named}" in ${dir} — fetch it first if it has not ` +
                   `been fetched: ${result.stderr || result.stdout}`
               : `could not read the diff in ${dir}: ${result.stderr || result.stdout}`
           );

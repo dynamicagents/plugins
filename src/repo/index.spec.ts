@@ -2321,6 +2321,30 @@ describe("diffing a ref", () => {
     );
   });
 
+  it("asks for what HEAD added since a base, the other way round", async () => {
+    const { exec, calls } = recorder({ diff: { stdout: "" } });
+    await run(tools(exec), "repo_diff", { dir: "/w/r", base: "origin/main" });
+
+    const call = calls.find((c) => c.command.includes("diff"));
+    expect(call?.command).toContain('"$REPO_BASE"...HEAD');
+    expect(call?.options?.env?.REPO_BASE).toBe("origin/main");
+  });
+
+  it("refuses a ref and a base together, and a base that is not a plain ref", async () => {
+    const { exec, calls } = recorder({ diff: { stdout: "" } });
+    expect(
+      await run(tools(exec), "repo_diff", {
+        dir: "/w/r",
+        ref: "origin/x",
+        base: "origin/main"
+      })
+    ).toContain("not both");
+    expect(
+      await run(tools(exec), "repo_diff", { dir: "/w/r", base: "-x" })
+    ).toContain("not a plain ref");
+    expect(calls.some((c) => c.command.includes("diff"))).toBe(false);
+  });
+
   it("refuses a ref that is not a plain ref, before running anything", async () => {
     const { exec, calls } = recorder({ diff: { stdout: "" } });
     const result = await run(tools(exec), "repo_diff", {

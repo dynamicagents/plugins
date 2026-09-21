@@ -175,8 +175,11 @@ const IDLE_RECLAIM_ID = "idle-reclaim-id";
  * Source-only workspaces are small (6.3 MB for slack-gatekeeper), which makes
  * this hygiene rather than cost control — but unbounded hygiene is still
  * unbounded.
+ *
+ * Exported because a host keeping work in a workspace has to say how long that
+ * work survives untouched.
  */
-const IDLE_RECLAIM_MS = 7 * 24 * 60 * 60 * 1000;
+export const IDLE_RECLAIM_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Where the container-idle deadline keeps its current schedule id. */
 const CONTAINER_IDLE_ID = "container-idle-id";

@@ -421,7 +421,7 @@ export function repo(config: RepoConfig): AgentPlugin {
       "- `repo_pr_threads` reads the review threads — the comments left on particular lines, which are not on the timeline `repo_issue_view` shows. `repo_pr_thread_reply` answers one and resolves it. Answer every thread: say what you changed and where, or why you did not, and resolve it either way so the record says what happened.",
       ...(config.worktrees
         ? [
-            "- `repo_worktrees` lists the worktrees your writing subtasks committed in — each one's branch, whether a session is still in it, whether its commits are pushed — and releases one you will not keep. `repo_worktree` points every repo tool and your file reads at the worktree holding a branch, so you review, push and open the pull request from there; call it with no branch to come back to your own checkout."
+            "- `repo_worktrees` lists the worktrees your writing subtasks committed in — each one's branch, whether a session is still in it, whether its commits are pushed — and releases one you will not keep. `repo_worktree` points every repo tool and your file reads at the worktree holding a branch, so you review — `repo_diff` with `base` shows what its commits add — push and open the pull request from there; call it with no branch to come back to your own checkout."
           ]
         : []),
       "Never push to the default branch. Finish by opening a pull request and reporting its URL."
