@@ -19,10 +19,9 @@ import {
 import {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_WINDOW_MS,
-  READ_ONLY_PERMISSION_MODE,
-  type ClaudeCodeConfig,
-  type PermissionMode
+  type ClaudeCodeConfig
 } from "./config.js";
+import { closeCopy, copyNote, openCopy } from "./copy.js";
 import {
   CLAUDE_CODE_READ_SPEC,
   CLAUDE_CODE_READ_TYPE,
@@ -92,22 +91,6 @@ import {
  * the {@link DrainCursor} the caller persists between chunks, so this holds none
  * and a fresh isolate picks up exactly where the last one stopped.
  */
-/**
- * Which permission mode a subtask type runs under.
- *
- * **Not a setting, and deliberately not reachable by a host.** The pairing of a
- * type to a mode is the entire difference between the two types this package
- * declares, and every mode but `bypassPermissions` produces a session that cannot
- * edit its checkout — so a host able to supply this could, by omitting it, hand a
- * reading subtask the ability to edit the tree it shares with its parent.
- *
- * `undefined` means the writing default, which `buildLaunch` owns: resolving it
- * here as well would write the flag from two places.
- */
-function permissionModeForType(type: string): PermissionMode | undefined {
-  return type === CLAUDE_CODE_READ_TYPE ? READ_ONLY_PERMISSION_MODE : undefined;
-}
-
 export function claudeCodeSession(config: ClaudeCodeConfig) {
   const windowMs = config.windowMs ?? DEFAULT_WINDOW_MS;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -122,11 +105,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
    */
   type Sinks = Pick<DrainOptions, "onProgress" | "onCheckpoint">;
 
-  const launch = (
-    prompt: string,
-    dir: string,
-    permissionMode?: PermissionMode
-  ) => ({
+  const launch = (prompt: string, dir: string) => ({
     prompt,
     dir,
     ...(config.model ? { model: config.model } : {}),
@@ -139,16 +118,27 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       : { maxConcurrentSubagents: config.maxConcurrentSubagents }),
     // Forwarded only when set, so `buildLaunch` owns the default in one place
     // rather than this line resolving it and the flag being written twice.
-    //
-    // The per-run argument wins over the config: a read-only subtask type runs the
-    // same session in the same container under a mode that cannot edit, and it is
-    // the *subtask* that is read-only, not the deployment.
-    ...((permissionMode ?? config.permissionMode)
-      ? { permissionMode: permissionMode ?? config.permissionMode }
-      : {}),
+    ...(config.permissionMode ? { permissionMode: config.permissionMode } : {}),
     ...(config.env ? { env: config.env } : {}),
     ...(config.author ? { author: config.author } : {})
   });
+
+  /**
+   * Delete a reading session's copy once its drain reaches the end.
+   *
+   * Here rather than left to a host, because the copy is this package's guarantee:
+   * a host that forgot would leave a copy — and whatever it installed — on the
+   * container's disk until the next sweep.
+   */
+  const settle = async (
+    runtime: SessionRuntime,
+    outcome: DrainOutcome
+  ): Promise<DrainOutcome> => {
+    if (outcome.done && outcome.cursor.copy) {
+      await closeCopy(runtime, outcome.cursor.execId);
+    }
+    return outcome;
+  };
 
   return {
     /**
@@ -157,6 +147,12 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
      * `subtaskId` namespaces the exec id. Subtasks are a concurrent fan-out, so
      * two sessions in one workspace under one id would spawn over each other —
      * see {@link execIdFor}.
+     *
+     * A reading session runs in a throwaway copy of `dir`, made here — see
+     * {@link file://./copy.ts}. **Derived from the type inside this call and
+     * never taken from the caller**: a host able to ask for the copy is a host
+     * able to leave it out, and a reading session without one would run in the
+     * tree its parent and every other reader share.
      */
     async start(
       runtime: SessionRuntime,
@@ -167,21 +163,26 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       sinks: Sinks = {}
     ): Promise<DrainOutcome> {
       const execId = execIdFor(subtaskId);
+      const copy =
+        type === CLAUDE_CODE_READ_TYPE
+          ? await openCopy(runtime, { execId, source: dir, timeoutMs })
+          : undefined;
       // `using`, so the attachment is released even when the drain throws.
       using handle = await startRun(runtime, {
-        // Derived from the subtask type **here**, never taken from the caller.
-        // A host able to pass it is a host able to omit it, and what it would
-        // fall through to is the writing mode — so a reading subtask would edit
-        // the checkout it shares with its parent, which is the one guarantee
-        // that type makes.
-        ...launch(prompt, dir, permissionModeForType(type)),
+        ...(copy
+          ? launch(`${prompt}\n\n${copyNote(copy.deps)}`, copy.dir)
+          : launch(prompt, dir)),
         execId,
         timeoutMs
       });
-      return await drainRun(handle, freshCursor(execId), {
-        windowMs,
-        ...sinks
-      });
+      const cursor = freshCursor(execId);
+      return await settle(
+        runtime,
+        await drainRun(handle, copy ? { ...cursor, copy: true } : cursor, {
+          windowMs,
+          ...sinks
+        })
+      );
     },
 
     /**
@@ -234,15 +235,27 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         };
       }
       using session = handle;
-      return await drainRun(session, cursor, { windowMs, ...sinks });
+      return await settle(
+        runtime,
+        await drainRun(session, cursor, { windowMs, ...sinks })
+      );
     },
 
-    /** Stop a session — `SIGTERM`, so its own process tree goes with it. */
+    /**
+     * Stop a session — `SIGTERM`, so its own process tree goes with it — and
+     * delete its copy if it had one.
+     *
+     * The copy is closed here as well as when a drain reaches the end, because a
+     * session stopped with no drain attached has nobody else to close it. A no-op
+     * for a session that had none.
+     */
     async stop(
       runtime: SessionRuntime,
       subtaskId: string | number
     ): Promise<void> {
-      await killRun(runtime, execIdFor(subtaskId));
+      const execId = execIdFor(subtaskId);
+      await killRun(runtime, execId);
+      await closeCopy(runtime, execId);
     },
 
     /**
@@ -390,8 +403,8 @@ export function claudeCode(config: ClaudeCodeConfig): AgentPlugin {
 }
 
 /**
- * The reading plugin: the same CLI, in the **parent's** container, under a mode
- * that cannot edit the tree.
+ * The reading plugin: the same CLI, in the **parent's** container, in a throwaway
+ * copy of the parent's checkout.
  *
  * Sharing the parent's workspace is the entire economy of this type. That
  * container already has the checkout and the dependency tree, so a reading subtask
@@ -399,8 +412,15 @@ export function claudeCode(config: ClaudeCodeConfig): AgentPlugin {
  * run at once against one repository. What they do share is the container's CPU and
  * the credential pool, so "free" is only true of containers.
  *
+ * **Isolated by where it runs, not by what it may do.** The session launches with
+ * the same permission mode a writing one does, in a copy nobody else reads and
+ * nothing syncs back — see {@link file://./copy.ts}. A mode that refuses edits is
+ * not an alternative: every such mode also refuses the commands a question
+ * usually needs answered — the suite, the build, a registry query.
+ *
  * Nothing to reclaim, therefore, and deliberately no `onSettled`: the workspace
- * belongs to the parent and outlives every subtask that read in it.
+ * belongs to the parent and outlives every subtask that read in it, and the copy
+ * is deleted by the session driver when the session ends.
  */
 export function claudeCodeRead(config: ClaudeCodeConfig): AgentPlugin {
   requireCredentials(config);
@@ -467,8 +487,7 @@ export {
 export {
   DEFAULT_PERMISSION_MODE,
   DEFAULT_TIMEOUT_MS,
-  DEFAULT_WINDOW_MS,
-  READ_ONLY_PERMISSION_MODE
+  DEFAULT_WINDOW_MS
 } from "./config.js";
 export type {
   ClaudeCodeConfig,

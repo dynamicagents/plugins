@@ -218,7 +218,8 @@ readonly #session = claudeCodeSession({
       this.env.CLAUDE_CODE_OAUTH_TOKEN_2
     ].filter(Boolean),
   // How a *reading* subtask finds this workspace — see below. A reading session
-  // shares it, because the checkout and the dependency tree are already here.
+  // shares its container, because the checkout and the dependency tree are
+  // already here, and works in a throwaway copy of the checkout on container disk.
   workspaceName: () => this.#name(),
   // A *writing* subtask gets a workspace of its own instead: two autonomous
   // sessions in one container edit one working tree. The host answers which
@@ -361,10 +362,10 @@ protected override async executeChunk(...): Promise<RecipeChunkResult> {
   };
   const outcome = cursor
     ? await session.resume(runtime, cursor, sinks)
-    // The subtask's `type` is required, and the permission mode is derived from
-    // it inside the session rather than passed: a host able to supply the mode is
-    // a host able to omit it, and what it falls through to is the writing one —
-    // so a reading subtask would edit the checkout it shares with its parent.
+    // The subtask's `type` is required. A reading session's throwaway copy of
+    // `dir` is made inside the session rather than asked for: a host able to ask
+    // for it is a host able to leave it out, and the session would then run in
+    // the tree its parent and every other reader share.
     : await session.start(runtime, subtaskId, type, prompt, dir, sinks);
 
   await this.ctx.storage.put(CURSOR_KEY, outcome.cursor);
@@ -470,6 +471,12 @@ swapped in by the egress gateway on the Worker side — and it already runs a
 cloned repository's `postinstall` and its test suite, which is arbitrary code
 execution by design. Gating the agent's own edits while those doors stand open
 costs the agent its job and buys nothing. Containment is the credential swap.
+
+**A reading subtask runs under the same mode.** What keeps it from touching
+anything is where it runs, not what it may do: a copy of the parent's checkout on
+container disk, outside the workspace mount, deleted when the session ends — see
+`copy.ts`. Every mode that refuses an edit also refuses the commands a question
+usually needs answered.
 
 > **The container runs as root, and that changes how the flag has to be passed.**
 > The CLI refuses to bypass its permission checks under uid 0 unless `IS_SANDBOX=1`

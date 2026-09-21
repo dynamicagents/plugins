@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { claudeCode, claudeCodeRead, claudeCodeSession } from "./index.js";
-import {
-  DEFAULT_PERMISSION_MODE,
-  READ_ONLY_PERMISSION_MODE
-} from "./config.js";
+import { DEFAULT_PERMISSION_MODE } from "./config.js";
 import {
   CLAUDE_CODE_READ_TYPE,
   CLAUDE_CODE_TYPE,
@@ -138,60 +135,195 @@ describe("onSettled", () => {
 });
 
 /**
- * The mode a session actually launches under, read off the command line it builds.
+ * Where a session actually runs, read off the calls `start` makes.
  *
- * Asserted here rather than on a helper, because "a host could pass the wrong one"
- * is the failure that matters and only the launch boundary can rule it out: a
- * reading session that got the writing mode would edit the checkout it shares with
- * its parent, and would report that as success.
+ * Asserted at the launch boundary rather than on a helper, because "a host could
+ * leave it out" is the failure that matters and only this boundary can rule it
+ * out: a reading session launched in the parent's tree would write where its
+ * parent and every other reader are reading, and report that as success.
  */
-describe("the permission mode a session starts under", () => {
-  /** Captures the argv `start` builds, then refuses to go further. */
+describe("where a session runs", () => {
+  type Runtime = Parameters<ReturnType<typeof claudeCodeSession>["start"]>[0];
+
+  const COPIED = "/var/tmp/claude-read/claude-code-run_1/tree";
+
+  /** A finished exec that printed `out`. */
+  function finished(id: string, out: string, code = 0) {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue({ id, seq: 1, name: "stdout", value: out });
+        controller.enqueue({ id, seq: 2, name: "exit", code });
+        controller.close();
+      }
+    });
+    return Object.assign(stream, { id, [Symbol.dispose]: () => {} });
+  }
+
+  /**
+   * Answers the copy scripts, and refuses the launch once it has recorded it —
+   * the launch is what is under test.
+   */
   function launchRecorder() {
-    const commands: string[] = [];
+    const calls: {
+      command: string;
+      options: { id?: string; cwd?: string; env?: Record<string, string> };
+    }[] = [];
+    const killed: string[] = [];
     return {
-      commands,
+      calls,
+      killed,
       runtime: {
-        exec: async (command: unknown) => {
-          commands.push(
-            typeof command === "string" ? command : JSON.stringify(command)
-          );
+        exec: async (
+          command: string,
+          options: (typeof calls)[number]["options"]
+        ) => {
+          calls.push({ command, options });
+          if (options.id?.endsWith(":copy"))
+            return finished(options.id, `tree=${COPIED}\ndeps=1/1\n`);
+          if (options.id?.endsWith(":uncopy")) return finished(options.id, "");
           throw new Error("stop here — the launch is what is under test");
         },
         getExec: async () => {
           throw new Error("not called");
         },
-        killExec: async () => {}
-      } as unknown as Parameters<
-        ReturnType<typeof claudeCodeSession>["start"]
-      >[0]
+        killExec: async (id: string) => {
+          killed.push(id);
+        }
+      } as unknown as Runtime
     };
   }
 
-  it("gives a reading subtask a mode that cannot edit", async () => {
-    const { commands, runtime } = launchRecorder();
+  it("puts a reading session in a copy of the checkout, never the checkout", async () => {
+    const { calls, runtime } = launchRecorder();
     const session = claudeCodeSession(config());
 
     await session
       .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
       .catch(() => {});
 
-    expect(commands[0]).toContain(
-      `--permission-mode ${READ_ONLY_PERMISSION_MODE}`
+    expect(calls.map((c) => c.options.id)).toEqual([
+      "claude-code-run:1:copy",
+      "claude-code-run:1"
+    ]);
+    expect(calls[0]?.options.env?.SRC).toBe("/workspace/r");
+    expect(calls[1]?.options.cwd).toBe(COPIED);
+    // Told where it is, since its edits are discarded and its report is not.
+    expect(calls[1]?.command).toContain("throwaway copy");
+  });
+
+  /**
+   * The isolation is the copy, so a reading session no longer needs a mode that
+   * refuses edits — and every such mode refuses the suite and the build too.
+   */
+  it("launches a reading session under the same mode as a writing one", async () => {
+    const { calls, runtime } = launchRecorder();
+    const session = claudeCodeSession(config());
+
+    await session
+      .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
+      .catch(() => {});
+
+    expect(calls[1]?.command).toContain(
+      `--permission-mode ${DEFAULT_PERMISSION_MODE}`
     );
   });
 
-  it("leaves a writing subtask on the mode that can", async () => {
-    const { commands, runtime } = launchRecorder();
+  it("launches a writing session in its own checkout, with no copy", async () => {
+    const { calls, runtime } = launchRecorder();
     const session = claudeCodeSession(config());
 
     await session
       .start(runtime, 1, CLAUDE_CODE_TYPE, "change this", "/workspace/r")
       .catch(() => {});
 
-    expect(commands[0]).toContain(
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.options.cwd).toBe("/workspace/r");
+    expect(calls[0]?.command).toContain(
       `--permission-mode ${DEFAULT_PERMISSION_MODE}`
     );
+    expect(calls[0]?.command).not.toContain("throwaway copy");
+  });
+
+  /** Falling back to the checkout is the one thing it must never do. */
+  it("fails a reading session whose copy could not be made, without launching", async () => {
+    const calls: string[] = [];
+    const runtime = {
+      exec: async (_command: string, options: { id: string }) => {
+        calls.push(options.id);
+        return finished(options.id, "", 1);
+      },
+      getExec: async () => {
+        throw new Error("not called");
+      },
+      killExec: async () => {}
+    } as unknown as Runtime;
+
+    await expect(
+      claudeCodeSession(config()).start(
+        runtime,
+        1,
+        CLAUDE_CODE_READ_TYPE,
+        "look",
+        "/workspace/r"
+      )
+    ).rejects.toThrow(/could not make a copy/);
+    expect(calls).toEqual(["claude-code-run:1:copy"]);
+  });
+
+  it("deletes the copy when a resumed reading session ends", async () => {
+    const calls: string[] = [];
+    const runtime = {
+      exec: async (_command: string, options: { id: string }) => {
+        calls.push(options.id);
+        return finished(options.id, "");
+      },
+      getExec: async (id: string) => finished(id, ""),
+      killExec: async () => {}
+    } as unknown as Runtime;
+
+    const outcome = await claudeCodeSession(config()).resume(runtime, {
+      execId: "claude-code-run:1",
+      seq: 0,
+      carry: "",
+      emitted: 0,
+      copy: true
+    });
+
+    expect(outcome.done).toBe(true);
+    expect(calls).toEqual(["claude-code-run:1:uncopy"]);
+  });
+
+  it("leaves a writing session's checkout alone when it ends", async () => {
+    const calls: string[] = [];
+    const runtime = {
+      exec: async (_command: string, options: { id: string }) => {
+        calls.push(options.id);
+        return finished(options.id, "");
+      },
+      getExec: async (id: string) => finished(id, ""),
+      killExec: async () => {}
+    } as unknown as Runtime;
+
+    await claudeCodeSession(config()).resume(runtime, {
+      execId: "claude-code-run:1",
+      seq: 0,
+      carry: "",
+      emitted: 0
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  /** A session stopped with no drain attached has nobody else to close it. */
+  it("deletes the copy when a session is stopped", async () => {
+    const { calls, killed, runtime } = launchRecorder();
+
+    await claudeCodeSession(config()).stop(runtime, 1);
+
+    expect(killed).toEqual(["claude-code-run:1"]);
+    expect(calls.map((c) => c.options.id)).toEqual([
+      "claude-code-run:1:uncopy"
+    ]);
   });
 
   /**

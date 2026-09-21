@@ -348,6 +348,7 @@ export function repo(config: RepoConfig): AgentPlugin {
     capability: [
       "You can work with git repositories:",
       "- `repo_clone` checks one out into the workspace. The checkout may already be there from an earlier task, in which case it is fetched and reset for you — but if it has uncommitted changes it is left as-is, and you should read them with `repo_diff` before deciding what to do.",
+      "- `repo_fetch` brings a checkout's remote branches in without touching its tree — how you review a branch someone else pushed, as `origin/<branch>` with `repo_diff`.",
       "- `repo_status` and `repo_diff` show what you have changed — read the diff before committing. On a large change call `repo_diff` with `stat: true` first to see which files moved, then read the ones that matter; output is truncated from the middle when it is large.",
       "- `repo_commit` stages everything and commits.",
       "- `repo_push` pushes a work branch. It refuses the default branch and other protected names, and it refuses a branch carrying no commits the default branch does not already have — that is not negotiable.",

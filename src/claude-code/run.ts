@@ -347,6 +347,14 @@ export interface DrainCursor {
    * event can land in different windows.
    */
   stderr?: string;
+  /**
+   * Whether this session runs in a throwaway copy that has to be deleted when it
+   * ends — a reading session; see {@link file://./copy.ts}.
+   *
+   * Carried because the chunk that sees the session end is rarely the one that
+   * started it, and it is the only one that can close the copy.
+   */
+  copy?: true;
 }
 
 /** A cursor for a session that has not started yet. */
@@ -490,7 +498,7 @@ export interface DrainOptions {
 const CHECKPOINT_MIN_MS = 30_000;
 
 /** Whether a thrown value is the runtime refusing to reuse a live exec id. */
-function isExecBusy(err: unknown): boolean {
+export function isExecBusy(err: unknown): boolean {
   return (err as { code?: unknown } | null | undefined)?.code === "EEXEC_BUSY";
 }
 
@@ -796,7 +804,8 @@ export async function drainRun(
     carry: buffer,
     emitted,
     ...(result ? { result } : {}),
-    ...(stderr ? { stderr } : {})
+    ...(stderr ? { stderr } : {}),
+    ...(cursor.copy ? { copy: true as const } : {})
   });
 
   /**

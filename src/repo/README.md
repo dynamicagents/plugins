@@ -19,8 +19,8 @@ repo({
 });
 ```
 
-Tools: `repo_clone`, `repo_status`, `repo_diff`, `repo_commit`, `repo_push`,
-`repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment`,
+Tools: `repo_clone`, `repo_fetch`, `repo_status`, `repo_diff`, `repo_commit`,
+`repo_push`, `repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment`,
 `repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`.
 
 Everything past `repo_open_pr` is what a model reaches for `gh` to do — read an

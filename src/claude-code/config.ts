@@ -29,21 +29,6 @@ export type PermissionMode =
 export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 
 /**
- * What a read-only session runs under.
- *
- * `plan` rather than a narrower-sounding mode because the note above is the whole
- * point: **every** mode but `bypassPermissions` produces a session that cannot
- * edit the checkout it was given. That is a liability for a session meant to write
- * and exactly the property wanted here, so the mode is not a restriction bolted on
- * — it is the same mode, read the other way round.
- *
- * `acceptEdits` would be wrong for the opposite reason to the usual one: it still
- * denies `npm ci`, git and the test suite, so it is neither a writing session nor
- * a clean reading one.
- */
-export const READ_ONLY_PERMISSION_MODE: PermissionMode = "plan";
-
-/**
  * The effort levels `claude --effort` accepts.
  *
  * Spelled out for a sharper reason than {@link PermissionMode}: an unrecognised

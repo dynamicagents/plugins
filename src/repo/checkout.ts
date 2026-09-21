@@ -183,7 +183,14 @@ export async function refreshCheckout({
   // and `reset --hard`. Conflating the two lets a permissions error or a
   // half-written index discard a tree nobody established was clean, which is the
   // one loss in this file that cannot be undone.
-  const dirty = await plain("status --porcelain", dir);
+  //
+  // Submodules are left out of the question. Neither `checkout` nor
+  // `reset --hard` below touches a submodule's tree without
+  // `--recurse-submodules`, so a submodule that has moved past its pin — which
+  // is what a superproject looks like after its own sync — is not work this
+  // refresh could lose. Counted as dirty, it refused every refresh of such a
+  // checkout, and a host's `afterCheckout` never learned it was there.
+  const dirty = await plain("status --porcelain --ignore-submodules=all", dir);
   if (!dirty.success) {
     return {
       message:
