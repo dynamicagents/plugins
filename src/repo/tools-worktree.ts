@@ -7,7 +7,15 @@ import type { RepoContext } from "./context.js";
 
 /** Reading the working tree, committing it, and publishing the branch. */
 export function worktreeTools(ctx: RepoContext): ToolSet {
-  const { author, bounded, logFailure, plain, origin, pushBranch } = ctx;
+  const {
+    author,
+    bounded,
+    fetchOrigin,
+    logFailure,
+    plain,
+    origin,
+    pushBranch
+  } = ctx;
 
   return {
     repo_status: tool({
@@ -135,6 +143,36 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
           return bounded(`commit failed: ${result.stderr || result.stdout}`);
         }
         return bounded(result.stdout.trim());
+      }
+    }),
+
+    /**
+     * Bring the remote's branches into a checkout without touching its tree.
+     *
+     * `repo_clone` fetches too, but it resets the tree afterwards and only ever
+     * reaches the checkout it clones into — so work pushed to a branch by
+     * somebody else, a submodule's included, had no way into a checkout that
+     * already existed. Nothing here writes to the working tree, so there is no
+     * refusal path for uncommitted work.
+     */
+    repo_fetch: tool({
+      description:
+        "Fetch every branch from a checkout's own origin, without touching its working tree. This is how a branch someone else pushed becomes a ref you can review: after it, repo_diff with ref 'origin/<branch>'. Pass the directory of the repository the branch was pushed to — in a superproject, that is the submodule's directory.",
+      inputSchema: z.object({ dir: z.string().describe("Checkout directory") }),
+      execute: async ({ dir }) => {
+        // The checkout's own origin, for the reason `repo_push` reads it: it has
+        // already passed the allowlist, and a URL named here would not have.
+        const { remote, unreachable } = await origin(dir);
+        if (unreachable)
+          return bounded(`could not fetch in ${dir}: ${unreachable}`);
+        if (!remote)
+          return `${dir} has no origin on an allowed host — clone it with repo_clone first`;
+        const fetched = await fetchOrigin(dir, remote.url);
+        if (!fetched.success) {
+          logFailure("repo_fetch", fetched);
+          return bounded(`fetch failed: ${fetched.stderr || fetched.stdout}`);
+        }
+        return `fetched ${remote.url} into ${dir}; its branches are under origin/ — review one with repo_diff and ref "origin/<branch>"`;
       }
     }),
 

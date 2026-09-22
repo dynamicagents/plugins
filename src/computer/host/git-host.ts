@@ -119,6 +119,13 @@ export class WorkspaceGitHost {
         prune: true,
         tags: false,
         singleBranch: false,
+        // Every branch is fetched, but isomorphic-git still resolves one ref
+        // against the remote's list, and left to itself it picks the current
+        // branch's upstream. A checkout left on a branch whose pull request
+        // merged — and whose remote branch went with it — then fails every
+        // fetch with `Could not find refs/heads/<branch>`. The remote's HEAD
+        // is always listed.
+        remoteRef: "HEAD",
         ...(req.depth ? { depth: req.depth } : {})
       });
       return `fetched ${req.url} (default branch ${result.defaultBranch ?? "unknown"})`;
@@ -205,11 +212,41 @@ export class WorkspaceGitHost {
       return { ok: true, detail: await body(this.deps.git(), onAuth) };
     } catch (err) {
       const code = (err as { code?: unknown } | null)?.code;
+      const message = describeGitError(err);
+      console.error(`[${this.deps.tag()}] git failed`, { code, message });
       return {
         ok: false,
         ...(typeof code === "string" ? { code } : {}),
-        message: err instanceof Error ? err.message : String(err)
+        message
       };
     }
   }
+}
+
+/**
+ * A git error's message with the chain of causes behind it.
+ *
+ * `@cloudflare/computer/git` wraps isomorphic-git's errors, and classifies some
+ * by a heuristic: any failure whose message mentions `.git` beside a missing
+ * path or a ref it could not find is reported as "not a git repository" — a
+ * sentence that is wrong about a checkout that plainly is one, and names
+ * neither the file nor the ref. What actually failed is only on `cause`, which
+ * a Durable Object boundary does not carry, so it is folded into the message
+ * here while the error is still itself.
+ */
+export function describeGitError(err: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  let at: unknown = err;
+  for (let depth = 0; at !== undefined && at !== null && depth < 4; depth++) {
+    const e = at as { name?: unknown; message?: unknown; cause?: unknown };
+    const text = typeof e.message === "string" ? e.message : String(at);
+    if (!seen.has(text)) {
+      seen.add(text);
+      const name = typeof e.name === "string" ? e.name : "";
+      parts.push(name && depth > 0 ? `${name}: ${text}` : text);
+    }
+    at = e.cause;
+  }
+  return parts.join(" ← ");
 }

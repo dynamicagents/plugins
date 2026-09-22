@@ -2359,3 +2359,63 @@ describe("diffing a ref", () => {
     expect(call?.command).not.toContain("HEAD");
   });
 });
+
+/**
+ * How a branch somebody else pushed reaches a checkout that already exists — a
+ * delegated session's work, a submodule's included. `repo_clone` could fetch it
+ * too, but it resets the tree and only reaches the checkout it clones into.
+ */
+describe("repo_fetch", () => {
+  it("fetches the checkout's own origin on the host side, and touches no tree", async () => {
+    const { exec, calls } = recorder({
+      "remote get-url origin": { stdout: "https://github.com/o/sub" }
+    });
+    const { git, gitCalls } = gitRecorder();
+
+    const result = await run(tools(exec, { git }), "repo_fetch", {
+      dir: "/workspace/super/sub"
+    });
+
+    expect(gitCalls).toEqual([
+      {
+        op: "fetch",
+        req: expect.objectContaining({
+          url: "https://github.com/o/sub",
+          dir: "/workspace/super/sub"
+        })
+      }
+    ]);
+    // Only the origin was read in the container: no checkout, no reset.
+    expect(calls.map((c) => c.command)).toEqual([
+      expect.stringContaining("remote get-url origin")
+    ]);
+    expect(result).toContain("origin/<branch>");
+  });
+
+  it("refuses a checkout whose origin is not on an allowed host", async () => {
+    const { exec } = recorder({
+      "remote get-url origin": { stdout: "https://evil.example/o/r" }
+    });
+    const { git, gitCalls } = gitRecorder();
+
+    const result = await run(tools(exec, { git }), "repo_fetch", {
+      dir: "/workspace/r"
+    });
+
+    expect(gitCalls).toEqual([]);
+    expect(result).toMatch(/no origin on an allowed host/);
+  });
+
+  it("says the fetch failed rather than that it worked", async () => {
+    const { exec } = recorder();
+    const { git } = gitRecorder({
+      fetch: { ok: false, message: "authentication refused" }
+    });
+
+    const result = await run(tools(exec, { git }), "repo_fetch", {
+      dir: "/workspace/r"
+    });
+
+    expect(result).toMatch(/fetch failed: .*authentication refused/);
+  });
+});

@@ -183,7 +183,14 @@ export async function refreshCheckout({
   // and `reset --hard`. Conflating the two lets a permissions error or a
   // half-written index discard a tree nobody established was clean, which is the
   // one loss in this file that cannot be undone.
-  const dirty = await plain("status --porcelain", dir);
+  //
+  // Submodules are left out of the question. Neither `checkout` nor
+  // `reset --hard` below touches a submodule's tree without
+  // `--recurse-submodules`, so a submodule that has moved past its pin — which
+  // is what a superproject looks like after its own sync — is not work this
+  // refresh could lose. Counted as dirty, it would refuse every refresh of such
+  // a checkout, and a host's `afterCheckout` would never learn it is there.
+  const dirty = await plain("status --porcelain --ignore-submodules=all", dir);
   if (!dirty.success) {
     return {
       message:
@@ -208,9 +215,25 @@ export async function refreshCheckout({
     };
   }
 
+  /**
+   * A failed fetch leaves a checkout that is still there, still clean and still
+   * on its branch — only not updated. So it is still reported, on the branch it
+   * is on: a host that records checkouts would otherwise lose sight of one that
+   * exists because its remote could not be reached, and a clone taken from the
+   * recorded url goes to the remote itself. Nothing below — no checkout, no
+   * reset — runs against a tree whose remote state is unknown.
+   */
   const fetched = await fetchOrigin(dir, url);
-  if (!fetched.success)
-    return { message: `fetch failed: ${fetched.stderr || fetched.stdout}` };
+  if (!fetched.success) {
+    const failure = `fetch failed: ${fetched.stderr || fetched.stdout}`;
+    const current = await plain("symbolic-ref --quiet --short HEAD", dir);
+    const on = current.success ? current.stdout.trim() : "";
+    if (!on) return { message: failure };
+    return {
+      message: `${failure}\nThe checkout was left on ${on}, clean but not updated from the remote.`,
+      branch: on
+    };
+  }
 
   // The branch to land on: the one asked for, else the remote's own default.
   let target = branch;

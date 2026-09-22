@@ -121,8 +121,20 @@ const RESERVED_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
 export interface LaunchOptions {
   /** The subtask's prompt — the whole of what this session is asked to do. */
   prompt: string;
-  /** Where the checkout is. The session runs with this as its cwd. */
+  /**
+   * Where the checkout is. The session runs with this as its cwd, unless
+   * {@link LaunchOptions.workdir} says otherwise.
+   */
   dir: string;
+  /**
+   * Where the session runs when that is not somewhere the exec can start.
+   *
+   * An exec's cwd is resolved against the workspace's own filesystem before
+   * anything spawns, so a directory on container disk — a reading session's
+   * copy — is refused there as "no such path". The exec starts in `dir` and the
+   * command changes into this before it becomes claude.
+   */
+  workdir?: string;
   model?: string;
   /**
    * How hard the model thinks, per turn. Unset, the model's own default.
@@ -159,6 +171,40 @@ export interface LaunchOptions {
    * {@link file://./config.ts ClaudeCodeConfig.author}.
    */
   author?: { name: string; email: string };
+
+  /**
+   * A path the session must not be able to write under, however it names it.
+   *
+   * Set for a reading session, whose working directory is a throwaway copy while
+   * the tree it copied — and every other checkout — stays mounted where its brief
+   * may name it by absolute path. The session runs in a mount namespace of its
+   * own in which every mount under this path is read-only; see
+   * {@link READ_ONLY_LAUNCH}.
+   */
+  readOnly?: string;
+}
+
+/**
+ * Remount everything under `$CLAUDE_READ_ONLY` read-only, then become the command
+ * after it.
+ *
+ * Run inside `unshare --mount --propagation private`, so the remount is this
+ * process tree's view alone: the parent's tools, other sessions and the workspace
+ * sync see the same mounts, writable, as before. `remount,bind` changes only the
+ * per-mount flag, so it applies to the workspace's FUSE mount and to each
+ * dependency tree bound under it alike, and never touches what they hold.
+ *
+ * No single quote anywhere in it, because it travels inside one.
+ */
+export const READ_ONLY_LAUNCH =
+  'while read -r _ mnt _; do case "$mnt" in "$CLAUDE_READ_ONLY"|"$CLAUDE_READ_ONLY"/*) ' +
+  'mount -o remount,bind,ro "$mnt" || { echo "claude-read: could not make $mnt read-only" >&2; exit 97; };; ' +
+  "esac; done < /proc/self/mounts; " +
+  'cd "${CLAUDE_WORKDIR:-.}" || exit 96; exec "$@"';
+
+/** `command`, run in a namespace where `readOnly`'s mounts cannot be written. */
+export function readOnlyLaunch(command: string): string {
+  return `unshare --mount --propagation private -- sh -c '${READ_ONLY_LAUNCH}' sh ${command}`;
 }
 
 export interface Launch {
@@ -284,7 +330,13 @@ export function buildLaunch(options: LaunchOptions): Launch {
     );
 
   return {
-    command: argv.join(" "),
+    // `exec` in every shape, so the stop signal a session is sent lands on
+    // claude itself rather than on a shell in front of it.
+    command: options.readOnly
+      ? readOnlyLaunch(argv.join(" "))
+      : options.workdir
+        ? `cd "$CLAUDE_WORKDIR" && exec ${argv.join(" ")}`
+        : argv.join(" "),
     // The last three are applied **after** the host's environment rather than
     // before it. For the placeholder that makes the guard above a second line
     // rather than the only one; for `IS_SANDBOX` it means a host cannot unset
@@ -302,6 +354,8 @@ export function buildLaunch(options: LaunchOptions): Launch {
         ? { IS_SANDBOX: "1" }
         : undefined),
       ...gitIdentityEnv(options.author),
+      ...(options.readOnly ? { CLAUDE_READ_ONLY: options.readOnly } : {}),
+      ...(options.workdir ? { CLAUDE_WORKDIR: options.workdir } : {}),
       [RESERVED_ENV_KEY]: CREDENTIAL_PLACEHOLDER
     }
   };
@@ -347,6 +401,14 @@ export interface DrainCursor {
    * event can land in different windows.
    */
   stderr?: string;
+  /**
+   * Whether this session runs in a throwaway copy that has to be deleted when it
+   * ends — a reading session; see {@link file://./copy.ts}.
+   *
+   * Carried because the chunk that sees the session end is rarely the one that
+   * started it, and it is the only one that can close the copy.
+   */
+  copy?: true;
 }
 
 /** A cursor for a session that has not started yet. */
@@ -490,7 +552,7 @@ export interface DrainOptions {
 const CHECKPOINT_MIN_MS = 30_000;
 
 /** Whether a thrown value is the runtime refusing to reuse a live exec id. */
-function isExecBusy(err: unknown): boolean {
+export function isExecBusy(err: unknown): boolean {
   return (err as { code?: unknown } | null | undefined)?.code === "EEXEC_BUSY";
 }
 
@@ -796,7 +858,8 @@ export async function drainRun(
     carry: buffer,
     emitted,
     ...(result ? { result } : {}),
-    ...(stderr ? { stderr } : {})
+    ...(stderr ? { stderr } : {}),
+    ...(cursor.copy ? { copy: true as const } : {})
   });
 
   /**

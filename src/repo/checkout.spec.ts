@@ -206,6 +206,31 @@ describe("refreshCheckout", () => {
    * Empty stdout from a `status` that *failed* is not a clean tree, it is no
    * answer at all — and the next two commands would be `fetch` and `reset --hard`.
    */
+  /**
+   * A superproject after its own sync: every submodule past its pin. Neither
+   * `checkout` nor `reset --hard` touches a submodule's tree, so that is not work
+   * a refresh could lose — and read as dirty, it would refuse every refresh of
+   * such a checkout.
+   */
+  it("does not count submodules that moved past their pins as uncommitted work", async () => {
+    const { plain, ran } = runner({
+      "remote get-url": ok(`${url}\n`),
+      status: ok("")
+    });
+
+    const outcome = await refreshCheckout({
+      dir: "/w/r",
+      url,
+      branch: "main",
+      author,
+      plain,
+      fetchOrigin
+    });
+
+    expect(ran).toContain("status --porcelain --ignore-submodules=all");
+    expect(outcome.branch).toBe("main");
+  });
+
   it("refuses a tree whose state could not be read", async () => {
     const { plain, ran } = runner({
       "remote get-url": ok(`${url}\n`),
@@ -321,10 +346,39 @@ describe("refreshCheckout", () => {
     expect(out.message).toContain("container was replaced");
   });
 
-  it("stops when the fetch fails, leaving the tree on its current branch", async () => {
+  /**
+   * The tree is still there, clean and on its branch — only not updated — so it
+   * is still reported, on the branch it is on. A host recording checkouts would
+   * otherwise lose sight of one whose remote could not be reached.
+   */
+  it("stops when the fetch fails, and reports the tree on its current branch", async () => {
     const { plain, ran } = runner({
       "remote get-url": ok(`${url}\n`),
-      "status --porcelain": ok("")
+      "status --porcelain": ok(""),
+      "symbolic-ref --quiet --short HEAD": ok("next\n")
+    });
+
+    const out = await refreshCheckout({
+      dir: "/w/r",
+      url,
+      branch: undefined,
+      author,
+      plain,
+      fetchOrigin: async () => failed("could not authenticate")
+    });
+
+    expect(out.branch).toBe("next");
+    expect(out.message).toContain("fetch failed: could not authenticate");
+    expect(out.message).toContain("left on next, clean but not updated");
+    expect(ran.some((c) => c.startsWith("reset"))).toBe(false);
+    expect(ran.some((c) => c.startsWith("checkout"))).toBe(false);
+  });
+
+  it("reports nothing to act on when the fetch fails on a detached HEAD", async () => {
+    const { plain } = runner({
+      "remote get-url": ok(`${url}\n`),
+      "status --porcelain": ok(""),
+      "symbolic-ref --quiet --short HEAD": failed("")
     });
 
     const out = await refreshCheckout({
@@ -337,8 +391,7 @@ describe("refreshCheckout", () => {
     });
 
     expect(out.branch).toBeUndefined();
-    expect(out.message).toContain("fetch failed");
-    expect(ran.some((c) => c.startsWith("reset"))).toBe(false);
+    expect(out.message).toBe("fetch failed: could not authenticate");
   });
 
   /**
