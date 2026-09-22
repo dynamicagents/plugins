@@ -95,6 +95,14 @@ export function execIdFor(subtaskId: string | number): string {
 }
 
 /**
+ * The id a subtask's follow-up turn runs under — its own, because the session's
+ * exec has already finished under {@link execIdFor} and an id names one process.
+ */
+export function followUpExecIdFor(subtaskId: string | number): string {
+  return `${execIdFor(subtaskId)}:follow-up`;
+}
+
+/**
  * What the container is given instead of a credential.
  *
  * Claude Code does not validate it locally: a run with this exact value
@@ -182,6 +190,15 @@ export interface LaunchOptions {
    * {@link READ_ONLY_LAUNCH}.
    */
   readOnly?: string;
+
+  /**
+   * A session id to continue, from an earlier session's `result` line.
+   *
+   * The transcript lives on the container's disk, so this only resumes a session
+   * that ran in the same container. {@link LaunchOptions.prompt} is then the next
+   * user turn rather than a new task.
+   */
+  resume?: string;
 }
 
 /**
@@ -308,6 +325,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
   const permissionMode = options.permissionMode ?? DEFAULT_PERMISSION_MODE;
 
   const argv = ["claude", "-p", shellQuote(options.prompt)];
+  if (options.resume) argv.push("--resume", shellQuote(options.resume));
   argv.push("--output-format", "stream-json", "--verbose");
   argv.push("--permission-mode", permissionMode);
   if (options.model) argv.push("--model", shellQuote(options.model));

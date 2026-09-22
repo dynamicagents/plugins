@@ -531,6 +531,7 @@ export function computer(config: ComputerConfig): AgentPlugin {
  */
 export {
   WorkspaceObjectBase,
+  IDLE_RECLAIM_MS,
   WORKSPACE_DIR,
   workspaceName,
   type WorkspaceObjectConfig,

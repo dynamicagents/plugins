@@ -221,22 +221,26 @@ readonly #session = claudeCodeSession({
   // shares its container, because the checkout and the dependency tree are
   // already here, and works in a throwaway copy of the checkout on container disk.
   workspaceName: () => this.#name(),
-  // A *writing* subtask gets a workspace of its own instead: two autonomous
-  // sessions in one container edit one working tree. The host answers which
-  // object that is, because cloning into a fresh one needs a remote url, a
+  // A *writing* subtask gets a workspace no other live session shares: two
+  // autonomous sessions in one container edit one working tree. The host answers
+  // which object that is, because cloning into one needs a remote url, a
   // directory convention and a host allowlist — all of which belong to `/repo`.
+  // It may keep these workspaces and hand them out again, and `continue` is the
+  // branch the delegating model asked to add to.
   //
-  // The name must be a pure function of these two ids: core resolves runtime
-  // once per *chunk*, so a name that moved would hand chunk two a different
-  // container than chunk one.
-  subtaskWorkspace: async ({ taskId, subtaskId }) =>
-    this.#prepareSubtaskWorkspace(`<subtask:${taskId}:${subtaskId}>`),
-  // And gives it back when the execution settles, whatever its outcome. Nothing
-  // else will: a Durable Object is never reclaimed by the platform, and a
-  // namespace cannot be enumerated from a Worker. Must tolerate a workspace that
-  // was never created — a subtask can fail before one was resolved.
-  reclaimSubtaskWorkspace: async ({ taskId, subtaskId }) =>
-    this.#reclaimSubtaskWorkspace(`<subtask:${taskId}:${subtaskId}>`),
+  // One subtask must get one name on every chunk: core resolves runtime once per
+  // *chunk*, so a name that moved would hand chunk two a different container
+  // than chunk one.
+  subtaskWorkspace: async ({ taskId, subtaskId, continue: branch }) =>
+    this.#allocateWorkspace({ taskId, subtaskId, branch }),
+  // Every terminal outcome releases it. Must tolerate a subtask that never
+  // resolved one.
+  releaseSubtaskWorkspace: async ({ taskId, subtaskId }) =>
+    this.#releaseWorkspace({ taskId, subtaskId }),
+  // A canceled execution, or one that failed at its step, also discards what it
+  // committed — before the release.
+  abortSubtaskWorkspace: async ({ taskId, subtaskId }) =>
+    this.#discardCommits({ taskId, subtaskId }),
   // Who the session's own commits, amends and rebases are attributed to. The
   // same pair the workspace's `git.author` takes: a session commits in
   // repositories nothing configured, and a checkout's config is a value frozen
@@ -378,6 +382,12 @@ protected override async executeChunk(...): Promise<RecipeChunkResult> {
 
 `DrainCursor` is the only state, and the caller persists it. A fresh isolate
 resumes from the exact event sequence the last one consumed.
+
+**One more turn for a finished writing session** is `session.followUp(runtime,
+subtaskId, result.sessionId, prompt, dir, sinks)`: `claude -p --resume` under an exec
+id of its own, drained like `start` and continued with `resume`. The transcript is on
+the container's disk, so it runs in the workspace the session did. `stop` ends it with
+the session.
 
 **The drain window is not the reporting interval.** Whatever `windowMs` is set to,
 a session that finishes inside one window reaches no boundary at all, so a host

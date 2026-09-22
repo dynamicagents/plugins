@@ -21,7 +21,8 @@ repo({
 
 Tools: `repo_clone`, `repo_fetch`, `repo_status`, `repo_diff`, `repo_commit`,
 `repo_push`, `repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment`,
-`repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`.
+`repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`, and — for a host
+that keeps worktrees, below — `repo_worktrees` and `repo_worktree`.
 
 Everything past `repo_open_pr` is what a model reaches for `gh` to do — read an
 issue, check a pull request, leave a comment, answer a review. They are here
@@ -43,6 +44,22 @@ looking.
 name another repository: a thread id is a global node id, not a path segment
 derived from the checkout. It asks which pull request the id belongs to and
 refuses a mismatch, which is the same reach `forgeRepo` denies everywhere else.
+
+## Worktrees a host keeps
+
+A host whose writing subtasks each commit in a checkout of their own can hand the
+main agent a way between them: `worktrees: { list, use, release }`. The main agent
+then gets `repo_worktrees`, to see each worktree's branch and state and to release
+one, and `repo_worktree`, which asks the host to point every repo tool at the
+worktree holding a branch — or back at the main checkout. Delegated subtasks never
+get them, because a switch moves the main agent's own tools. The host renders every
+answer; this plugin checks a branch's shape and passes the sentence through.
+
+Two hooks go with it. `beforeWrite` is asked before `repo_commit` or `repo_push`
+changes anything, with the origin a push would use, and a string it returns refuses
+with that sentence — for a checkout a session is still working in, or whose
+`.git/config` a session could have rewritten. `afterPush` is told the commit a push
+landed.
 
 ## Nothing is held for approval
 

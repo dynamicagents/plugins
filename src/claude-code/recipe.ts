@@ -1,4 +1,5 @@
 import type { ResolvedRecipe, SubtaskTypeSpec } from "@dynamicagents/core";
+import { CLAUDE_CODE_PARAMS } from "./params.js";
 
 /** The Subtask type a "make this change" request decomposes into. */
 export const CLAUDE_CODE_TYPE = "claude-code";
@@ -97,7 +98,12 @@ export const CLAUDE_CODE_CAPABILITY = [
   "a single line costs about what a substantial one costs.",
   "",
   "It cannot ask you anything mid-run. Anything it would need to ask, decide",
-  "first — or ask the user yourself before delegating."
+  "first — or ask the user yourself before delegating.",
+  "",
+  "To correct or extend work a previous session did, delegate again with param",
+  "`continue` set to the branch its report named: the new session starts from",
+  "those commits and adds to the same branch. Without it, a session starts a",
+  "branch of its own."
 ].join("\n");
 
 /**
@@ -157,7 +163,10 @@ export const CLAUDE_CODE_READ_SPEC: SubtaskTypeSpec = {
   key: CLAUDE_CODE_READ_TYPE,
   description:
     "Investigate or plan against the checked-out code with a Claude Code session whose changes are discarded, and report findings.",
-  /** No params, for the reason {@link CLAUDE_CODE_SPEC} gives. */
+  /**
+   * No params: the repository is not the model's to choose, for the reason
+   * {@link CLAUDE_CODE_SPEC} gives, and a copy that is deleted has no branch.
+   */
   params: null,
   capability: CLAUDE_CODE_READ_CAPABILITY,
   recipe: CLAUDE_CODE_READ_RECIPE
@@ -168,15 +177,23 @@ export const CLAUDE_CODE_SPEC: SubtaskTypeSpec = {
   description:
     "Run a coding task in the workspace with a Claude Code session — a checked-out repository, or a scratchpad.",
   /**
-   * No params, and that is a decision rather than an omission.
+   * A branch, and nothing that names a workspace.
    *
    * *Which* repository is not the delegating model's to choose: the workspace is
    * one Durable Object, one container and one checkout, keyed by caller and
    * repository, and the parent already tracks which one is active. Letting a
    * model name a repository here would let it name somebody else's — the same
    * reasoning that keeps `workspaceName` out of model input in `/computer`.
+   *
+   * A branch is different: the model quotes it from an earlier report, and the
+   * host resolves it against the branches its own subtasks made before anything
+   * runs — see {@link file://./config.ts ClaudeCodeConfig.subtaskWorkspace}.
+   *
+   * The schema is in `./params.ts`, which says why it is a module of its own.
    */
-  params: null,
+  params: CLAUDE_CODE_PARAMS,
+  paramsHelp:
+    "optional param `continue` (a branch from an earlier claude-code report, to keep working on it)",
   capability: CLAUDE_CODE_CAPABILITY,
   recipe: CLAUDE_CODE_RECIPE
 };
