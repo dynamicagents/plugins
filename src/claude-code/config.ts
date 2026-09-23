@@ -130,12 +130,14 @@ export interface ClaudeCodeConfig {
   }) => Promise<void>;
 
   /**
-   * The execution was cut short — canceled, or failed at its step — so what it
-   * committed is not work anybody asked to keep.
+   * The execution was canceled, so what it committed is not work anybody asked
+   * to keep.
    *
-   * Called before {@link releaseSubtaskWorkspace}, on those paths only. A session
+   * Called before {@link releaseSubtaskWorkspace}, on that path only. A session
    * that ended by reporting a failure is not one of them: it said what it did,
-   * and its commits stay for the parent to judge.
+   * and its commits stay for the parent to judge. A step the Workflow gave up on
+   * is {@link failSubtaskWorkspace}'s — except under a core that predates
+   * `onFail`, which calls this for it and so discards what that seam keeps.
    */
   abortSubtaskWorkspace: (ctx: {
     taskId: string;

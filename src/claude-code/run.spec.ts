@@ -838,6 +838,41 @@ describe("startRun", () => {
     expect(handle.id).toBe(EXEC);
   });
 
+  it("stops waiting on a busy id's subscriber once its chunk is replaced", async () => {
+    // The retry that replaced it is waiting on this call to unwind, and on the
+    // subscriber this would otherwise hold for the rest of the attach budget.
+    let looks = 0;
+    const replaced = new AbortController();
+    replaced.abort();
+    const runtime: SessionRuntime = {
+      exec: async () => {
+        throw Object.assign(new Error("execution is running"), {
+          code: "EEXEC_BUSY"
+        });
+      },
+      getExec: async () => {
+        looks++;
+        throw new Error("exec x already has a live subscriber");
+      },
+      killExec: async () => {}
+    };
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await expect(
+        startRun(runtime, {
+          prompt: "p",
+          dir: "/workspace/repo",
+          execId: EXEC,
+          timeoutMs: 1000,
+          signal: replaced.signal
+        })
+      ).rejects.toThrow(/already has a live subscriber/);
+      expect(looks).toBe(1);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("rethrows anything that is not a busy id", async () => {
     const runtime: SessionRuntime = {
       exec: async () => {

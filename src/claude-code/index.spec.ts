@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { claudeCode, claudeCodeRead, claudeCodeSession } from "./index.js";
 import { DEFAULT_PERMISSION_MODE } from "./config.js";
 import {
@@ -344,6 +344,46 @@ describe("where a session runs", () => {
       `--permission-mode ${DEFAULT_PERMISSION_MODE}`
     );
     expect(calls[0]?.command).not.toContain("throwaway copy");
+  });
+
+  /**
+   * A chunk replaced by a retry, caught in `startRun`'s fallback to an exec that
+   * is already live. Both launches reach it, and both must give up the wait:
+   * core runs the retry only once this call has unwound.
+   */
+  it("hands both launches the signal that stops a busy id's wait", async () => {
+    let looks = 0;
+    const runtime = {
+      exec: async () => {
+        throw Object.assign(new Error("execution is running"), {
+          code: "EEXEC_BUSY"
+        });
+      },
+      getExec: async () => {
+        looks++;
+        throw new Error("exec x already has a live subscriber");
+      },
+      killExec: async () => {}
+    } as unknown as Runtime;
+    const replaced = new AbortController();
+    replaced.abort();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const session = claudeCodeSession(config());
+      await expect(
+        session.start(runtime, 1, CLAUDE_CODE_TYPE, "work", "/workspace/r", {
+          signal: replaced.signal
+        })
+      ).rejects.toThrow(/live subscriber/);
+      await expect(
+        session.followUp(runtime, 1, "session-1", "more", "/workspace/r", {
+          signal: replaced.signal
+        })
+      ).rejects.toThrow(/live subscriber/);
+      expect(looks).toBe(2);
+    } finally {
+      info.mockRestore();
+    }
   });
 
   /** Falling back to the checkout is the one thing it must never do. */

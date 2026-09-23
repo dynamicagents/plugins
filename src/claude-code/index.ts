@@ -180,7 +180,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
             }
           : launch(prompt, dir)),
         execId,
-        timeoutMs
+        timeoutMs,
+        signal: sinks.signal
       });
       const cursor = freshCursor(execId);
       return await settle(
@@ -220,7 +221,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         ...launch(prompt, dir),
         resume: sessionId,
         execId,
-        timeoutMs
+        timeoutMs,
+        signal: sinks.signal
       });
       return await settle(
         runtime,

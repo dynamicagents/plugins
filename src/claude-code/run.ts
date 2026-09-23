@@ -672,7 +672,12 @@ const ATTACH_CAP_MS = 2_000;
  */
 export async function startRun(
   runtime: SessionRuntime,
-  options: LaunchOptions & { execId: string; timeoutMs: number }
+  options: LaunchOptions & {
+    execId: string;
+    timeoutMs: number;
+    /** Stops the fallback's wait — see {@link AttachOptions.signal}. */
+    signal?: AbortSignal;
+  }
 ): Promise<WorkspaceRuntimeExecHandle<"utf8">> {
   const { command, env } = buildLaunch(options);
   try {
@@ -689,7 +694,9 @@ export async function startRun(
       "[claude-code] a session is already running under this id — attaching",
       { execId: options.execId }
     );
-    return await attachRun(runtime, freshCursor(options.execId));
+    return await attachRun(runtime, freshCursor(options.execId), {
+      signal: options.signal
+    });
   }
 }
 
