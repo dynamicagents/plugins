@@ -92,7 +92,7 @@ export class ContainerTrust {
   /** Whether an exit watch is standing for the container now running. */
   #watching = false;
 
-  /** Bumped by {@link forget}, so a watch settling after it is ignored. */
+  /** Bumped by {@link forget}, so a watch armed before it is ignored. */
   #generation = 0;
 
   /**
@@ -107,10 +107,18 @@ export class ContainerTrust {
 
   constructor(private readonly deps: ContainerTrustDeps) {}
 
-  /** Forget that any container was trusted. */
+  /**
+   * Forget that any container was trusted.
+   *
+   * Drops the standing watch too, because this is also reached for a container
+   * that keeps running — a `running` read, a lost exec. The watch it leaves
+   * behind ignores that container's real exit, so without a fresh one nothing
+   * would clear the flag again and the replacement would be vouched for.
+   */
   forget(): void {
     this.#generation += 1;
     this.#trusted = false;
+    this.#watching = false;
     this.#faultReported = false;
   }
 
@@ -136,8 +144,9 @@ export class ContainerTrust {
     if (!container) return;
     const generation = this.#generation;
     try {
+      // A stale watch returns before touching anything: `#watching` belongs to
+      // whichever watch was armed since.
       const done = (): void => {
-        this.#watching = false;
         if (generation !== this.#generation) return;
         this.forget();
         this.deps.onExit?.();
