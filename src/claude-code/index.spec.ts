@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { claudeCode, claudeCodeRead, claudeCodeSession } from "./index.js";
 import { DEFAULT_PERMISSION_MODE } from "./config.js";
 import {
@@ -46,6 +46,10 @@ const config = (over: Partial<Parameters<typeof claudeCode>[0]> = {}) => ({
   },
   abortSubtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) => {
     seamCalls.push(`abort ${ctx.taskId}:${ctx.subtaskId}`);
+  },
+  failSubtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) => {
+    seamCalls.push(`fail ${ctx.taskId}:${ctx.subtaskId}`);
+    return "kept on its branch";
   },
   ...over
 });
@@ -159,6 +163,18 @@ describe("onAbort and onSettled", () => {
     expect(seamCalls).toEqual(["abort task-1:7"]);
   });
 
+  it("keeps a failed subtask's work, and hands core where it is", async () => {
+    // The only channel back to the delegating model: without it a model that
+    // sees the failure re-delegates the work from nothing.
+    seamCalls.length = 0;
+    const plugin = claudeCode(config());
+
+    await expect(plugin.onFail?.({ ...context, subtaskId: 7 })).resolves.toBe(
+      "kept on its branch"
+    );
+    expect(seamCalls).toEqual(["fail task-1:7"]);
+  });
+
   /**
    * The reading type shares the **parent's** workspace, which outlives every
    * subtask that read in it, and its copy is the session driver's to delete.
@@ -167,6 +183,7 @@ describe("onAbort and onSettled", () => {
     const plugin = claudeCodeRead(config());
     expect(plugin.onSettled).toBeUndefined();
     expect(plugin.onAbort).toBeUndefined();
+    expect(plugin.onFail).toBeUndefined();
   });
 });
 
@@ -327,6 +344,46 @@ describe("where a session runs", () => {
       `--permission-mode ${DEFAULT_PERMISSION_MODE}`
     );
     expect(calls[0]?.command).not.toContain("throwaway copy");
+  });
+
+  /**
+   * A chunk replaced by a retry, caught in `startRun`'s fallback to an exec that
+   * is already live. Both launches reach it, and both must give up the wait:
+   * core runs the retry only once this call has unwound.
+   */
+  it("hands both launches the signal that stops a busy id's wait", async () => {
+    let looks = 0;
+    const runtime = {
+      exec: async () => {
+        throw Object.assign(new Error("execution is running"), {
+          code: "EEXEC_BUSY"
+        });
+      },
+      getExec: async () => {
+        looks++;
+        throw new Error("exec x already has a live subscriber");
+      },
+      killExec: async () => {}
+    } as unknown as Runtime;
+    const replaced = new AbortController();
+    replaced.abort();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const session = claudeCodeSession(config());
+      await expect(
+        session.start(runtime, 1, CLAUDE_CODE_TYPE, "work", "/workspace/r", {
+          signal: replaced.signal
+        })
+      ).rejects.toThrow(/live subscriber/);
+      await expect(
+        session.followUp(runtime, 1, "session-1", "more", "/workspace/r", {
+          signal: replaced.signal
+        })
+      ).rejects.toThrow(/live subscriber/);
+      expect(looks).toBe(2);
+    } finally {
+      info.mockRestore();
+    }
   });
 
   /** Falling back to the checkout is the one thing it must never do. */

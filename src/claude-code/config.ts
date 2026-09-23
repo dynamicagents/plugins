@@ -130,17 +130,35 @@ export interface ClaudeCodeConfig {
   }) => Promise<void>;
 
   /**
-   * The execution was cut short — canceled, or failed at its step — so what it
-   * committed is not work anybody asked to keep.
+   * The execution was canceled, so what it committed is not work anybody asked
+   * to keep.
    *
-   * Called before {@link releaseSubtaskWorkspace}, on those paths only. A session
+   * Called before {@link releaseSubtaskWorkspace}, on that path only. A session
    * that ended by reporting a failure is not one of them: it said what it did,
-   * and its commits stay for the parent to judge.
+   * and its commits stay for the parent to judge. A step the Workflow gave up on
+   * is {@link failSubtaskWorkspace}'s — except under a core that predates
+   * `onFail`, which calls this for it and so discards what that seam keeps.
    */
   abortSubtaskWorkspace: (ctx: {
     taskId: string;
     subtaskId: number;
   }) => Promise<void>;
+
+  /**
+   * The Workflow gave up on the execution — its step ran out of retries — which
+   * says nothing about the session: every loss this path has seen was a healthy
+   * one whose chunk lost its transport. So the opposite of
+   * {@link abortSubtaskWorkspace}: stop the session and **keep** what it did.
+   *
+   * Answers the sentence the delegating model needs to continue it, which core
+   * appends to the failure — or nothing, when there was nothing to keep. Called
+   * instead of {@link abortSubtaskWorkspace}, before
+   * {@link releaseSubtaskWorkspace}.
+   */
+  failSubtaskWorkspace: (ctx: {
+    taskId: string;
+    subtaskId: number;
+  }) => Promise<string | void>;
 
   /** Which model the session runs. Unset, Claude Code picks its own default. */
   model?: string;

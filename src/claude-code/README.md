@@ -237,10 +237,13 @@ readonly #session = claudeCodeSession({
   // resolved one.
   releaseSubtaskWorkspace: async ({ taskId, subtaskId }) =>
     this.#releaseWorkspace({ taskId, subtaskId }),
-  // A canceled execution, or one that failed at its step, also discards what it
-  // committed — before the release.
+  // A canceled execution also discards what it committed — before the release.
   abortSubtaskWorkspace: async ({ taskId, subtaskId }) =>
     this.#discardCommits({ taskId, subtaskId }),
+  // One the Workflow gave up on keeps it instead, and answers where it is, for
+  // the failure the delegating model reads — see `failSubtaskWorkspace`.
+  failSubtaskWorkspace: async ({ taskId, subtaskId }) =>
+    this.#keepWork({ taskId, subtaskId }),
   // Who the session's own commits, amends and rebases are attributed to. The
   // same pair the workspace's `git.author` takes: a session commits in
   // repositories nothing configured, and a checkout's config is a value frozen
