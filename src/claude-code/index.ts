@@ -98,13 +98,13 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
 
   /**
    * What a host may hand a drain beyond its window: where to send a note the
-   * moment it is parsed, and where to offer a cursor part-way through.
+   * moment it is parsed, where to offer a cursor part-way through, and the signal
+   * that asks for the window back.
    *
-   * Optional, and a host that passes neither gets exactly the behaviour a drain
-   * had before they existed — every note on the outcome, one cursor at the end.
-   * See {@link file://./run.ts DrainOptions}.
+   * Optional, and a host that passes none gets a drain that reports once, at the
+   * end of its window, and runs it out. See {@link file://./run.ts DrainOptions}.
    */
-  type Sinks = Pick<DrainOptions, "onProgress" | "onCheckpoint">;
+  type Sinks = Pick<DrainOptions, "onProgress" | "onCheckpoint" | "signal">;
 
   const launch = (prompt: string, dir: string) => ({
     prompt,
@@ -255,7 +255,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     ): Promise<DrainOutcome> {
       let handle;
       try {
-        handle = await attachRun(runtime, cursor);
+        handle = await attachRun(runtime, cursor, { signal: sinks.signal });
       } catch (err) {
         if (!isExecLost(err)) throw err;
         console.warn("[claude-code] the session's container was replaced", {
@@ -430,6 +430,16 @@ export function claudeCode(config: ClaudeCodeConfig): AgentPlugin {
         subtaskId: ctx.subtaskId
       });
     },
+
+    /**
+     * An execution the Workflow gave up on keeps what it did, and says where —
+     * see {@link file://./config.ts ClaudeCodeConfig.failSubtaskWorkspace}.
+     */
+    onFail: async (ctx): Promise<string | void> =>
+      await config.failSubtaskWorkspace({
+        taskId: ctx.taskId,
+        subtaskId: ctx.subtaskId
+      }),
 
     /**
      * The execution is over, so its workspace can go to the next subtask.

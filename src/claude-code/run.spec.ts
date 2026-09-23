@@ -957,6 +957,118 @@ describe("attachRun", () => {
   });
 });
 
+/**
+ * A chunk replaced by a retry of itself, asked to let go of the session.
+ *
+ * Only this chunk ends: the session goes on running, and the retry resumes from
+ * the cursor returned here. Holding on instead is what kept a retry off the
+ * session's one subscriber until the step ran out of attempts.
+ */
+describe("drainRun, asked for its window back", () => {
+  const long = { windowMs: 20 * 60_000 };
+  const settleReads = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("yields at once, with a cursor the retry resumes from", async () => {
+    const { handle } = liveHandle([stdout(1, assistant("working"))]);
+    const replaced = new AbortController();
+    const draining = drainRun(handle, FRESH, {
+      ...long,
+      signal: replaced.signal
+    });
+    await settleReads();
+    replaced.abort();
+
+    const outcome = await draining;
+    expect(outcome.done).toBe(false);
+    expect(outcome.cursor.seq).toBe(1);
+    expect(outcome.progress.map((p) => p.key)).toEqual(["claude:0"]);
+  });
+
+  it("does not start a window it was already asked to give back", async () => {
+    const { handle } = liveHandle([stdout(1, assistant("working"))]);
+    const replaced = new AbortController();
+    replaced.abort();
+
+    const outcome = await drainRun(handle, FRESH, {
+      ...long,
+      signal: replaced.signal
+    });
+    expect(outcome.done).toBe(false);
+    expect(outcome.cursor.seq).toBe(0);
+  });
+
+  it("reads to the end once the process has exited", async () => {
+    // The read to the end is what runs the filesystem sync, so a yield that
+    // cut it short would report a session whose edits never land.
+    let controller!: ReadableStreamDefaultController<Event>;
+    const stream = new ReadableStream<Event>({
+      start(c) {
+        controller = c;
+        c.enqueue(stdout(1, RESULT_LINE));
+        c.enqueue(exit(2, 0));
+      }
+    });
+    const handle = Object.assign(stream, {
+      id: EXEC,
+      backend: "container",
+      result: async () => {
+        throw new Error("not used by the drain");
+      },
+      kill: async () => {},
+      [Symbol.dispose]: () => {}
+    }) as unknown as WorkspaceRuntimeExecHandle<"utf8">;
+    const replaced = new AbortController();
+    let settled = false;
+    const draining = drainRun(handle, FRESH, {
+      ...long,
+      signal: replaced.signal
+    }).finally(() => {
+      settled = true;
+    });
+
+    await settleReads();
+    replaced.abort();
+    await settleReads();
+    expect(settled).toBe(false);
+
+    controller.close();
+    const outcome = await draining;
+    expect(outcome.done).toBe(true);
+    if (!outcome.done) throw new Error("unreachable");
+    expect(outcome.exitCode).toBe(0);
+  });
+});
+
+describe("attachRun, for a chunk that has been replaced", () => {
+  it("stops waiting for the subscriber", async () => {
+    // The retry that replaced it is what the subscriber is being freed for.
+    let looks = 0;
+    const runtime: SessionRuntime = {
+      exec: async () => {
+        throw new Error("not used");
+      },
+      getExec: async () => {
+        looks++;
+        throw new Error("exec x already has a live subscriber");
+      },
+      killExec: async () => {}
+    };
+    const replaced = new AbortController();
+    let waits = 0;
+
+    await expect(
+      attachRun(runtime, FRESH, {
+        signal: replaced.signal,
+        wait: async () => {
+          waits++;
+          if (waits === 2) replaced.abort();
+        }
+      })
+    ).rejects.toThrow(/already has a live subscriber/);
+    expect(looks).toBe(3);
+  });
+});
+
 describe("the reserved credential key", () => {
   /**
    * `env` is merged last so a deployment can add what a repository needs, and

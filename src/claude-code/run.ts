@@ -555,6 +555,16 @@ export interface DrainOptions {
    * replaying the whole stream.
    */
   onCheckpoint?: (cursor: DrainCursor) => void | Promise<void>;
+  /**
+   * Ends the window now, as if it had run out: the cursor comes back and the
+   * session goes on running.
+   *
+   * How a chunk replaced by a retry of itself lets go of the session's one
+   * subscriber — the host fires it from core's `yieldRun`. Not honoured once the
+   * process has exited, because the read to the end carries the filesystem sync;
+   * see the loop in {@link drainRun}.
+   */
+  signal?: AbortSignal;
   now?: () => number;
 }
 
@@ -687,6 +697,8 @@ export async function startRun(
 export interface AttachOptions {
   now?: () => number;
   wait?: (ms: number) => Promise<void>;
+  /** Stops the wait: this chunk has been replaced — see `DrainOptions.signal`. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -728,7 +740,12 @@ export async function attachRun(
     } catch (err) {
       // Rethrown rather than retried once the budget is gone, so the step still
       // fails on a subscriber that is never coming back — just not first.
-      if (!isExecSubscribed(err) || now() >= deadline) throw err;
+      if (
+        !isExecSubscribed(err) ||
+        now() >= deadline ||
+        options.signal?.aborted
+      )
+        throw err;
       // Clamped to what is left, so the last gap lands *on* the deadline rather
       // than past it. Uncapped, a schedule whose final doubling straddles the
       // bound would take one more look on the far side of it — and the bound
@@ -968,9 +985,9 @@ export async function drainRun(
       }
 
       const remaining = deadline - now();
-      if (remaining <= 0) return await yieldWindow();
+      if (remaining <= 0 || options.signal?.aborted) return await yieldWindow();
 
-      const timer = windowTimer(remaining);
+      const timer = windowTimer(remaining, options.signal);
       const next = await Promise.race([reader.read(), timer.expired]).finally(
         timer.clear
       );
@@ -1043,21 +1060,34 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * What's left of the window, as a race a read can win.
+ * What's left of the window, as a race a read can win — cut short when `signal`
+ * asks for the window back.
  *
  * Cleared by the caller whichever side wins: one is armed per read, and a timer
  * left pending holds the facet's `executeChunk` open until the window's end, so
  * a session that finishes in seconds would still cost the whole window.
  */
-function windowTimer(ms: number): {
+function windowTimer(
+  ms: number,
+  signal?: AbortSignal
+): {
   expired: Promise<typeof WINDOW_EXPIRED>;
   clear: () => void;
 } {
   let id: ReturnType<typeof setTimeout> | undefined;
+  let onAbort = (): void => {};
   const expired = new Promise<typeof WINDOW_EXPIRED>((resolve) => {
     id = setTimeout(() => resolve(WINDOW_EXPIRED), ms);
+    onAbort = () => resolve(WINDOW_EXPIRED);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
-  return { expired, clear: () => clearTimeout(id) };
+  return {
+    expired,
+    clear: () => {
+      clearTimeout(id);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  };
 }
 
 /** How much stderr is worth carrying, in characters. */

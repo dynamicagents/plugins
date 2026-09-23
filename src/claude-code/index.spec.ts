@@ -47,6 +47,10 @@ const config = (over: Partial<Parameters<typeof claudeCode>[0]> = {}) => ({
   abortSubtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) => {
     seamCalls.push(`abort ${ctx.taskId}:${ctx.subtaskId}`);
   },
+  failSubtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) => {
+    seamCalls.push(`fail ${ctx.taskId}:${ctx.subtaskId}`);
+    return "kept on its branch";
+  },
   ...over
 });
 
@@ -159,6 +163,18 @@ describe("onAbort and onSettled", () => {
     expect(seamCalls).toEqual(["abort task-1:7"]);
   });
 
+  it("keeps a failed subtask's work, and hands core where it is", async () => {
+    // The only channel back to the delegating model: without it a model that
+    // sees the failure re-delegates the work from nothing.
+    seamCalls.length = 0;
+    const plugin = claudeCode(config());
+
+    await expect(plugin.onFail?.({ ...context, subtaskId: 7 })).resolves.toBe(
+      "kept on its branch"
+    );
+    expect(seamCalls).toEqual(["fail task-1:7"]);
+  });
+
   /**
    * The reading type shares the **parent's** workspace, which outlives every
    * subtask that read in it, and its copy is the session driver's to delete.
@@ -167,6 +183,7 @@ describe("onAbort and onSettled", () => {
     const plugin = claudeCodeRead(config());
     expect(plugin.onSettled).toBeUndefined();
     expect(plugin.onAbort).toBeUndefined();
+    expect(plugin.onFail).toBeUndefined();
   });
 });
 
