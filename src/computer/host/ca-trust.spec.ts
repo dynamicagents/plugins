@@ -155,22 +155,21 @@ describe("when the container is asked to trust the CA again", () => {
  */
 describe("watching the container's exit", () => {
   function watched() {
-    let exit!: () => void;
+    // Every `monitor()` taken on a container settles when it exits, not only
+    // the latest.
+    const exits: Array<() => void> = [];
     const container = {
       monitor: () =>
         new Promise<void>((resolve) => {
-          exit = resolve;
+          exits.push(resolve);
         })
     } as unknown as Container;
     const onExit = vi.fn();
-    const workspace = {
-      runtime: {
-        exec: async () => ({
-          result: async () => ({ exitCode: 0, stdout: "TRUSTED", stderr: "" }),
-          [Symbol.dispose]: () => {}
-        })
-      }
-    } as unknown as Workspace;
+    const exec = vi.fn(async () => ({
+      result: async () => ({ exitCode: 0, stdout: "TRUSTED", stderr: "" }),
+      [Symbol.dispose]: () => {}
+    }));
+    const workspace = { runtime: { exec } } as unknown as Workspace;
     const trust = new ContainerTrust({
       workspace: () => workspace,
       container: () => container,
@@ -179,10 +178,10 @@ describe("watching the container's exit", () => {
       onExit
     });
     const settle = async () => {
-      exit();
+      for (const exit of exits.splice(0)) exit();
       await new Promise((resolve) => setTimeout(resolve, 0));
     };
-    return { trust, onExit, settle };
+    return { trust, onExit, settle, exec };
   }
 
   it("reports the exit of the container it watched", async () => {
@@ -205,6 +204,25 @@ describe("watching the container's exit", () => {
       trust.forget();
       await settle();
       expect(onExit).not.toHaveBeenCalled();
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("still reports the exit of a container forgotten while it ran", async () => {
+    // `forget` is also reached for a container that keeps running. Left
+    // standing, the watch it orphaned would refuse to arm a new one and then
+    // ignore the real exit, vouching for the replacement.
+    const { trust, onExit, settle, exec } = watched();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await trust.ensure();
+      trust.forget();
+      await trust.ensure();
+      await settle();
+      expect(onExit).toHaveBeenCalledTimes(1);
+      await trust.ensure();
+      expect(exec).toHaveBeenCalledTimes(3);
     } finally {
       info.mockRestore();
     }
