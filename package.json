@@ -1,13 +1,12 @@
 {
   "name": "@dynamicagents/plugins",
   "version": "0.12.0",
-  "description": "Optional, composable capabilities for a Dynamic Agent: ARC-AGI-3, browser rendering, a Linux container, git and pull requests, workspace, episodic recall, and pre-turn triage. One subpath per plugin, so a bundle grows only with what it imports.",
+  "description": "Optional, composable capabilities for a Dynamic Agent: browser rendering, a Linux container, git and pull requests, workspace, episodic recall, and pre-turn triage. One subpath per plugin, so a bundle grows only with what it imports.",
   "keywords": [
     "ai-agents",
     "cloudflare-workers",
     "durable-objects",
     "agents-sdk",
-    "arc-agi",
     "vectorize",
     "browser-rendering",
     "containers",
@@ -32,10 +31,6 @@
     "LICENSE"
   ],
   "exports": {
-    "./arc-agi": {
-      "types": "./dist/arc-agi/index.d.ts",
-      "import": "./dist/arc-agi/index.js"
-    },
     "./browser": {
       "types": "./dist/browser/index.d.ts",
       "import": "./dist/browser/index.js"
@@ -80,7 +75,6 @@
     "check": "npm run verify:peer-ranges && npm run verify:references && npm run types:check && prettier --check . && eslint . && tsc && npm run build && npm run verify:exports",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:record": "RECORD=1 vitest run recorded.spec.ts",
     "verify:exports": "node scripts/verify-exports.mjs",
     "verify:references": "node scripts/verify-references.mjs",
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
@@ -95,7 +89,6 @@
     "@platformatic/vfs": "^0.4.0",
     "agents": ">=0.24.0 <0.25.0",
     "ai": "^7.0.88",
-    "drizzle-orm": ">=0.45.2",
     "workers-ai-provider": "^4.0.0",
     "zod": "^4.4.3"
   },
@@ -119,7 +112,6 @@
     "@types/node": "^26.5.1",
     "agents": "^0.24.0",
     "ai": "^7.0.101",
-    "drizzle-orm": ">=0.45.2",
     "eslint": "^10.10.0",
     "husky": "^9.1.7",
     "prettier": "^3.9.6",

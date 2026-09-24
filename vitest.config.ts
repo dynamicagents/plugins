@@ -1,57 +1,40 @@
 import { defineConfig } from "vitest/config";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { createVcr, recordFromEnv } from "@dynamicagents/core/testing/node";
 
 /**
  * Specs run **inside workerd**, not Node.
  *
- * Most of what lives here is pure and would run anywhere, but two things are not:
- * a `PluginStore` drives `ctx.storage.sql`, and the recorded ARC spec issues real
- * `fetch` calls that have to flow through Miniflare to reach the VCR recorder. So
- * the pool boots the real runtime with the Durable Object declared in
- * `wrangler.jsonc`, and `test/worker.ts` is the host that owns it.
+ * Most of what lives here is pure and would run anywhere, but the workspace host
+ * is a Durable Object and has to be driven in a real one. So the pool boots the
+ * real runtime with the Durable Object declared in `wrangler.jsonc`, and
+ * `test/worker.ts` is the host that owns it.
  */
 
-// Real secrets for `npm run test:record`, loaded from a local, gitignored
-// .env.test so recording never requires pasting a key on the shell. Values
-// already in process.env (CI/shell) win — Node's loader never overwrites an
-// existing var. A no-op when the file is absent, which is the ordinary case:
-// playback needs no key at all.
-const ENV_TEST = path.resolve(import.meta.dirname, ".env.test");
-if (existsSync(ENV_TEST)) process.loadEnvFile(ENV_TEST);
-
 /**
- * One recorder serves the whole suite. It record/replays per-test cassettes,
- * announced by each recorded spec over an in-band control channel — the spec
- * runs in workerd and has no filesystem, so it cannot reach the recorder any
- * other way. Generic: recorded specs key their own cassettes per test, so adding
- * one touches only that spec file, never this config.
+ * Every outbound `fetch` a spec makes flows through this recorder. A request
+ * with no active cassette is blocked and names itself, instead of reaching the
+ * network or failing as an unnamed `internal error; reference = …`.
+ *
+ * A recorded spec announces its cassette over an in-band control channel — the
+ * spec runs in workerd and has no filesystem, so it cannot reach the recorder any
+ * other way — and keys it per test. A credential it records with reaches it only
+ * through a `miniflare.bindings` entry: workerd never sees Node's `process.env`.
  *
  * `recordFromEnv()` is `RECORD=1`, compared rather than coerced — every
  * non-empty string is truthy, so `RECORD=0` and `RECORD=false`, the two things
  * someone reaches for to turn recording *off*, would otherwise turn it on and
  * overwrite committed cassettes with live traffic.
  *
- * `excludeHeaders` is the reason a committed cassette is safe: the ARC API key
- * never reaches the snapshot file, which is also why playback works with no key
- * configured at all.
- *
- * There is no `disableNetConnect()` any more. A request with no active cassette
- * is blocked by default and names itself, instead of failing as an unnamed
- * `internal error; reference = …`.
+ * `excludeHeaders` is what keeps a credential out of a committed cassette, and
+ * why playback needs no key configured at all.
  */
 const vcr = createVcr({
   snapshotsDir: path.resolve(import.meta.dirname, "./test/snapshots"),
   record: recordFromEnv(),
   excludeHeaders: ["x-api-key", "cookie", "set-cookie"]
 });
-
-// Placeholder for playback, where the value is irrelevant — the key header is
-// excluded from the cassette. A real key from .env.test takes precedence and is
-// what `npm run test:record` needs.
-process.env.ARC_API_KEY ??= "test-key";
 
 export default defineConfig({
   resolve: {
@@ -68,7 +51,7 @@ export default defineConfig({
      *
      * Harmless once core is installed from the registry, where these hoist anyway.
      */
-    dedupe: ["agents", "ai", "zod", "drizzle-orm", "workers-ai-provider"]
+    dedupe: ["agents", "ai", "zod", "workers-ai-provider"]
   },
   plugins: [
     cloudflareTest({
@@ -84,20 +67,7 @@ export default defineConfig({
         // The hook Miniflare 4 and 5 both have. `fetchMock` was removed in pool
         // 0.20, and an unknown key here is ignored rather than rejected — which
         // is exactly how the previous wiring failed silently.
-        outboundService: vcr.outboundService,
-
-        // The bridge between the two realms, and it has to be explicit.
-        // `.env.test` is loaded above into **Node's** `process.env`, and a spec
-        // runs in workerd, which does not have it: without this line the
-        // recorded spec reads `env.ARC_API_KEY` as `undefined`, falls back to
-        // `"replay-only"`, and every recording attempt dies on an ARC auth
-        // error however valid the key in `.env.test` is.
-        //
-        // Miniflare does pick a key up from a `.dev.vars` beside
-        // `wrangler.jsonc` on its own, which is how the first cassette was
-        // recorded — but that file is not the one this repo documents, and
-        // relying on it left `.env.test` wired to nothing at all.
-        bindings: { ARC_API_KEY: process.env.ARC_API_KEY }
+        outboundService: vcr.outboundService
       }
     })
   ],

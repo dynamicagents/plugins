@@ -76,9 +76,9 @@ describe("workspace()", () => {
 
   it("offers the model-facing tools only to a recipe that asks", async () => {
     // The two halves are independent: every execution gets the durable backing,
-    // but only a recipe naming `workspace` puts the tools in front of a model.
-    // Two logged ARC plays never called `ws_read` once — a family that reaches
-    // the workspace in code does not need the model to have tools for it.
+    // but only a recipe naming `workspace` puts the tools in front of a model. A
+    // family that reaches the workspace in code does not need the model to have
+    // tools for it.
     const plugin = workspace();
     expect(plugin.mainAgentTools).toBeUndefined();
 

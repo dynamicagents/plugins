@@ -31,13 +31,11 @@ export default tseslint.config(
               // migrator keeps a single flat integer journal and one global
               // `__drizzle_migrations` table, so two independently-versioned
               // packages collide in it — the two predecessor agents had already
-              // forked that journal at index 1. Drizzle's *query builder* is
-              // fine and is what plugins should use; only this import is banned.
+              // forked that journal at index 1.
               name: "drizzle-orm/durable-sqlite/migrator",
               message:
-                "A plugin must not run drizzle's migrator — it shares one journal with core. " +
-                "Declare a PluginStore with idempotent CREATE TABLE IF NOT EXISTS DDL instead, " +
-                "and keep using drizzle for queries."
+                "A plugin must not run drizzle's migrator — the agent's Durable Object has one " +
+                "migration journal, and it is core's."
             }
           ]
         }

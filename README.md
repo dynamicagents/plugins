@@ -20,19 +20,16 @@ npm install @dynamicagents/plugins
 
 ```ts
 // src/plugins.ts
-import { arcAgi } from "@dynamicagents/plugins/arc-agi";
 import { browser } from "@dynamicagents/plugins/browser";
 import { recall } from "@dynamicagents/plugins/recall";
 
 export interface PluginHost {
   env: Env;
-  storage: DurableObjectStorage;
   /** The verified caller this Durable Object belongs to. See below. */
   callerKey: () => string;
 }
 
-export const plugins = ({ env, storage, callerKey }: PluginHost) => [
-  arcAgi({ apiKey: env.ARC_API_KEY, storage }),
+export const plugins = ({ env, callerKey }: PluginHost) => [
   browser({ binding: env.BROWSER }),
   recall({ ai: env.AI, index: env.VECTORIZE, namespace: callerKey })
 ];
@@ -56,7 +53,6 @@ export class MyAgent extends Agent<Env> {
       config,
       plugins: plugins({
         env: this.env,
-        storage: this.ctx.storage,
         // A thunk, not a value: `onStart` runs before any request, so the caller
         // is not known yet. The DO is keyed 1:1 by that caller, so it is constant
         // once it is — this just defers reading it until it exists.
@@ -82,7 +78,6 @@ needing per-caller state takes it the same way.
 
 | Subpath                            | What it adds                                                                                                        | Needs                                              |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| [`/arc-agi`](src/arc-agi/)         | Play ARC-AGI-3 games — a delegable subtask type, a catalogue tool, a scorecard ledger                               | `ARC_API_KEY`                                      |
 | [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                                                  | `BROWSER` (paid plan)                              |
 | [`/claude-code`](src/claude-code/) | Delegate a coding task to a Claude Code session in the workspace container                                          | one or more `claude setup-token` credentials       |
 | [`/computer`](src/computer/)       | A Linux container whose filesystem outlives it — shell, package manager, network, and the Durable Object it runs in | `@cloudflare/computer`, `@platformatic/vfs` (paid) |
@@ -151,18 +146,6 @@ repo's source for a contract change sitting uninstalled one directory away.
 gives it its own copy of every peer. Two copies of `agents` in one bundle breaks the
 `Session` types and every `instanceof`, at runtime rather than at the type level.
 Nothing is written to `package.json`, so CI never builds against a local checkout.
-
-`test/arc-agi/recorded.spec.ts` drives the **real** ARC API and replays a committed
-cassette, so it needs no key either. Re-record it against the live API with:
-
-```bash
-npm run test:record   # real ARC_API_KEY in .env.test (see .env.test.example)
-```
-
-The key reaches the live ARC API and nothing else: the recorder excludes the auth header, so
-it never lands in the committed cassette. It reaches the spec only as a Miniflare binding —
-`.env.test` is loaded into **Node's** `process.env`, which a spec running in workerd cannot
-see, so `vitest.config.ts` hands it across explicitly.
 
 ## License
 
