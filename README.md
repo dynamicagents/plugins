@@ -53,7 +53,6 @@ export class MyAgent extends Agent<Env> {
       config,
       plugins: plugins({
         env: this.env,
-        storage: this.ctx.storage,
         // A thunk, not a value: `onStart` runs before any request, so the caller
         // is not known yet. The DO is keyed 1:1 by that caller, so it is constant
         // once it is — this just defers reading it until it exists.
