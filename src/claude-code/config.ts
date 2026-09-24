@@ -102,8 +102,9 @@ export interface ClaudeCodeConfig {
    * different container than chunk one and strand the work in the first.
    *
    * `continue` is the branch the delegating model asked to add to, from an
-   * earlier subtask's report — the host decides whether it may, and which
-   * workspace holds it. Absent, the subtask starts a branch of its own.
+   * earlier subtask's report or an open pull request — the host decides whether
+   * it may, and which workspace holds it. Absent, the subtask starts a branch of
+   * its own.
    *
    * Resolving is expected to be idempotent and is awaited: returning means the
    * workspace is addressable and has a checkout on the subtask's branch. Arming a

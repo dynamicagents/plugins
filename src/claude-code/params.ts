@@ -17,6 +17,6 @@ export const CLAUDE_CODE_PARAMS = z.object({
     .string()
     .default("")
     .describe(
-      "The branch an earlier claude-code subtask's report named, to add to that work; omit to start a new branch"
+      "The branch to add to — one an earlier claude-code subtask's report named, or an open pull request's head branch; omit to start a new branch"
     )
 });
