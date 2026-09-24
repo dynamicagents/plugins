@@ -2,17 +2,16 @@
   "$schema": "node_modules/wrangler/config-schema.json",
 
   // Dev-only. `@dynamicagents/plugins` is a library and never deploys — this config
-  // exists so `@cloudflare/vitest-plugin` has a Worker to bind, and so the
-  // recorded ARC spec has an `ARC_API_KEY` binding for vitest.config.ts to fill
-  // from `.env.test`. It is excluded from the published tarball by
+  // exists so `@cloudflare/vitest-plugin` has a Worker to bind. It is excluded
+  // from the published tarball by
   // `package.json`'s `files` allowlist; a consumer brings their own, and each
   // plugin's README ships the snippet.
   "name": "da-plugins-test",
   "main": "test/worker.ts",
   // 2026-08-04 is not an arbitrary "recent enough" date: it is the day
   // `nodejs_compat` became a default rather than a flag. The Agents SDK reaches
-  // for Node builtins (`node:async_hooks` among others) and the plugin stores run
-  // drizzle over durable-sqlite, so this Worker has always needed it — on an
+  // for Node builtins (`node:async_hooks` among others), so this Worker has
+  // always needed it — on an
   // earlier date it needed `compatibility_flags: ["nodejs_compat"]` to say so,
   // and on this one that entry is redundant. workerd rejects flags a compatibility
   // date already enables, and `@cloudflare/vitest-pool-workers` 0.21.2 started
@@ -25,7 +24,6 @@
 
   "durable_objects": {
     "bindings": [
-      { "name": "TEST_AGENT", "class_name": "TestAgent" },
       // No `containers` entry paired with it: the pool cannot start a container,
       // and the workspace specs are written against exactly that — a host whose
       // `runtime.exec` fails the way it fails when a container is unreachable.
@@ -33,12 +31,12 @@
     ]
   },
 
-  // `new_sqlite_classes`, not `new_classes`: a `PluginStore` talks to
+  // `new_sqlite_classes`, not `new_classes`: the workspace keeps its files in
   // `ctx.storage.sql`, which only exists on a SQLite-backed Durable Object.
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TestAgent", "TestWorkspaceDO"]
+      "new_sqlite_classes": ["TestWorkspaceDO"]
     }
   ]
 }

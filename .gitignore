@@ -3,7 +3,7 @@ dist/
 .wrangler/
 .dev.vars
 .env
-# Real credentials for `npm run test:record`. See .env.test.example.
+# Local test credentials.
 .env.test
 *.tsbuildinfo
 .DS_Store

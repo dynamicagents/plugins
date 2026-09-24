@@ -118,7 +118,7 @@ for (const file of walk(path.join(root, "dist"))) {
 
 // --- 5 & 6. realm isolation, and plugin isolation ----------------------------
 
-/** `./arc-agi` → `dist/arc-agi` — the directory a subpath's files must stay in. */
+/** `./browser` → `dist/browser` — the directory a subpath's files must stay in. */
 const ownDir = (subpath) =>
   path.join(root, "dist", subpath.replace(/^\.\//, ""));
 
@@ -132,9 +132,9 @@ for (const [subpath, target] of subpathEntries) {
     );
   }
 
-  // A plugin may reach only its own directory. `arc-agi` bundling its grid
-  // analysis is fine — that code lives inside `arc-agi/` precisely because only
-  // arc-agi consumes it. Reaching *out* into a sibling is what must not happen.
+  // A plugin may reach only its own directory. Code only one plugin consumes
+  // lives inside that plugin's directory; reaching *out* into a sibling is what
+  // must not happen.
   const home = ownDir(subpath);
   const trespass = [...files]
     .filter((f) => !f.startsWith(home + path.sep))

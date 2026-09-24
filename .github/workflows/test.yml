@@ -43,10 +43,8 @@ jobs:
       # reads.
       - run: npm run check
 
-      # Inside real workerd, against committed cassettes. No `ARC_API_KEY` is
-      # needed or wanted: the key header is excluded from every cassette, which
-      # is what makes playback work with no secret configured at all. An
-      # unrecorded spec fails here by design rather than skipping.
+      # Inside real workerd, with no secret configured. A request with no
+      # committed cassette fails here by design rather than reaching the network.
       - run: npm test
 
       # Playback writes nothing. `--porcelain` rather than `git diff`, because a
