@@ -100,10 +100,12 @@ export const CLAUDE_CODE_CAPABILITY = [
   "It cannot ask you anything mid-run. Anything it would need to ask, decide",
   "first — or ask the user yourself before delegating.",
   "",
-  "To correct or extend work a previous session did, delegate again with param",
-  "`continue` set to the branch its report named: the new session starts from",
-  "those commits and adds to the same branch. Without it, a session starts a",
-  "branch of its own."
+  "To correct or extend work that is already on a branch — the one a previous",
+  "session's report named, or an open pull request's head branch — delegate with",
+  "param `continue` set to that branch: the new session starts from its tip and",
+  "adds commits to it, so pushing the branch updates its pull request. Without it,",
+  "a session starts a branch of its own, and changing an open pull request from",
+  "there means moving commits between branches."
 ].join("\n");
 
 /**
@@ -185,15 +187,15 @@ export const CLAUDE_CODE_SPEC: SubtaskTypeSpec = {
    * model name a repository here would let it name somebody else's — the same
    * reasoning that keeps `workspaceName` out of model input in `/computer`.
    *
-   * A branch is different: the model quotes it from an earlier report, and the
-   * host resolves it against the branches its own subtasks made before anything
-   * runs — see {@link file://./config.ts ClaudeCodeConfig.subtaskWorkspace}.
+   * A branch is different: the model quotes it from an earlier report or a pull
+   * request, and the host resolves it before anything runs — see
+   * {@link file://./config.ts ClaudeCodeConfig.subtaskWorkspace}.
    *
    * The schema is in `./params.ts`, which says why it is a module of its own.
    */
   params: CLAUDE_CODE_PARAMS,
   paramsHelp:
-    "optional param `continue` (a branch from an earlier claude-code report, to keep working on it)",
+    "optional param `continue` (a branch to keep working on: one an earlier claude-code report named, or an open pull request's head branch)",
   capability: CLAUDE_CODE_CAPABILITY,
   recipe: CLAUDE_CODE_RECIPE
 };
