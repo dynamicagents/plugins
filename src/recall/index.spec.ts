@@ -323,7 +323,7 @@ describe("recall()", () => {
       index: fakeIndex().index,
       namespace: () => "caller:abc",
       aiGatewayId: "gw",
-      agentName: "proactive"
+      agentName: "reactive"
     });
 
     await plugin.onMessagesDisplaced!([turn("m1", "Ada", "the deploy")]);
@@ -332,7 +332,7 @@ describe("recall()", () => {
     // channel is not a fact about it.
     expect(calls[0]?.gateway).toEqual({
       id: "gw",
-      metadata: { agent: "proactive", phase: "embed" }
+      metadata: { agent: "reactive", phase: "embed" }
     });
   });
 
