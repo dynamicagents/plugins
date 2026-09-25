@@ -1,7 +1,7 @@
 {
   "name": "@dynamicagents/plugins",
   "version": "0.12.0",
-  "description": "Optional, composable capabilities for a Dynamic Agent: browser rendering, a Linux container, git and pull requests, workspace, episodic recall, and pre-turn triage. One subpath per plugin, so a bundle grows only with what it imports.",
+  "description": "Optional, composable capabilities for a Dynamic Agent: browser rendering, a Linux container, git and pull requests, workspace, and episodic recall. One subpath per plugin, so a bundle grows only with what it imports.",
   "keywords": [
     "ai-agents",
     "cloudflare-workers",
@@ -42,10 +42,6 @@
     "./recall": {
       "types": "./dist/recall/index.d.ts",
       "import": "./dist/recall/index.js"
-    },
-    "./triage": {
-      "types": "./dist/triage/index.d.ts",
-      "import": "./dist/triage/index.js"
     },
     "./repo": {
       "types": "./dist/repo/index.d.ts",
