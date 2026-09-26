@@ -790,6 +790,11 @@ export async function drainRun(
   let sunk: Promise<void> = Promise.resolve();
   /** Set once a note is rejected — see `DrainOptions.onCheckpoint`. */
   let rejected = false;
+  /**
+   * The last position every note behind which reached the sink: where this
+   * drain began, then each checkpoint the chain reaches unrejected.
+   */
+  let safe = cursor;
 
   /**
    * Parse whatever complete lines the buffer now holds.
@@ -911,15 +916,23 @@ export async function drainRun(
     const at = checkpoint();
     // Checked again on the chain: a note queued ahead of this one may yet be
     // rejected, and this cursor names it.
-    sunk = sunk.then(() => (rejected ? undefined : sink(at))).catch(() => {});
+    sunk = sunk
+      .then(() => {
+        if (rejected) return;
+        safe = at;
+        return sink(at);
+      })
+      .catch(() => {});
   };
 
   const finish = async (code?: number): Promise<DrainOutcome> => {
-    const next = checkpoint();
     // Everything the sink was given has been delivered before the outcome
     // naming it is returned, so a caller cannot store a cursor that claims
-    // notes nobody filed.
+    // notes nobody filed. After a rejected note it is the last cursor behind
+    // it: the caller stores it, and a drain resumed from there files the note
+    // again, while the notes after it replay under keys the transcript dedupes.
     await sunk;
+    const next = rejected ? safe : checkpoint();
     return code === undefined
       ? {
           done: false,

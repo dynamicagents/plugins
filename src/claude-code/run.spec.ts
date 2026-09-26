@@ -13,6 +13,7 @@ import {
   CREDENTIAL_PLACEHOLDER,
   READ_ONLY_LAUNCH,
   type DrainCursor,
+  type DrainOutcome,
   type SessionRuntime
 } from "./run.js";
 import { DEFAULT_PERMISSION_MODE } from "./config.js";
@@ -1278,8 +1279,9 @@ describe("drainRun, reporting as it goes", () => {
     const checkpoints: DrainCursor[] = [];
     let clock = 0;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let outcome: DrainOutcome;
     try {
-      await drainRun(
+      outcome = await drainRun(
         fakeHandle([
           stdout(1, assistant("one")),
           stdout(2, assistant("two")),
@@ -1302,6 +1304,41 @@ describe("drainRun, reporting as it goes", () => {
       warn.mockRestore();
     }
     expect(checkpoints).toEqual([]);
+    // The outcome's cursor is stored too, so it stops where the drain began.
+    expect(outcome.cursor).toEqual(FRESH);
+  });
+
+  it("returns the last checkpoint behind a rejected note", async () => {
+    const checkpoints: DrainCursor[] = [];
+    let clock = 0;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let outcome: DrainOutcome;
+    try {
+      outcome = await drainRun(
+        fakeHandle([
+          stdout(1, assistant("one")),
+          stdout(2, assistant("two")),
+          stdout(3, assistant("three")),
+          exit(4, 0)
+        ]),
+        FRESH,
+        {
+          now: () => clock,
+          onProgress: async (note) => {
+            clock += 40_000;
+            if (note.text === "three") throw new Error("storage refused it");
+          },
+          onCheckpoint: (cursor) => {
+            checkpoints.push(cursor);
+          }
+        }
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(checkpoints.map((c) => c.seq)).toEqual([2]);
+    expect(outcome.cursor).toEqual(checkpoints[0]);
+    expect(outcome.done && outcome.exitCode).toBe(0);
   });
 
   it("refuses to checkpoint for a caller that files nothing", async () => {

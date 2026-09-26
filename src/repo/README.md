@@ -45,7 +45,7 @@ name another repository: a thread id is a global node id, not a path segment
 derived from the checkout. It asks which pull request the id belongs to and
 refuses a mismatch, which is the same reach `forgeRepo` denies everywhere else.
 
-## The two writes a recovered turn must not repeat
+## The writes a recovered turn must not repeat
 
 `repo_pr_comment` and `repo_pr_thread_reply` are Think **actions**, in the plugin's
 `actions`, rather than tools. A turn cut by an eviction or a deploy is recovered by
