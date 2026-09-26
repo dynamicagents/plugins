@@ -1333,14 +1333,17 @@ describe("the file tools over a checkout", () => {
       await run(ours.grep, { query: "value119959 =", path: `${root}/src` })
     ).toContain("f1199.ts");
 
-    const found = (await run(ours.find, {
-      path: root,
-      pattern: "**/f11*.ts"
-    })) as string;
-    expect(found).toContain(`${root}/src/m30/f1150.ts`);
-    expect(found).not.toContain(".git");
+    // Think's `find`, over the workspace's `glob`, which prunes `.git`.
+    const found = (await run(think.find, {
+      pattern: `${root}/**/f11*.ts`
+    })) as { files: string[] };
+    expect(found.files).toContain(`${root}/src/m30/f1150.ts`);
+    expect(found.files.some((f) => f.includes(".git"))).toBe(false);
 
-    expect(await run(ours.list, { path: `${root}/src` })).toContain("m7/");
+    const listed = (await run(think.list, { path: `${root}/src` })) as {
+      entries: string[];
+    };
+    expect(listed.entries).toContain("m7/");
 
     await run(think.delete, { path: `${root}/src/new/a.ts` });
     expect(await workspace.stat(`${root}/src/new/a.ts`)).toBeNull();

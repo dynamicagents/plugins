@@ -21,8 +21,8 @@ class Coder extends A2AAgent<Env> {
 }
 ```
 
-Tools: `bash`, `grep`, `find`, `list`, `edit` — under Think's own names, so they
-replace Think's built-ins. Think's `read`, `write` and `delete` stay Think's, and
+Tools: `bash`, `grep`, `edit` — under Think's own names, so they replace Think's
+built-ins. Think's `read`, `write`, `delete`, `find` and `list` stay Think's, and
 reach the container's tree through the agent's workspace.
 
 The filesystem **is** a Durable Object's SQLite, mounted into the container over
@@ -72,9 +72,9 @@ the intended fix: restored at start, they would bring the tree back without a
 reinstall.
 
 The file tools read the workspace, so they refuse `node_modules` paths and route to
-`bash`. Walks skip it with `.git`: `find` passes both to the store as exclusions, so
-the store never walks them, and `grep`, whose store search takes no exclusion,
-filters its results.
+`bash`. Walks skip it with `.git`: the workspace's `glob`, which Think's `find` walks
+with, passes both to the store as exclusions, so the store never walks them, and
+`grep`, whose store search takes no exclusion, filters its results.
 
 ## `.git` is off limits
 
@@ -86,9 +86,10 @@ corrupts the checkout. Repository work goes through the repo tools.
 
 `grep`, `find` and `list` read the durable workspace rather than the container, so
 they keep answering while it restarts or while an install runs — which is exactly
-when an agent would otherwise be blocked. They bound their results at the source and
-report the `offset` that continues a cut one. Think's own `grep` and `find` walk every
-file under the root through the workspace, one call per file.
+when an agent would otherwise be blocked. `grep` is this plugin's: it searches inside
+the workspace object in one call, bounds its matches at the source and reports the
+`offset` that continues a cut result, where Think's own `grep` reads every file under
+the root through the workspace, one call per file. `find` and `list` are Think's.
 
 The store's search takes no exclusion, so `grep` from a checkout's root reads `.git`
 too before filtering it out. Give it a `path` below the root, or an `include`.

@@ -51,19 +51,6 @@ export function truncateOutput(text: string, max: number): string {
 }
 
 /**
- * A byte count in the form a model can act on.
- *
- * A listing that says a file is 4.2 MB tells the model the read it is about to do
- * comes back with a hole in the middle — the one thing it cannot infer from the
- * truncated result itself.
- */
-export function humanBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
  * One `fs.grep` hit, derived from the client rather than imported.
  *
  * `@cloudflare/computer` declares `WorkspaceGrepMatch` but does not re-export it,

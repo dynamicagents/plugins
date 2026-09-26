@@ -26,7 +26,8 @@ import type { WorkspaceClient } from "@cloudflare/computer";
  * dependency tree runs to tens of thousands of files — so one fetch can come back
  * entirely excluded. `maxRounds` is the caller's: a retry re-reads and re-scans
  * every file the last one looked at. For a walk the store can prune instead, see
- * the `find` tool, which passes exclusions to the store and needs none of this.
+ * the workspace's `glob` in `./proxy.ts`, which passes exclusions to the store
+ * and needs none of this.
  *
  * Deliberately no slicing to `want`: the caller needs the extra item to know a next
  * page exists, and its index to say where.

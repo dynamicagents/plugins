@@ -30,11 +30,6 @@ interface Page {
   offset?: number;
 }
 
-interface FoundEntry {
-  path: string;
-  type: "dir" | "file";
-}
-
 /**
  * Page a canned array the way the real methods do.
  *
@@ -61,26 +56,15 @@ const page = <T>(items: T[], options?: Page): T[] => {
 function stub(
   seed: Record<string, string> = {},
   /** Make the container unreachable, for the paths that have to survive it. */
-  execThrows?: string | Error,
-  /** Stand in for a tree whose shape the default canned entries cannot express. */
-  findEntries?: FoundEntry[]
+  execThrows?: string | Error
 ): {
   workspace: () => Promise<WorkspaceClient>;
   execs: Array<{ command: string; options?: unknown }>;
-  readdirs: Page[];
-  finds: Array<{ dir: string; pattern?: string; exclude?: string[] } & Page>;
   greps: Array<{ query: string; path: string } & GrepOptions>;
-  /** Mutable, so a test can assert `ls` was never reached. */
-  calls: { ls: number };
   files: Map<string, string>;
 } {
   const execs: Array<{ command: string; options?: unknown }> = [];
-  const readdirs: Page[] = [];
-  const finds: Array<
-    { dir: string; pattern?: string; exclude?: string[] } & Page
-  > = [];
   const greps: Array<{ query: string; path: string } & GrepOptions> = [];
-  const calls = { ls: 0 };
   const files = new Map(Object.entries(seed));
 
   const client = {
@@ -115,67 +99,6 @@ function stub(
       },
       mkdir: async () => undefined,
       exists: async (path: string) => files.has(path),
-      readdir: async (_path: string, options?: Page) => (
-        readdirs.push(options ?? {}),
-        page(
-          [
-            { name: "src", isDirectory: true, isFile: false, size: 0 },
-            {
-              name: "package.json",
-              isDirectory: false,
-              isFile: true,
-              size: 2048
-            }
-          ],
-          options
-        )
-      ),
-      ls: async () => ((calls.ls += 1), [...files.keys()]),
-      /**
-       * Entries from `findEntries`, paged by `offset`/`limit`. Both are honoured
-       * exactly: the bound is the whole reason this arm moved off `ls`, and a stub
-       * that ignored the offset would let broken paging pass its own test — which
-       * is the failure mode the raw-index bookkeeping exists to prevent.
-       *
-       * The pattern is reduced to a suffix match, which is emphatically not the
-       * real glob: that one is Cloudflare's, anchored against the relative path,
-       * and reimplementing it here would test their code. This much only exists
-       * so both branches are reachable, since a pattern that matches nothing has
-       * its own message.
-       */
-      find: async (
-        dir: string,
-        pattern?: string,
-        options?: Page & { exclude?: string[] }
-      ) => {
-        finds.push({ dir, pattern, ...options });
-        const entries = findEntries ?? [
-          { path: `${dir}/.git`, type: "dir" as const },
-          { path: `${dir}/.gitignore`, type: "file" as const },
-          { path: `${dir}/node_modules`, type: "dir" as const },
-          { path: `${dir}/node_modules/zod/index.ts`, type: "file" as const },
-          { path: `${dir}/src`, type: "dir" as const },
-          { path: `${dir}/src/a.ts`, type: "file" as const },
-          { path: `${dir}/package.json`, type: "file" as const }
-        ];
-        const suffix = pattern?.replace(/^.*\*/, "");
-        // Only the `**/<segment>` form the tools send, pruned before paging as
-        // dofs does — so an offset counts what survived exclusion.
-        const pruned = (options?.exclude ?? []).map((glob) =>
-          glob.replace(/^\*\*\//, "")
-        );
-        const kept = entries.filter(
-          (e) =>
-            !e.path
-              .slice(dir.length + 1)
-              .split("/")
-              .some((segment) => pruned.includes(segment))
-        );
-        return page(
-          suffix ? kept.filter((e) => e.path.endsWith(suffix)) : kept,
-          options
-        );
-      },
       /**
        * A real line scan over the seeded files, because the rendering is what
        * these tests are about — grouping, line numbers, context markers and the
@@ -236,10 +159,7 @@ function stub(
   return {
     workspace: async () => client,
     execs,
-    readdirs,
-    finds,
     greps,
-    calls,
     files
   };
 }
@@ -386,8 +306,6 @@ describe("the dependency tree", () => {
 
     for (const [name, input] of [
       ["edit", { path: dep, old_string: "z", new_string: "y" }],
-      ["list", { path: "/workspace/repo/node_modules" }],
-      ["find", { path: "/workspace/repo/node_modules" }],
       ["grep", { query: "z", path: "/workspace/repo/node_modules" }]
     ] as const) {
       expect(await run(tools, name, input)).toContain("bash");
@@ -405,16 +323,6 @@ describe("the dependency tree", () => {
     });
     expect(out).toContain("/workspace/repo/src/a.ts");
     expect(out).not.toContain("node_modules");
-  });
-
-  it("steps over it in a subtree listing", async () => {
-    const { workspace } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "find", { path: "/workspace/repo" });
-    expect(out).toContain("/workspace/repo/src/a.ts");
-    expect(out).not.toContain("node_modules");
-    expect(out).not.toContain(".git/");
   });
 });
 
@@ -560,80 +468,6 @@ describe("edit", () => {
   });
 });
 
-describe("list and find", () => {
-  const path = "/workspace/repo";
-
-  it("bounds the listing at the source instead of trimming the rendered text", async () => {
-    const { workspace, readdirs } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    await run(tools, "list", { path });
-    // One over the ceiling, which is how the tool detects a cut listing without
-    // asking twice.
-    expect(readdirs[0]?.limit).toBe(1001);
-  });
-
-  it("shows a size for files, so the model can tell a read will be truncated", async () => {
-    const { workspace } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "list", { path });
-    expect(out).toContain("src/");
-    expect(out).toContain("package.json\t2.0 KB");
-  });
-
-  /**
-   * `ls` is a prefix scan with no bound: it returns every path in the subtree,
-   * the isolate holds all of them, and the character ceiling then discards most
-   * — the read-everything-then-discard shape the `readdir` limit rules out one
-   * arm above. `find` takes a limit, so asserting one arrived is asserting the
-   * walk stops early.
-   */
-  it("bounds a subtree listing at the source rather than scanning the whole subtree", async () => {
-    const { workspace, finds, calls } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    await run(tools, "find", { path });
-
-    expect(finds[0]?.limit).toBe(1001);
-    // Whole-subtree, so no pattern — but bounded, which `ls` never was.
-    expect(finds[0]?.pattern).toBeUndefined();
-    expect(calls.ls).toBe(0);
-  });
-
-  it("finds files by glob with one bounded walk", async () => {
-    const { workspace, finds, readdirs } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    await run(tools, "find", { path, pattern: "**/*.ts" });
-
-    expect(finds[0]).toMatchObject({ dir: path, pattern: "**/*.ts" });
-    expect(readdirs).toHaveLength(0);
-  });
-
-  it("marks directories in a subtree listing the way the one-level listing does", async () => {
-    const { workspace } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "find", { path });
-    expect(out).toContain(`${path}/src/`);
-    expect(out).toContain(`${path}/src/a.ts`);
-  });
-
-  /**
-   * "Empty directory" and "your glob matched nothing" send the model to different
-   * next moves — one to a different path, the other to a different pattern.
-   */
-  it("says a pattern matched nothing rather than reporting an empty directory", async () => {
-    const { workspace } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "find", { path, pattern: "**/*.rs" });
-    expect(out).toContain("**/*.rs");
-    expect(out).not.toContain("is empty");
-  });
-});
-
 /**
  * Search that does not need the container.
  *
@@ -760,7 +594,7 @@ describe("paths inside .git", () => {
     const tools = buildComputerTools(workspace, config);
     const path = "/workspace/repo/.git/config";
 
-    for (const name of ["list", "find", "grep", "edit"]) {
+    for (const name of ["grep", "edit"]) {
       const out = await run(tools, name, {
         path,
         query: "x",
@@ -791,7 +625,7 @@ describe("paths inside .git", () => {
     };
     const tools = buildComputerTools(counted, config);
 
-    for (const name of ["list", "find", "grep", "edit"]) {
+    for (const name of ["grep", "edit"]) {
       await run(tools, name, {
         path: "/workspace/repo/.git/config",
         query: "x",
@@ -803,7 +637,7 @@ describe("paths inside .git", () => {
 
     // The same tools do open it for a path they allow — otherwise this would
     // pass just as well against a build that never reached the workspace.
-    await run(tools, "list", { path: "/workspace/repo/src" });
+    await run(tools, "grep", { query: "x", path: "/workspace/repo/src" });
     expect(opened).toBe(1);
   });
 
@@ -818,7 +652,8 @@ describe("paths inside .git", () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    const refusal = await run(tools, "list", {
+    const refusal = await run(tools, "grep", {
+      query: "x",
       path: "/workspace/repo/.git"
     });
     expect(refusal).not.toContain("bash");
@@ -847,39 +682,6 @@ describe("paths inside .git", () => {
   });
 
   /**
-   * The bug this closes. At a repo root `.git` is walked *first* — `.`
-   * sorts before alphanumerics — and holds thousands of objects, so an unfiltered
-   * page is a page of `.git` and nothing else: a subtree listing of a real
-   * checkout returned 1000 object hashes and not one source file.
-   */
-  it("does not let .git consume a whole subtree listing", async () => {
-    const root = "/workspace/repo";
-    const crowded = [
-      ...Array.from({ length: 1500 }, (_, i) => ({
-        path: `${root}/.git/objects/${i}`,
-        type: "file" as const
-      })),
-      { path: `${root}/src/a.ts`, type: "file" as const }
-    ];
-    const { workspace } = stub({}, undefined, crowded);
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "find", { path: root });
-
-    expect(out).toContain(`${root}/src/a.ts`);
-    expect(out).not.toContain("/.git/");
-  });
-
-  it("has the store prune .git and node_modules", async () => {
-    const { workspace, finds } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    await run(tools, "find", { path: "/workspace/repo" });
-
-    expect(finds[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
-  });
-
-  /**
    * `/repo` runs its git CLI through `computerExec`, not through the tools. A
    * guard there would break clone and commit outright.
    */
@@ -888,7 +690,7 @@ describe("paths inside .git", () => {
     const tools = buildComputerTools(workspace, config);
     // The tool refuses…
     expect(
-      await run(tools, "list", { path: "/workspace/repo/.git" })
+      await run(tools, "grep", { query: "x", path: "/workspace/repo/.git" })
     ).toContain("repo_diff");
     // …while the shell path stays open, which is what /repo depends on.
     await run(tools, "bash", { command: "git rev-parse --git-dir" });
@@ -899,62 +701,12 @@ describe("paths inside .git", () => {
 /**
  * Paging, and the bookkeeping that keeps it honest.
  *
- * `find` gets pages the store has already pruned, so its next offset is plain
- * `offset + shown`. `grep` filters after the fetch, so its offset has to stay a
- * source coordinate — `offset + shown` would repeat or skip exactly when something
- * was dropped, and silently.
+ * `grep` filters after the fetch, so its offset has to stay a source coordinate —
+ * `offset + shown` would repeat or skip exactly when something was dropped, and
+ * silently.
  */
 describe("offsets that survive filtering", () => {
   const root = "/workspace/repo";
-
-  it("reports the offset of the first entry it did not show", async () => {
-    // Pruned by the store, so the offset counts what survived exclusion.
-    const entries = [
-      { path: `${root}/.git/HEAD`, type: "file" as const },
-      { path: `${root}/.git/config`, type: "file" as const },
-      ...Array.from({ length: 2_000 }, (_, i) => ({
-        path: `${root}/src/f${i}.ts`,
-        type: "file" as const
-      }))
-    ];
-    const { workspace } = stub({}, undefined, entries);
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "find", { path: root });
-    const next = /offset: (\d+)/.exec(out)?.[1];
-    expect(next).toBeDefined();
-
-    const shown = out.split("\n").filter((l) => l.includes("/src/f")).length;
-    expect(Number(next)).toBe(shown);
-  });
-
-  it("continues exactly where the previous page stopped", async () => {
-    const entries = [
-      { path: `${root}/.git/HEAD`, type: "file" as const },
-      ...Array.from({ length: 2_000 }, (_, i) => ({
-        path: `${root}/src/f${i}.ts`,
-        type: "file" as const
-      }))
-    ];
-    const { workspace } = stub({}, undefined, entries);
-    const tools = buildComputerTools(workspace, config);
-
-    const first = await run(tools, "find", { path: root });
-    const next = Number(/offset: (\d+)/.exec(first)![1]);
-    const second = await run(tools, "find", { path: root, offset: next });
-
-    const lastOfFirst = first
-      .split("\n")
-      .filter((l) => l.includes("/src/f"))
-      .at(-1)!;
-    const firstOfSecond = second
-      .split("\n")
-      .filter((l) => l.includes("/src/f"))[0]!;
-
-    // No repeat and no gap: consecutive indices across the page boundary.
-    const index = (line: string) => Number(/f(\d+)\.ts/.exec(line)![1]);
-    expect(index(firstOfSecond)).toBe(index(lastOfFirst) + 1);
-  });
 
   it("forwards an offset to the search and reports the next one", async () => {
     const seed = Object.fromEntries(
@@ -969,14 +721,6 @@ describe("offsets that survive filtering", () => {
     const out = await run(tools, "grep", { query: "hit", offset: 50 });
     expect(greps[0]?.offset).toBe(50);
     expect(out).toContain("offset:");
-  });
-
-  it("pages a one-level listing too", async () => {
-    const { workspace, readdirs } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    await run(tools, "list", { path: root, offset: 25 });
-    expect(readdirs[0]).toMatchObject({ limit: 1001, offset: 25 });
   });
 });
 
@@ -1417,13 +1161,8 @@ describe("computer()", () => {
     const tools = computer(config).tools!(
       onWorkspace(computerWorkspace(config))
     );
-    expect(Object.keys(tools).sort()).toEqual([
-      "bash",
-      "edit",
-      "find",
-      "grep",
-      "list"
-    ]);
+    // Think's `find` and `list` stay Think's, walking the workspace.
+    expect(Object.keys(tools).sort()).toEqual(["bash", "edit", "grep"]);
   });
 
   it("refuses to start on any other workspace, and says what to set", () => {
@@ -1698,8 +1437,6 @@ describe("which way the workspace is opened", () => {
     const path = "/workspace/repo/src/a.ts";
     const { tools, opens } = openers({ [path]: "const a = 1;\n" });
 
-    await run(tools, "list", { path: "/workspace/repo" });
-    await run(tools, "find", { path: "/workspace/repo" });
     await run(tools, "grep", { query: "const" });
     await run(tools, "edit", {
       path,
@@ -1707,7 +1444,7 @@ describe("which way the workspace is opened", () => {
       new_string: "const a = 2;"
     });
 
-    expect(opens).toEqual({ exec: 0, fs: 4 });
+    expect(opens).toEqual({ exec: 0, fs: 2 });
   });
 
   it("serves a command from the opener that readies the container", async () => {
@@ -1733,7 +1470,7 @@ describe("which way the workspace is opened", () => {
       return inner.workspace();
     }, config);
 
-    await run(tools, "list", { path: "/workspace/repo" });
+    await run(tools, "grep", { query: "const" });
 
     expect(opens).toBe(1);
   });

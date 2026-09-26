@@ -14,7 +14,7 @@ import { computerContext, DEFAULT_CWD, DEFAULT_TIMEOUT_MS } from "./context.js";
 import { withShell } from "./shell.js";
 import { execTools } from "./tools-exec.js";
 import { fileTools } from "./tools-file.js";
-import { findTools } from "./tools-find.js";
+import { grepTools } from "./tools-grep.js";
 import type { WorkspaceAdvisory } from "./advisory.js";
 
 /**
@@ -238,7 +238,7 @@ export function buildComputerTools(
   return {
     ...execTools(ctx),
     ...fileTools(ctx),
-    ...findTools(ctx)
+    ...grepTools(ctx)
   };
 }
 

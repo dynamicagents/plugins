@@ -30,8 +30,9 @@ export function isGitInternal(path: string): boolean {
 }
 
 /**
- * What every walk steps over. `find` prunes these in the store; the store's
- * `grep` takes no exclusion, so the `grep` tool filters its results instead.
+ * What every walk steps over. The workspace's `glob` prunes these in the store;
+ * the store's `grep` takes no exclusion, so the `grep` tool filters its results
+ * instead.
  */
 export const WALK_SKIPS = [".git", "node_modules"] as const;
 
@@ -101,7 +102,7 @@ function gitInternalNote(path: string, verb: string): string {
  * Symlinks are not resolved, for the same reason: a tracked
  * `docs/notes.md -> ../.git/config` only matters to an agent given these tools
  * *without* the shell. A read-only install — `restrictTools` down to `grep`,
- * `find` and `list` — is that agent, and it cannot write. If a writing agent
+ * with Think's writing tools left out — is that agent, and it cannot write. If a writing agent
  * without the shell ever exists, the **write** path is the half to restore —
  * `.git/config` is an input to the credentialed push, and a planted hook runs
  * under a container-side `repo_commit`. Reading `.git` discloses nothing that is

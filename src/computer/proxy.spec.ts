@@ -340,8 +340,8 @@ describe("the tools and the workspace", () => {
       testPluginContext({ workspace: () => workspace })
     );
 
-    await (tools.list!.execute as (i: unknown, o: unknown) => Promise<string>)(
-      { path: "/workspace/repo" },
+    await (tools.grep!.execute as (i: unknown, o: unknown) => Promise<string>)(
+      { query: "x", path: "/workspace/repo" },
       {}
     );
     await workspace.readFile("/workspace/repo/a.ts");
