@@ -1,9 +1,13 @@
-import { renderAdvisory, shapeOf, type WorkspaceAdvisory } from "./advisory.js";
+import {
+  renderAdvisory,
+  shapeOf,
+  type WorkspaceAdvisory
+} from "../workspace/advisory.js";
 
 /**
  * What one shell command has to wait for, and what to say when it never ran.
  *
- * {@link file://./advisory.ts} decides what is true about the workspace and how
+ * {@link file://../workspace/advisory.ts} decides what is true about the workspace and how
  * to word it; this file decides what that means for a command about to run.
  * {@link needsDependencies} is the part that cannot move there — it is a
  * question about the *command*, and it is what stops `cat README.md` queueing

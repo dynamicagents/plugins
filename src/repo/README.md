@@ -4,11 +4,11 @@ Clone, commit, push a work branch, open a pull request.
 
 ```ts
 import { repo } from "@dynamicagents/plugins/repo";
-import { computerExec } from "@dynamicagents/plugins/computer";
+import { workspaceExec } from "@dynamicagents/plugins/workspace";
 
 repo({
   // Runs in the container. Never given a credential.
-  exec: computerExec({ binding: env.WORKSPACE, workspaceName: () => name }),
+  exec: workspaceExec({ binding: env.WORKSPACE, workspaceName: () => name }),
   // Yours to implement — this package exports the `RepoGit` type, not a
   // backing for it, because the token has to live on your side of the
   // boundary. Clone, fetch and push only; see "Where the token lives" below.
@@ -98,7 +98,7 @@ fork that wants a gate sets `approval` on the actions it cares about.
 
 Two injected dependencies, and the line between them is the trust boundary rather
 than a matter of taste. `exec` is anything that runs a command in the container —
-[`/computer`](../computer/)'s `computerExec` is one such thing, and injecting it
+[`/workspace`](../workspace/)'s `workspaceExec` is one such thing, and injecting it
 keeps the two plugins independent, so a host with its own container can use this
 against that and the tests here need no container at all. `git` is the other side:
 the three operations that talk to the forge, run by the host, with the credential

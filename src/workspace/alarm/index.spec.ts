@@ -9,7 +9,7 @@ import { installScheduler, namedDeadline, HOST_HANDLERS } from "./index.js";
 import type {
   DelegatingScheduled,
   PlainScheduled
-} from "../../../../test/worker.js";
+} from "../../../test/worker.js";
 
 /**
  * What these pin is the *installation*, not the scheduler.

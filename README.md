@@ -26,6 +26,7 @@ An agent installs plugins by listing them in `getPlugins()`, on an `A2AAgent` fr
 import { A2AAgent } from "@dynamicagents/core/agent";
 import { browser } from "@dynamicagents/plugins/browser";
 import { computer, computerWorkspace } from "@dynamicagents/plugins/computer";
+// `workspaceConfig` names the `/workspace` object this agent works in.
 import { repo } from "@dynamicagents/plugins/repo";
 
 export class Coder extends A2AAgent<Env> {
@@ -63,13 +64,14 @@ plugin to the tools an install names.
 
 ## The plugins
 
-| Subpath                            | What it adds                                                                                                        | Needs                                              |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                                                  | `BROWSER` (paid plan)                              |
-| [`/claude-code`](src/claude-code/) | Sub-agents whose model is a Claude Code session in the workspace container                                          | one or more `claude setup-token` credentials       |
-| [`/computer`](src/computer/)       | A Linux container whose filesystem outlives it — shell, package manager, network, and the Durable Object it runs in | `@cloudflare/computer`, `@platformatic/vfs` (paid) |
-| [`/repo`](src/repo/)               | Clone, commit, push a branch, open a pull request — over any container                                              | `GITHUB_TOKEN`                                     |
-| [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout                          | —                                                  |
+| Subpath                            | What it adds                                                                                                     | Needs                                              |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                                               | `BROWSER` (paid plan)                              |
+| [`/claude-code`](src/claude-code/) | Sub-agents whose model is a Claude Code session in the workspace container                                       | one or more `claude setup-token` credentials       |
+| [`/computer`](src/computer/)       | An agent's tools over a workspace — `bash`, `grep`, `edit` — and the workspace Think's file tools use            | a `/workspace` object                              |
+| [`/repo`](src/repo/)               | Clone, commit, push a branch, open a pull request — over any container                                           | `GITHUB_TOKEN`                                     |
+| [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout                       | —                                                  |
+| [`/workspace`](src/workspace/)     | The Durable Object a container workspace lives in — its container, credentialed git, dependency install and sync | `@cloudflare/computer`, `@platformatic/vfs` (paid) |
 
 Each directory has its own README with the config shape and a paste-ready `wrangler.jsonc`
 snippet — a plugin cannot add its own binding, which is why it declares what it needs.

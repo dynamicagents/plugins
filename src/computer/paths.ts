@@ -4,7 +4,7 @@
  * Both refused directories are also skipped by every walk. `.git` is refused as
  * policy: a model that edits `.git/HEAD` corrupts a checkout in a way that
  * surfaces much later. `node_modules` is refused as a fact: it lives on the
- * container's disk (see `./host/container-deps.ts`), so these tools, which read
+ * container's disk (see `../workspace/container-deps.ts`), so these tools, which read
  * the workspace, would find it empty.
  *
  * Everything here is a string comparison: no filesystem, no `await`, which is

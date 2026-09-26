@@ -1,24 +1,13 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import type { TestWorkspaceDO } from "../../../test/worker.js";
-import {
-  freshWorkspace,
-  workspaceNamespace
-} from "../../../test/computer/do.js";
-import { DEFAULT_INSTALL_PLAN, type InstallState } from "../install.js";
-import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
-import {
-  computer,
-  computerWorkspace,
-  openWorkspace,
-  openWorkspaceFs,
-  type ComputerConfig
-} from "../index.js";
-import { testPluginContext } from "../../../test/helpers.js";
-import { DEFAULT_SCRATCH_DIR } from "../../scratch/index.js";
+import type { TestWorkspaceDO } from "../../test/worker.js";
+import { freshWorkspace, workspaceNamespace } from "../../test/workspace/do.js";
+import { DEFAULT_INSTALL_PLAN, type InstallState } from "./install.js";
+import { openWorkspace, openWorkspaceFs } from "./index.js";
+import { DEFAULT_SCRATCH_DIR } from "../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
-import { pathExists } from "../read.js";
-import { readyWithin } from "./workspace.js";
+import { pathExists } from "./read.js";
+import { readyWithin } from "./object.js";
 
 /**
  * The plan `TestWorkspaceDO` is configured with — read here rather than
@@ -311,7 +300,7 @@ describe("the install gate", () => {
  * - **A checkout is recorded whether or not anything was installed into it.**
  *   The install resolver skips a checkout it finds nothing to do in, and that
  *   says nothing about whether there is a checkout. See `noteCheckout` in
- *   `./workspace.ts` for why the two records are separate.
+ *   `./object.ts` for why the two records are separate.
  * - **The answer is probed, not remembered.** A recorded path is where to look;
  *   `.git` being there is what makes it true. A session's cwd and the
  *   cancellation `git reset --hard` both act on it, and neither recovers from a
@@ -698,7 +687,7 @@ describe("draining an outstanding pull", () => {
 
 /**
  * A reclaimed workspace reads exactly like one nobody ever used, and these hold
- * the line between them — see `reclaimIfIdle` in `./workspace.ts` for why an
+ * the line between them — see `reclaimIfIdle` in `./object.ts` for why an
  * absent `lastUsedAt` must not read as idle.
  */
 describe("reclaiming an idle workspace", () => {
@@ -834,7 +823,7 @@ describe("trusting the interception CA", () => {
 });
 
 /**
- * What a file tool waits for — `__getWorkspaceFsStub` in `./workspace.ts` holds
+ * What a file tool waits for — `__getWorkspaceFsStub` in `./object.ts` holds
  * why.
  *
  * These run **without a container**, which is what makes it observable: the
@@ -980,7 +969,7 @@ function scheduleRows(
 
 /**
  * A schedule is a minted row rather than a keyed upsert — see `IDLE_RECLAIM_ID`
- * in `./workspace.ts` — so moving a deadline leaves a second row unless it
+ * in `./object.ts` — so moving a deadline leaves a second row unless it
  * cancels the first, and `#touch()` runs on every entry point.
  *
  * Counted through storage rather than through a scheduler handle, because the
@@ -1254,98 +1243,4 @@ describe("releasing a container", () => {
 
     expect(await stub.releaseContainer()).toEqual({ released: true });
   });
-});
-
-/**
- * Think's file tools over a real workspace object.
- *
- * `read`, `write` and `delete` are Think's, reaching the container's tree
- * through `computerWorkspace`; `grep`, `find`, `list` and `edit` are this
- * plugin's. The tree is checkout-sized, with a `.git` beside the source that
- * the walks prune — the fixture the migration's cost measurement ran on.
- */
-describe("the file tools over a checkout", () => {
-  const root = "/workspace/app";
-  const line = (i: number) => `export const value${i} = ${i}; // padding\n`;
-  const body = (i: number) =>
-    Array.from({ length: 60 }, (_, k) => line(i * 100 + k)).join("");
-
-  const run = (tool: unknown, input: unknown) =>
-    (tool as { execute: (i: unknown, o: unknown) => Promise<unknown> }).execute(
-      input,
-      { toolCallId: "t", messages: [] }
-    );
-
-  it("serves Think's tools and ours from the durable tree", async () => {
-    // Named here rather than by `freshWorkspace`, which makes its name unique:
-    // the workspace reaches the object by name, as an agent's would.
-    const name = `think-tools-${crypto.randomUUID()}`;
-    const stub = workspaceNamespace.get(workspaceNamespace.idFromName(name));
-    {
-      using ws = await openWorkspaceFs(stub);
-      await ws.fs.mkdir(`${root}/.git/objects`, { recursive: true });
-      for (let d = 0; d < 40; d++)
-        await ws.fs.mkdir(`${root}/src/m${d}`, { recursive: true });
-      for (let i = 0; i < 1_200; i++)
-        await ws.fs.writeFile(`${root}/src/m${i % 40}/f${i}.ts`, body(i));
-      for (let i = 0; i < 3_000; i++)
-        await ws.fs.writeFile(`${root}/.git/objects/${i}`, "blob");
-    }
-
-    const config: ComputerConfig = {
-      binding: workspaceNamespace as unknown as ComputerConfig["binding"],
-      workspaceName: () => name
-    };
-    const workspace = computerWorkspace(config);
-    const think = createWorkspaceTools(workspace, { bash: false });
-    const ours = computer(config).tools!(
-      testPluginContext({ workspace: () => workspace })
-    );
-    const file = `${root}/src/m7/f7.ts`;
-
-    const read = (await run(think.read, { path: file })) as {
-      totalLines: number;
-    };
-    expect(read.totalLines).toBe(61);
-
-    await run(think.write, {
-      path: `${root}/src/new/a.ts`,
-      content: body(9_999)
-    });
-    expect(await workspace.readFile(`${root}/src/new/a.ts`)).toBe(body(9_999));
-
-    await run(think.edit, {
-      path: file,
-      old_string: "value700 = 700",
-      new_string: "value700 = -1"
-    });
-    expect(
-      await run(ours.edit, {
-        path: file,
-        old_string: "value701 = 701",
-        new_string: "value701 = -1"
-      })
-    ).toBe(`edited ${file}`);
-    expect(await workspace.readFile(file)).toContain("value700 = -1");
-    expect(await workspace.readFile(file)).toContain("value701 = -1");
-
-    expect(
-      await run(ours.grep, { query: "value119959 =", path: `${root}/src` })
-    ).toContain("f1199.ts");
-
-    // Think's `find`, over the workspace's `glob`, which prunes `.git`.
-    const found = (await run(think.find, {
-      pattern: `${root}/**/f11*.ts`
-    })) as { files: string[] };
-    expect(found.files).toContain(`${root}/src/m30/f1150.ts`);
-    expect(found.files.some((f) => f.includes(".git"))).toBe(false);
-
-    const listed = (await run(think.list, { path: `${root}/src` })) as {
-      entries: string[];
-    };
-    expect(listed.entries).toContain("m7/");
-
-    await run(think.delete, { path: `${root}/src/new/a.ts` });
-    expect(await workspace.stat(`${root}/src/new/a.ts`)).toBeNull();
-  }, 60_000);
 });

@@ -83,7 +83,7 @@ Open is the default because a curated list is permanently wrong for a coding
 agent — `esbuild`, `swc` and `sharp` fetch prebuilt binaries from release CDNs,
 Playwright downloads browsers from a third host, corepack fetches package
 managers, and reading documentation is part of the job. It also matches
-[`/computer`](../computer/), whose egress has always been unrestricted.
+[`/workspace`](../workspace/), whose egress has always been unrestricted.
 
 **What that gives up is a bound on exfiltration**, and it is worth being plain
 about: the container holds the checkout and, unrestricted, can send it anywhere.

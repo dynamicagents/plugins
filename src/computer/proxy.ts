@@ -2,8 +2,11 @@ import type { WorkspaceLike } from "@cloudflare/think";
 import type { WorkspaceClient } from "@cloudflare/computer";
 import { withFileLock } from "./file-lock.js";
 import { writeGate } from "./gate.js";
-import { openWorkspaceFs, workspaceNameFromRuntime } from "./open.js";
-import type { WorkspaceHost } from "./open.js";
+import {
+  openWorkspaceFs,
+  workspaceNameFromRuntime
+} from "../workspace/open.js";
+import type { WorkspaceHost } from "../workspace/open.js";
 import { guardPath, WALK_SKIPS } from "./paths.js";
 import type { ComputerConfig } from "./index.js";
 

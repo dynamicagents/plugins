@@ -5,11 +5,11 @@ not a checkout.
 
 ```ts
 import { scratch } from "@dynamicagents/plugins/scratch";
-import { computerExec } from "@dynamicagents/plugins/computer";
+import { workspaceExec } from "@dynamicagents/plugins/workspace";
 
 scratch({
   // Runs in the container. Nothing here ever needs a credential.
-  exec: computerExec({ binding: env.WORKSPACE, workspaceName: () => name })
+  exec: workspaceExec({ binding: env.WORKSPACE, workspaceName: () => name })
 });
 ```
 
@@ -84,7 +84,7 @@ _is_, the host knows how it addresses one.
 
 ```ts
 scratch({
-  exec: computerExec(config),
+  exec: workspaceExec(config),
   // Select the workspace, before any command runs. Synchronous; a throw fails
   // the open, because a host that could not choose has not chosen.
   beforeOpen: () => active.set(SCRATCH),
@@ -129,5 +129,5 @@ told the rule instead of being left to discover it.
 ## Requirements
 
 None of its own. It needs a shell in a container — `exec` is injected, so
-[`/computer`](../computer/)'s `computerExec` is one source of it and a host with
+[`/workspace`](../workspace/)'s `workspaceExec` is one source of it and a host with
 its own container is another. No credential, no binding, no secret.

@@ -1,7 +1,8 @@
+import { DEFAULT_CWD, DEFAULT_TIMEOUT_MS } from "../workspace/exec.js";
 import { withAbort } from "@dynamicagents/core";
 import type { WorkspaceClient } from "@cloudflare/computer";
 import { execGate, writeGate, type ExecGate } from "./gate.js";
-import type { WorkspaceAdvisory } from "./advisory.js";
+import type { WorkspaceAdvisory } from "../workspace/advisory.js";
 import type { ComputerConfig } from "./index.js";
 
 /**
@@ -19,12 +20,6 @@ import type { ComputerConfig } from "./index.js";
  * says what actually failed.
  */
 const DEFAULT_MAX_OUTPUT_CHARS = 16_000;
-
-/** A command that has not finished in this long is a hung command. */
-export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
-
-/** Where checkouts live, in the container and in the workspace alike. */
-export const DEFAULT_CWD = "/workspace";
 
 /**
  * How often the install gate re-reads the install's status.

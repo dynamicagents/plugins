@@ -4,7 +4,7 @@ import { z } from "zod";
 import { withAbort } from "@dynamicagents/core";
 import { renderResult } from "./render.js";
 import { execLostNote, type ExecGate } from "./gate.js";
-import { withShellTranscript } from "./shell.js";
+import { withShellTranscript } from "../workspace/shell.js";
 import type { ComputerContext } from "./context.js";
 
 /** Running one command in the container. */

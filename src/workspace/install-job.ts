@@ -2,7 +2,7 @@ import { shellQuote, type Workspace } from "@cloudflare/computer";
 import type { WorkspaceRuntimeExecHandle } from "@cloudflare/computer";
 import type { Scheduler } from "./alarm/index.js";
 import { JobLifecycle, type JobContext } from "./job/index.js";
-// Leaf modules rather than `../index.js`, and that is structural: the barrel
+// Leaf modules rather than `./index.ts`, and that is structural: the barrel
 // re-exports this directory, so reaching it from here would be a cycle — through
 // a module that builds a class at import time, where initialisation order
 // decides whether the base is `undefined`.
@@ -12,11 +12,11 @@ import {
   type InstallPlan,
   type InstallProbe,
   type InstallState
-} from "../install.js";
-import { pathExists } from "../read.js";
+} from "./install.js";
+import { pathExists } from "./read.js";
 import { deploymentFault } from "./container-fault.js";
 import { INSTALLED_MARKER } from "./container-deps.js";
-import { truncateOutput } from "../render.js";
+import { truncateOutput } from "./format.js";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 
 /**
@@ -652,7 +652,7 @@ export class InstallJob {
   /**
    * When a reinstall was queued, if one is waiting to run.
    *
-   * Read by {@link file://../advisory.ts deriveAdvisories}, which is the only
+   * Read by {@link file://./advisory.ts deriveAdvisories}, which is the only
    * caller that needs it: a `failed` record with a repair already queued is a
    * transient condition wearing a permanent record's clothes.
    */

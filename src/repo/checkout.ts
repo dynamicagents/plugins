@@ -97,9 +97,8 @@ export async function resolveDefaultBranch(
  * on the commit itself, which is the one layer a stale config cannot outrank.
  * Underneath, a repository this plugin never cloned falls back to whatever the
  * shell's own git is configured with — which is an identity rather than nothing
- * only where `exec` is backed by the computer plugin, whose workspace writes one
- * per container; see
- * {@link file://../computer/host/git-identity.ts}. `exec` is an arbitrary
+ * only where `exec` is backed by `/workspace`, whose object writes one per
+ * container; see {@link file://../workspace/git-identity.ts}. `exec` is an arbitrary
  * runner, so that is a property of a deployment, not of this plugin.
  *
  * Unchecked, like the config pins at the clone: git's identity is needed by the

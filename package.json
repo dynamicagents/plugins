@@ -46,6 +46,10 @@
       "types": "./dist/claude-code/index.d.ts",
       "import": "./dist/claude-code/index.js"
     },
+    "./workspace": {
+      "types": "./dist/workspace/index.d.ts",
+      "import": "./dist/workspace/index.js"
+    },
     "./computer": {
       "types": "./dist/computer/index.d.ts",
       "import": "./dist/computer/index.js"

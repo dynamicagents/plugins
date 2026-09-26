@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { truncateOutput as computerTruncate } from "../src/computer/index.js";
+import { truncateOutput as workspaceTruncate } from "../src/workspace/index.js";
 import { truncateOutput as repoTruncate } from "../src/repo/index.js";
 
 /**
@@ -22,7 +22,7 @@ import { truncateOutput as repoTruncate } from "../src/repo/index.js";
  */
 
 const both = [
-  ["computer", computerTruncate],
+  ["workspace", workspaceTruncate],
   ["repo", repoTruncate]
 ] as const;
 
@@ -75,7 +75,7 @@ describe("truncateOutput, in both copies", () => {
       ["unicode ✓ ".repeat(50), 90]
     ];
     for (const [text, max] of cases) {
-      expect(repoTruncate(text, max)).toBe(computerTruncate(text, max));
+      expect(repoTruncate(text, max)).toBe(workspaceTruncate(text, max));
     }
   });
 });

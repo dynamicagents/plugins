@@ -6,13 +6,9 @@ import {
   buildComputerTools,
   computer,
   computerWorkspace,
-  withShell,
-  withShellTranscript,
-  workspaceNameFromRuntime,
-  WORKSPACE_RUNTIME_KEY,
-  type ComputerConfig,
-  type WorkspaceAdvisory
+  type ComputerConfig
 } from "./index.js";
+import { withShell, type WorkspaceAdvisory } from "../workspace/index.js";
 import { testPluginContext } from "../../test/helpers.js";
 
 /** What the stub records off an `fs.grep` call. `@cloudflare/computer` declares
@@ -182,7 +178,7 @@ const run = (tools: ToolSet, name: string, input: unknown) =>
  * They differ on one thing — whether the result is a *transcript* or two separate
  * streams — and that difference is the output contract, which is why it is two
  * named functions rather than one with a flag. A flag put the choice at the call
- * site as a `true` nobody reads, and `computerExec` silently inherited the wrong
+ * site as a `true` nobody reads, and `workspaceExec` silently inherited the wrong
  * one for as long as it existed.
  */
 /**
@@ -220,74 +216,6 @@ describe("what bash claims for itself", () => {
     for (const shell of ["bash", undefined]) {
       expect(describeOf(shell)).toContain("--- exit 0 ---");
     }
-  });
-});
-
-describe("withShell", () => {
-  it("is a no-op when no shell is configured", () => {
-    expect(withShell("npm test", undefined)).toBe("npm test");
-  });
-
-  /**
-   * The property `/repo` depends on. It asks git questions whose answer is the
-   * whole of stdout — a URL to compare, a sha to push, a count to test against
-   * "0" — so a diagnostic merged into that channel is a wrong answer, not noise.
-   */
-  it("leaves the two streams alone, so stdout carries the answer only", () => {
-    const command = withShell("git rev-list --count origin/main..HEAD", "bash");
-    expect(command.startsWith("bash -o pipefail -c ")).toBe(true);
-    expect(command).not.toContain("2>&1");
-  });
-
-  /**
-   * The regression this guards is a *silent* one, and it is the worst kind this
-   * tool can produce. Without `pipefail`, a pipeline reports its last stage's
-   * status — so `npm run check | tail -100` came back `exit 0` from a gate that
-   * had failed in 1.3 seconds on a missing `node_modules`. A build that failed
-   * and said it passed is worse than no answer at all.
-   */
-  it("asks the shell to report the first failing stage of a pipeline", () => {
-    expect(withShell("npm run check | tail -100", "bash")).toContain(
-      "-o pipefail"
-    );
-  });
-
-  /**
-   * The command is model-authored and routinely carries its own quoting. If the
-   * wrapper re-parsed it, `git commit -m "a message"` would arrive as two
-   * arguments and the commit would be made with the wrong message — a silent
-   * corruption, not an error.
-   */
-  it("survives a command that contains its own quotes", () => {
-    expect(withShell(`git commit -m "add a line"`, "bash")).toContain(
-      "add a line"
-    );
-  });
-});
-
-describe("withShellTranscript", () => {
-  it("is a no-op when no shell is configured", () => {
-    expect(withShellTranscript("npm test", undefined)).toBe("npm test");
-  });
-
-  it("merges stderr into stdout on the wrapper process", () => {
-    const command = withShellTranscript("npm run check", "bash");
-    expect(command.startsWith("bash -o pipefail -c ")).toBe(true);
-    // Bound to the wrapper, not nested inside it — so it applies to everything
-    // the command spawns, however deep, with no brace group to mis-parse.
-    expect(command.endsWith(" 2>&1")).toBe(true);
-  });
-
-  it("keeps pipefail, which is not the half that differs", () => {
-    expect(withShellTranscript("npm run check | tail -100", "bash")).toContain(
-      "-o pipefail"
-    );
-  });
-
-  it("survives a command that contains its own quotes", () => {
-    const command = withShellTranscript(`git commit -m "add a line"`, "bash");
-    expect(command).toContain("add a line");
-    expect(command.endsWith(" 2>&1")).toBe(true);
   });
 });
 
@@ -682,10 +610,10 @@ describe("paths inside .git", () => {
   });
 
   /**
-   * `/repo` runs its git CLI through `computerExec`, not through the tools. A
+   * `/repo` runs its git CLI through `workspaceExec`, not through the tools. A
    * guard there would break clone and commit outright.
    */
-  it("does not guard computerExec, which is how /repo runs git", async () => {
+  it("does not guard workspaceExec, which is how /repo runs git", async () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, config);
     // The tool refuses…
@@ -749,12 +677,12 @@ describe("bash", () => {
    * `withShell` and `withShellTranscript` are tested above in isolation, which
    * proves they differ but not that each caller picked the right one — and
    * picking the wrong one is the whole defect. `bash` writes for a model, so
-   * it wants the transcript; `computerExec` hands its result to `/repo`, which
+   * it wants the transcript; `workspaceExec` hands its result to `/repo`, which
    * compares `stdout` against a URL, tests it for emptiness to call a tree clean,
    * and reads a sha out of it to push. Merging there turns every one of those
    * into a question git's diagnostics can answer wrongly.
    */
-  it("sends a transcript, while computerExec sends two streams", async () => {
+  it("sends a transcript, while workspaceExec sends two streams", async () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, { ...config, shell: "bash" });
 
@@ -762,7 +690,7 @@ describe("bash", () => {
 
     expect(execs[0]!.command).toContain("bash -o pipefail -c ");
     expect(execs[0]!.command.endsWith(" 2>&1")).toBe(true);
-    // The other half of the seam. `computerExec` builds its command with the
+    // The other half of the seam. `workspaceExec` builds its command with the
     // same `config.shell` and must not come back with the redirect on it.
     expect(withShell("git rev-list --count main..HEAD", "bash")).not.toContain(
       "2>&1"
@@ -1123,25 +1051,6 @@ describe("the advisory gate on bash", () => {
       ]
     );
     expect(await run(tools, "grep", { query: "x" })).toContain(path);
-  });
-});
-
-describe("the workspace a sub-agent reaches", () => {
-  /**
-   * A sub-agent cannot compute the name: its parent chose the checkout. The
-   * spec's `prepare` puts it in `runtime()`, and reading it back is what makes
-   * a sub-agent land in the checkout its parent cloned.
-   */
-  it("comes from the runtime when a parent supplied one", () => {
-    expect(
-      workspaceNameFromRuntime({ [WORKSPACE_RUNTIME_KEY]: "caller|o/r" })
-    ).toBe("caller|o/r");
-  });
-
-  it("falls back rather than throwing on anything else", () => {
-    for (const runtime of [undefined, null, {}, { workspaceName: "" }, 7]) {
-      expect(workspaceNameFromRuntime(runtime)).toBeUndefined();
-    }
   });
 });
 

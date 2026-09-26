@@ -22,8 +22,8 @@ export { graphqlEndpoint, truncateOutput } from "./context.js";
  * `@dynamicagents/plugins/repo` — clone, commit, push, open a pull request.
  *
  * Layered over a container rather than owning one: it needs a shell with `git`
- * on it, and `@dynamicagents/plugins/computer` provides exactly that through
- * `computerExec`. Passing `exec` in rather than importing that plugin keeps the
+ * on it, and `@dynamicagents/plugins/workspace` provides exactly that through
+ * `workspaceExec`. Passing `exec` in rather than importing that plugin keeps the
  * two independent — a host with its own container can use this against that
  * instead, and the tests here need no container at all.
  *
@@ -77,7 +77,7 @@ export { graphqlEndpoint, truncateOutput } from "./context.js";
  * reach. See the README — the token wants to be fine-grained.
  */
 
-/** Run one command in the host's container. Matches `computerExec`'s shape. */
+/** Run one command in the host's container. Matches `workspaceExec`'s shape. */
 export type RepoExec = (
   command: string,
   options?: {

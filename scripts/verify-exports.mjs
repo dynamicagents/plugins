@@ -23,11 +23,12 @@
  *   5. Realm isolation: no *runtime* subpath can reach `node:*`, `undici`,
  *      `cloudflare:test` or `vitest` through any depth of relative import.
  *   6. **Plugin isolation**: no subpath's module graph reaches a file belonging
- *      to another subpath. This is the promise the package is built around — a
- *      bundle grows only with what it imports — and it is the one that rots
- *      silently, because a convenience re-export across two plugins typechecks,
- *      lints, and tests perfectly while quietly doubling every consumer's
- *      bundle. Only a check on the built graph catches it.
+ *      to another subpath, except one it is declared to build on (`BUILDS_ON`).
+ *      This is the promise the package is built around — a bundle grows only
+ *      with what it imports — and it is the one that rots silently, because a
+ *      convenience re-export across two plugins typechecks, lints, and tests
+ *      perfectly while quietly doubling every consumer's bundle. Only a check on
+ *      the built graph catches it.
  *   7. No root barrel: `exports` must have no `"."` entry, for the same reason.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -118,6 +119,17 @@ for (const file of walk(path.join(root, "dist"))) {
 
 // --- 5 & 6. realm isolation, and plugin isolation ----------------------------
 
+/**
+ * The subpaths a subpath may reach besides its own, by declaration.
+ *
+ * `/computer` is an agent's tools over a `/workspace` object and cannot run
+ * without one, so reaching it costs a consumer nothing it was not already
+ * carrying. It reaches `/workspace`'s client modules, never its barrel, which is
+ * what keeps the object — its container backend and its git — out of a bundle
+ * that holds only the tools.
+ */
+const BUILDS_ON = { "./computer": ["./workspace"] };
+
 /** `./browser` → `dist/browser` — the directory a subpath's files must stay in. */
 const ownDir = (subpath) =>
   path.join(root, "dist", subpath.replace(/^\.\//, ""));
@@ -135,9 +147,9 @@ for (const [subpath, target] of subpathEntries) {
   // A plugin may reach only its own directory. Code only one plugin consumes
   // lives inside that plugin's directory; reaching *out* into a sibling is what
   // must not happen.
-  const home = ownDir(subpath);
+  const homes = [subpath, ...(BUILDS_ON[subpath] ?? [])].map(ownDir);
   const trespass = [...files]
-    .filter((f) => !f.startsWith(home + path.sep))
+    .filter((f) => !homes.some((home) => f.startsWith(home + path.sep)))
     .map((f) => path.relative(root, f));
   if (trespass.length > 0) {
     fail(

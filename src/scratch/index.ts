@@ -60,7 +60,7 @@ const DEFAULT_MAX_OUTPUT_CHARS = 16_000;
 const STATUS_MAX_LINES = 20;
 
 /**
- * Run one command in the host's container. Matches `computerExec`'s shape.
+ * Run one command in the host's container. Matches `workspaceExec`'s shape.
  *
  * Injected rather than imported, like `/repo`'s: `npm run verify:exports` fails
  * any subpath whose module graph reaches a sibling's, and a scratchpad that

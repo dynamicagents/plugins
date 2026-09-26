@@ -5,7 +5,8 @@ import type { WorkspaceAdvisory } from "./advisory.js";
 /**
  * Reaching a workspace: which one a call names, and the two ways to open it.
  *
- * A leaf, so both the tools and the proxy in `./proxy.ts` can import it without
+ * A leaf, so the object, `/computer`'s tools and its proxy in
+ * `../computer/proxy.ts` can import it without
  * going through the barrel that re-exports them.
  */
 
@@ -61,7 +62,7 @@ export interface WorkspaceHost extends Rpc.DurableObjectBranded {
    * The filesystem is the Durable Object's own SQLite, while the first command
    * in a fresh container waits for the whole tree to be pushed into it — so a
    * file tool served the other way waits minutes for a local `readdir`. See
-   * `WorkspaceObjectBase.__getWorkspaceFsStub` in `./host/workspace.ts`.
+   * `WorkspaceObjectBase.__getWorkspaceFsStub` in `./object.ts`.
    *
    * Required rather than optional, for the reason {@link advisories} gives. A
    * host with nothing to distinguish returns its own `__getWorkspaceStub()`.
@@ -107,7 +108,7 @@ export function openWorkspace(
  * wrapped in an object answering it from the other side of the seam — see
  * {@link WorkspaceHost.__getWorkspaceFsStub}. Everything past that is identical.
  *
- * **Only the file tools take this.** `bash` and `computerExec` need the
+ * **Only the file tools take this.** `bash` and `workspaceExec` need the
  * container started and its CA installed, so they open it the other way.
  */
 export function openWorkspaceFs(

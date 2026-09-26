@@ -5,10 +5,12 @@ import {
   computer,
   computerWorkspace,
   isComputerWorkspace,
-  WORKSPACE_RUNTIME_KEY,
-  type ComputerConfig,
-  type WorkspaceAdvisory
+  type ComputerConfig
 } from "./index.js";
+import {
+  WORKSPACE_RUNTIME_KEY,
+  type WorkspaceAdvisory
+} from "../workspace/index.js";
 import { testPluginContext } from "../../test/helpers.js";
 
 /**

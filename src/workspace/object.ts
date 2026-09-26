@@ -33,15 +33,15 @@ import {
   syncRetryDelayMs,
   type SyncDrainIntent
 } from "./sync.js";
-// Leaf modules rather than `../index.js` — see the same import in
+// Leaf modules rather than `./index.ts` — see the same import in
 // {@link file://./install-job.ts} for why the barrel is not reachable from here.
-import { deriveAdvisories, type WorkspaceAdvisory } from "../advisory.js";
-import { pathExists } from "../read.js";
-import type { InstallPlan, InstallState } from "../install.js";
+import { deriveAdvisories, type WorkspaceAdvisory } from "./advisory.js";
+import { pathExists } from "./read.js";
+import type { InstallPlan, InstallState } from "./install.js";
 // The shape `/repo` already defines for exactly this: a git failure is data,
 // because it means git answered. A throw on this path means the object was
 // unreachable, which is a different thing and must stay distinguishable.
-import type { RepoGitResult } from "../../repo/index.js";
+import type { RepoGitResult } from "../repo/index.js";
 
 /**
  * A workspace: one Durable Object, one container, one repository.
@@ -68,7 +68,7 @@ import type { RepoGitResult } from "../../repo/index.js";
  * FUSE at `/workspace`. Commands run against the same tree the Worker reads over
  * RPC, and the tree outlives the container.
  *
- * **One repository per object**, because `computer` is strictly 1 DO ↔ 1
+ * **One repository per object**, because `@cloudflare/computer` is strictly 1 DO ↔ 1
  * container: the id derives from caller *and* repository (see `workspaceName`),
  * so two repositories for one caller are two objects and two containers.
  *
@@ -197,8 +197,8 @@ const CONTAINER_WARM_ID = "container-warm-id";
  * kills work in flight. Measured from when a command *starts*: `#touch()` arms
  * the clock on the way into this object, and a running command touches nothing
  * again until it finishes — `handle.result()` is one long await and the FUSE
- * traffic under it never surfaces as an RPC. Set equal to the computer plugin's
- * `DEFAULT_TIMEOUT_MS`, the two timers race and whichever fires first destroys
+ * traffic under it never surfaces as an RPC. Set equal to `DEFAULT_TIMEOUT_MS`
+ * in `./exec.ts`, the two timers race and whichever fires first destroys
  * the container the other depends on. Twenty minutes is double that ceiling;
  * raise it, never lower it, if `bash` is given a longer timeout.
  *
@@ -885,7 +885,7 @@ export abstract class WorkspaceObjectBase<
    *
    * A stub cannot enforce what the caller does with it: `runtime.exec` on this
    * one would run against a container with no CA. The exec paths take the other
-   * method — see `openWorkspaceFs` in `@dynamicagents/plugins/computer`.
+   * method — see `openWorkspaceFs` in `./open.ts`.
    */
   async __getWorkspaceFsStub(): Promise<WorkspaceStub> {
     await this.#touch();

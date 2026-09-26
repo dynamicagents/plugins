@@ -1,7 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { freshWorkspace } from "../../../test/computer/do.js";
-import { DEFAULT_INSTALL_PLAN, type InstallState } from "../install.js";
+import { freshWorkspace } from "../../test/workspace/do.js";
+import { DEFAULT_INSTALL_PLAN, type InstallState } from "./install.js";
 import { InstallJob } from "./install-job.js";
 import type { Workspace } from "@cloudflare/computer";
 

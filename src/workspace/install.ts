@@ -27,7 +27,7 @@
  * `packageManager` pin, then lockfiles in the order the plan lists them.
  */
 
-import type { JobState } from "./host/job/index.js";
+import type { JobState } from "./job/index.js";
 
 /** Just enough of a workspace filesystem to inspect a checkout. */
 export interface InstallProbe {
@@ -46,7 +46,7 @@ export interface InstallProbe {
  *
  * ## Why it is the host's `JobState` with one field intersected in
  *
- * `./host/job/` owns the *choreography* around a job a Durable Object drives through its
+ * `./job/` owns the *choreography* around a job a Durable Object drives through its
  * alarm — arming, the single-flight guard, the staleness bound, the generation
  * marker a drain checks before it writes. This package owns what an install
  * specifically **is**: which package manager, which lockfile, what counts as
@@ -372,7 +372,7 @@ async function firstPresent(
  * A matching fingerprint means "the same install would produce the same tree".
  * It does **not** mean the tree is there: it is on the container's disk, and
  * goes with the container. The caller also needs a record that this container
- * finished it — see `./host/install-job.ts`.
+ * finished it — see `./install-job.ts`.
  */
 export async function installFingerprint(
   fs: InstallProbe,

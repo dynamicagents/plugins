@@ -58,10 +58,10 @@ export function graphqlEndpoint(apiBase: string): string {
 /**
  * Middle-out truncation, so both the head of a diff and its tail survive.
  *
- * Deliberately a **copy** of the computer plugin's function of the same name,
- * not an import. `npm run verify:exports` fails any subpath whose module graph
+ * Deliberately a **copy** of `/workspace`'s function of the same name, not an
+ * import. `npm run verify:exports` fails any subpath whose module graph
  * reaches a sibling's directory, and its own advice for a shared helper is to
- * duplicate it — installing `repo` must not drag `computer` (and therefore
+ * duplicate it — installing `repo` must not drag `/workspace` (and therefore
  * `@cloudflare/computer`) into a consumer's bundle. Fifteen lines is a cheaper
  * price than that coupling, and it is the same reason `exec` is injected here
  * rather than imported.
@@ -107,7 +107,7 @@ export type RunResult = Awaited<ReturnType<RepoExec>> & { unreachable?: true };
  * A sibling of the computer plugin's `execLostNote` rather than an import, for
  * the same reason {@link truncateOutput} is a copy: `verify:exports` fails any
  * subpath whose module graph reaches a sibling's, and installing `repo` must
- * not drag `computer` in behind it. The wording differs anyway, and the
+ * not drag `/computer` in behind it. The wording differs anyway, and the
  * difference is the point — that plugin cannot know the lost command was git,
  * and this one does. What a model needs after a lost `git push` is not "re-run
  * it" but whether re-running it is *safe*.
