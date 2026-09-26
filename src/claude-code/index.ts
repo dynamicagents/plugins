@@ -12,7 +12,7 @@
  *
  * ## What it contributes, and what it does not
  *
- * **Two sub-agent specs and a model, and no plugin.** Claude Code brings its own
+ * **A writer's and a reader's sub-agent spec, a model, and no plugin.** Claude Code brings its own
  * tools, its own loop and its own context management, so there is nothing for
  * an agent loop to drive: the session *is* the sub-agent's model —
  * {@link claudeCodeModel} — and Think's recovery drives that. A host binds

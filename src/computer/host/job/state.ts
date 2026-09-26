@@ -24,7 +24,8 @@
 /**
  * A job's durable state.
  *
- * Five variants, and the two that look redundant are not:
+ * Each variant says something the others cannot, the ones that look
+ * redundant included:
  *
  * - `idle` — nothing has ever run. There is no context recording *where* or
  *   *what*, so a caller cannot re-drive it; that is the owner's job.
@@ -86,9 +87,9 @@ export type JobState<TExtra = Record<never, never>> =
 /**
  * Whether a state is one a new run may start from.
  *
- * `done` and `failed` both qualify, and the second was a gap worth closing in
- * the predecessor: arming used to require `done`, so one bad run left a record
- * that declined to re-arm forever — one failure poisoning every task after it.
+ * `done` and `failed` both qualify. Requiring `done` would leave a bad run's
+ * record declining to re-arm forever — one failure poisoning every task after
+ * it.
  *
  * `skipped` and `idle` are excluded for different reasons. `skipped` means the
  * answer is already correct and permanent. `idle` means no context exists naming

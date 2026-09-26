@@ -8,8 +8,8 @@
  *
  * **Mechanism only.** Nothing here knows what a job *does*: no command, no
  * container, no filesystem, no vendor library. A consumer supplies the handle
- * and the meaning; this supplies the four rules that are wrong in the same way
- * every time — arming before the work starts, one job at a time, a drain that
+ * and the meaning; this supplies the rules that are wrong in the same way every
+ * time — arming before the work starts, one job at a time, a drain that
  * can outlive its job, and a job nobody is draining. See {@link JobLifecycle}.
  *
  * Deliberately **not** called `task`. The A2A task already has that name, with

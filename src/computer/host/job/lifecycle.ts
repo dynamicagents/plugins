@@ -11,7 +11,7 @@ import { isRearmable, type JobState, type RunningJob } from "./state.js";
  *
  * The job itself — what command, where, and what its output means — belongs to
  * the owner. What lives here is the part that is the same every time and is
- * wrong in the same four ways every time:
+ * wrong in the same ways every time:
  *
  * 1. **Arming writes `running` before anything runs.** The alarm has not fired
  *    yet, and a `done` record in that window lets a gated caller through against
@@ -27,11 +27,10 @@ import { isRearmable, type JobState, type RunningJob } from "./state.js";
  * 4. **Nobody may be draining at all.** A watch intent re-attaches to a job
  *    whose isolate went away mid-flight.
  *
- * What is deliberately *not* here is the drain loop. Two real consumers want
- * different ones — an install runs to completion under `waitUntil` and writes a
- * single verdict; a coding-agent run is drained in bounded windows and reports
- * partial progress between them. They share the four rules above and nothing
- * below them, so the loop stays with the owner.
+ * What is deliberately *not* here is the drain loop. The install runs to
+ * completion under `waitUntil` and writes a single verdict; a job that reports
+ * partial progress as it goes would drain differently. What jobs share is the
+ * rules above and nothing below them, so the loop stays with the owner.
  *
  * ## Storage keys
  *

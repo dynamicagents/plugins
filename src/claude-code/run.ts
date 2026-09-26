@@ -525,7 +525,9 @@ export interface DrainOptions {
    * **Only meaningful alongside `onProgress`, and that coupling is the whole
    * point.** A cursor names a position whose notes have *already been handed to
    * the sink* — it rides the same chain, after them — so resuming from it loses
-   * nothing the parent was sent.
+   * nothing the parent was sent. A note the sink **rejects** ends the
+   * checkpoints for the rest of the drain, so no stored cursor passes it: a
+   * drain cut after that resumes from before it, and files it again.
    *
    * Without it, a drain that dies mid-stream resumes from the start of the
    * session. One production run lost six and a half minutes of a session that
@@ -780,11 +782,14 @@ export async function drainRun(
    *
    * Ordering matters — these are sentences in a conversation — and awaiting
    * one inside the read loop would stall the drain for as long as the session
-   * keeps talking. Failures are swallowed here because the sink's own contract
-   * is best-effort; settled before the drain returns, so nothing is cut short
-   * when it unwinds.
+   * keeps talking. A rejected note does not stop the drain — a note is
+   * best-effort — but it is logged, and it ends the checkpoints: see
+   * `DrainOptions.onCheckpoint`. Settled before the drain returns, so nothing is
+   * cut short when it unwinds.
    */
   let sunk: Promise<void> = Promise.resolve();
+  /** Set once a note is rejected — see `DrainOptions.onCheckpoint`. */
+  let rejected = false;
 
   /**
    * Parse whatever complete lines the buffer now holds.
@@ -837,7 +842,17 @@ export async function drainRun(
       progress.push(note);
       emitted++;
       const sink = options.onProgress;
-      if (sink) sunk = sunk.then(() => sink(note)).catch(() => {});
+      if (sink)
+        sunk = sunk
+          .then(() => sink(note))
+          .catch((err: unknown) => {
+            rejected = true;
+            console.warn("[claude-code] a note did not reach the parent", {
+              execId: cursor.execId,
+              key: note.key,
+              err: String(err)
+            });
+          });
     }
     if (parsed.skipped > 0) {
       // Not fatal, and deliberately not silent: a systematic schema change
@@ -890,11 +905,13 @@ export async function drainRun(
     // caller that files nothing, it advances a cursor past notes that were never
     // delivered, and a drain dying after it loses them permanently. The
     // documented unsafe combination is one nothing can reach.
-    if (!sink || !options.onProgress) return;
+    if (!sink || !options.onProgress || rejected) return;
     if (now() - checkpointedAt < CHECKPOINT_MIN_MS) return;
     checkpointedAt = now();
     const at = checkpoint();
-    sunk = sunk.then(() => sink(at)).catch(() => {});
+    // Checked again on the chain: a note queued ahead of this one may yet be
+    // rejected, and this cursor names it.
+    sunk = sunk.then(() => (rejected ? undefined : sink(at))).catch(() => {});
   };
 
   const finish = async (code?: number): Promise<DrainOutcome> => {

@@ -1269,6 +1269,41 @@ describe("drainRun, reporting as it goes", () => {
     expect(second.rateLimit).toBeUndefined();
   });
 
+  it("stores no cursor past a note the sink rejected", async () => {
+    /**
+     * A rejected note is not in the parent's transcript. A cursor stored past
+     * it would have a resumed drain skip it for good; with none, a drain cut
+     * later resumes from before it and files it again.
+     */
+    const checkpoints: DrainCursor[] = [];
+    let clock = 0;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await drainRun(
+        fakeHandle([
+          stdout(1, assistant("one")),
+          stdout(2, assistant("two")),
+          stdout(3, assistant("three")),
+          exit(4, 0)
+        ]),
+        FRESH,
+        {
+          now: () => clock,
+          onProgress: async (note) => {
+            clock += 40_000;
+            if (note.text === "one") throw new Error("storage refused it");
+          },
+          onCheckpoint: (cursor) => {
+            checkpoints.push(cursor);
+          }
+        }
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(checkpoints).toEqual([]);
+  });
+
   it("refuses to checkpoint for a caller that files nothing", async () => {
     /**
      * The unsafe combination, made unreachable rather than only documented.

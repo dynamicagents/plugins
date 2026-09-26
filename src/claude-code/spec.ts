@@ -2,7 +2,7 @@ import type { SubAgentSpec } from "@dynamicagents/core";
 import { z } from "zod";
 
 /**
- * The two Claude Code sub-agents, as data: what the parent's model is offered.
+ * The Claude Code writer and reader, as data: what the parent's model is offered.
  * The host binds each to a `SubAgent` class whose model is
  * {@link file://./model.ts claudeCodeModel}, and adds the `prepare` and
  * `settle` that claim and release its workspace.
@@ -101,7 +101,7 @@ export const CLAUDE_CODE_AGENT: SubAgentSpec<ClaudeCodeInput> = {
 
 /**
  * The same CLI, in the parent's container, in a throwaway copy of its checkout
- * — see {@link file://./copy.ts}. Two sub-agents rather than an input flag,
+ * — see {@link file://./copy.ts}. A reader of its own rather than an input flag,
  * because the difference is not a setting a model should pick: it decides
  * whether the run needs a container of its own, and a model choosing that would
  * be choosing what the turn costs.

@@ -23,7 +23,12 @@ import { testPluginContext } from "../../test/helpers.js";
 interface Seen {
   /** Every workspace name a call opened, in order. */
   opened: string[];
-  finds: Array<{ dir: string; pattern?: string; exclude?: string[] }>;
+  finds: Array<{
+    dir: string;
+    pattern?: string;
+    exclude?: string[];
+    limit?: number;
+  }>;
   readdirs: Array<{ dir: string; limit?: number; offset?: number }>;
 }
 
@@ -73,9 +78,14 @@ function fake(
     find: async (
       dir: string,
       pattern?: string,
-      opts?: { exclude?: string[] }
+      opts?: { exclude?: string[]; limit?: number }
     ) => {
-      seen.finds.push({ dir, pattern, exclude: opts?.exclude });
+      seen.finds.push({
+        dir,
+        pattern,
+        exclude: opts?.exclude,
+        limit: opts?.limit
+      });
       return [{ path: `${dir}/a.ts`, type: "file" as const }];
     },
     writeFile: async (path: string, content: string) => {
@@ -231,7 +241,8 @@ describe("computerWorkspace", () => {
     ]);
   });
 
-  it("walks a glob from its fixed prefix, with .git and node_modules pruned", async () => {
+  /** Think's `find` cuts to 200 after `glob` returns; the walk stops at the source. */
+  it("walks a glob from its fixed prefix, bounded, with .git and node_modules pruned", async () => {
     const { config, seen } = fake();
     const ws = computerWorkspace(config);
 
@@ -242,12 +253,14 @@ describe("computerWorkspace", () => {
       {
         dir: "/workspace/repo/src",
         pattern: "**/*.ts",
-        exclude: ["**/.git", "**/node_modules"]
+        exclude: ["**/.git", "**/node_modules"],
+        limit: 201
       },
       {
         dir: "/workspace",
         pattern: "*.md",
-        exclude: ["**/.git", "**/node_modules"]
+        exclude: ["**/.git", "**/node_modules"],
+        limit: 201
       }
     ]);
   });

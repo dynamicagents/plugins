@@ -151,8 +151,8 @@ describe("arm", () => {
   });
 
   it("re-arms from failed, not only from done", async () => {
-    // Arming used to require `done`, so one bad run left a record that declined
-    // to re-arm forever — one failure poisoning every task after it.
+    // Requiring `done` would leave a bad run's record declining to re-arm
+    // forever — one failure poisoning every task after it.
     const { job } = lifecycle();
     await job.write({
       state: "failed",

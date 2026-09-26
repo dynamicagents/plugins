@@ -16,12 +16,12 @@ and Haiku 4.5 all answer, at `service_tier: standard`. **The harness is the
 unlock, not the credential.** So the way to reach those models on a subscription
 is to run the sanctioned client, which is what this plugin makes delegable.
 
-## The shape: two sub-agents, and the session is their model
+## The shape: a writer and a reader, and the session is their model
 
 Unusual for this package, and it is the whole design. Claude Code brings its own
 tools, its own loop and its own context management, so there is nothing for an
-agent loop to drive. So this package exports no plugin: it exports two
-`SubAgentSpec`s — `CLAUDE_CODE_AGENT` (`claude_code`, which writes) and
+agent loop to drive. So this package exports no plugin: it exports a writer's and a
+reader's `SubAgentSpec` — `CLAUDE_CODE_AGENT` (`claude_code`, which writes) and
 `CLAUDE_CODE_READER_AGENT` (`claude_code_read`, which works in a throwaway copy) —
 and `claudeCodeModel`, a language model whose one call runs a session. A host binds
 each spec to a `SubAgent` whose `getModel()` returns one, and Think's recovery does

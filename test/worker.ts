@@ -50,7 +50,8 @@ export class TestWorkspaceDO extends WorkspaceObjectBase {
 }
 
 /**
- * Two plain Durable Objects for the alarm specs, and the pair is the test.
+ * {@link PlainScheduled} and {@link DelegatingScheduled}, plain Durable Objects
+ * for the alarm specs — and the difference between them is the test.
  *
  * A lifecycle installs its runtime handlers only where the host does not
  * already have one, silently — so "the host defines its own `alarm()`" and "the

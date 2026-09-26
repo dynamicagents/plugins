@@ -49,6 +49,13 @@ const ROUTE = Symbol.for("@dynamicagents/plugins/computer:workspace");
 
 type FileInfo = Awaited<ReturnType<WorkspaceLike["glob"]>>[number];
 
+/**
+ * The most one `glob` returns. Its caller is Think's `find`, which shows 200
+ * and says when there were more — so one past that is all it can use, and
+ * reading the rest of a large checkout into the object would buy nothing.
+ */
+const GLOB_LIMIT = 201;
+
 /** The route of a workspace {@link computerWorkspace} built, or `undefined`. */
 export function workspaceRoute(workspace: unknown): WorkspaceRoute | undefined {
   if (typeof workspace !== "object" || workspace === null) return undefined;
@@ -229,6 +236,7 @@ export function computerWorkspace(
       return withFs(dir, "find", async (fs) =>
         (
           await fs.find(dir, rest, {
+            limit: GLOB_LIMIT,
             exclude: WALK_SKIPS.map((segment) => `**/${segment}`)
           })
         ).map((entry) =>

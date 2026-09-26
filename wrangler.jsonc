@@ -28,7 +28,8 @@
       // and the workspace specs are written against exactly that — a host whose
       // `runtime.exec` fails the way it fails when a container is unreachable.
       { "name": "TEST_WORKSPACE", "class_name": "TestWorkspaceDO" },
-      // The alarm specs' two hosts — see `test/worker.ts`.
+      // The alarm specs' hosts, `PlainScheduled` and `DelegatingScheduled` —
+      // see `test/worker.ts`.
       { "name": "PLAIN_SCHEDULED", "class_name": "PlainScheduled" },
       { "name": "DELEGATING_SCHEDULED", "class_name": "DelegatingScheduled" }
     ]
