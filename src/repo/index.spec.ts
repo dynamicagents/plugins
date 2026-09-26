@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import type { Action, ActionContext } from "@cloudflare/think";
+import type { Tool, ToolSet } from "ai";
 import {
-  buildRepoTools,
   graphqlEndpoint,
   repo,
   type RepoConfig,
@@ -8,7 +9,7 @@ import {
   type RepoGit,
   type RepoGitResult
 } from "./index.js";
-import type { ToolSet } from "ai";
+import { testPluginContext } from "../../test/helpers.js";
 
 /**
  * The repo plugin's two jobs, both of which are security properties rather than
@@ -138,10 +139,43 @@ function gitRecorder(results: GitStub = {}): {
 
 const TOKEN = "ghp_supersecret";
 
+/** What Think hands an action about its turn: the task it runs for. */
+const turnFor = (taskId?: string) =>
+  ({
+    agent: { activeTurnMetadata: taskId === undefined ? {} : { taskId } }
+  }) as unknown as ActionContext;
+
+/**
+ * The plugin's tools and actions, as the model reaches them. An action's
+ * failure is thrown — Think turns it into the error the model reads — so the
+ * spec reads its message.
+ */
+function surface(
+  config: RepoConfig,
+  runtime?: Record<string, unknown>
+): ToolSet {
+  const plugin = repo(config);
+  const ctx = testPluginContext({ runtime: () => runtime });
+  const actions = Object.entries(plugin.actions!(ctx)).map(
+    ([name, { config: a }]) => [
+      name,
+      {
+        description: a.description,
+        inputSchema: a.inputSchema,
+        execute: (input: never) =>
+          Promise.resolve(a.execute(input, turnFor("task-1"))).catch(
+            (err: Error) => err.message
+          )
+      } as unknown as Tool
+    ]
+  );
+  return { ...plugin.tools!(ctx), ...Object.fromEntries(actions) };
+}
+
 function tools(exec: RepoExec, config: Partial<RepoConfig> = {}): ToolSet {
   // A fresh no-op git unless the case supplies one, so the many tests that only
   // care about container commands do not each have to build one.
-  return buildRepoTools({
+  return surface({
     exec,
     git: gitRecorder().git,
     token: () => TOKEN,
@@ -465,7 +499,7 @@ describe("guardrails", () => {
     expect(result).toContain("could not record what it tracks");
     expect(result).toContain("could not lock config file");
     // Actionable rather than merely reported: the only thing that breaks is a
-    // bare `git push` from a subagent's shell, and this is its one-line fix.
+    // bare `git push` from a sub-agent's shell, and this is its one-line fix.
     expect(result).toContain("git push -u origin coder/x");
   });
 
@@ -512,7 +546,7 @@ describe("guardrails", () => {
   });
 
   /**
-   * An empty branch pushed successfully is worse than a failed push: the round
+   * An empty branch pushed successfully is worse than a failed push: the turn
    * goes on to open a pull request and report a URL, so the work looks
    * delivered. This is the guard that turns the `checkout -B` class of bug into
    * a message instead of a silent loss.
@@ -598,7 +632,7 @@ describe("guardrails", () => {
     expect(gitCalls.map((c) => c.op)).toEqual(["push"]);
   });
 
-  it("reports a clean tree rather than failing the round", async () => {
+  it("reports a clean tree rather than failing the turn", async () => {
     const { exec } = recorder({
       commit: {
         success: false,
@@ -1065,7 +1099,7 @@ describe("what the credential can reach", () => {
     expect(gitCalls).toHaveLength(0);
   });
 
-  it("never lets a credential prompt hang the round", async () => {
+  it("never lets a credential prompt hang the turn", async () => {
     const { exec, calls } = recorder();
     await run(tools(exec), "repo_commit", {
       dir: "/workspace/r",
@@ -1074,7 +1108,7 @@ describe("what the credential can reach", () => {
 
     // Vestigial only in appearance. Nothing the container runs authenticates any
     // more, but `git` will still stop and ask if some future command reaches a
-    // remote by accident, and a round that hangs is worse than one that fails.
+    // remote by accident, and a turn that hangs is worse than one that fails.
     for (const call of calls)
       expect(call.options?.env?.["GIT_TERMINAL_PROMPT"]).toBe("0");
   });
@@ -1176,7 +1210,7 @@ describe("a container that is not there", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { exec } = recorder();
-      const set = buildRepoTools({
+      const set = surface({
         exec,
         git: gitRecorder({
           push: { ok: false, message: "remote rejected: non-fast-forward" }
@@ -1249,7 +1283,7 @@ describe("a container that is not there", () => {
 
     // Every other call this plugin makes is a container command, which `exec`
     // bounds for it. This one is a `fetch`, and an API that stops answering
-    // would otherwise hold the round open.
+    // would otherwise hold the turn open.
     const init = fetchSpy.mock.calls[0]![1] as RequestInit;
     expect(init.signal).toBeInstanceOf(AbortSignal);
     fetchSpy.mockRestore();
@@ -1392,7 +1426,7 @@ describe("re-entrant clone", () => {
 describe("bounded output", () => {
   /**
    * `repo_diff` is the whole input surface for an agent that reviews rather
-   * than writes — a delegating coder whose subagents hold the shell. An
+   * than writes — a coder whose sub-agents hold the shell. An
    * unbounded diff there is the context blowup that design exists to prevent,
    * and unlike `sb_exec` these tools returned raw stdout with no ceiling at all.
    */
@@ -1571,17 +1605,17 @@ describe("concurrent git", () => {
 
   /**
    * The queue has to outlive the tool set, because the tool set is rebuilt
-   * constantly: core calls `mainAgentTools` every turn and gives each subagent
-   * execution its own tool family. A queue living in one build's closure leaves a
-   * subagent racing its parent over one checkout — the same `.git/index.lock`
+   * constantly: the tools are built for every turn, and a sub-agent builds its
+   * own from the same config. A queue living in one build's closure leaves a
+   * sub-agent racing its parent over one checkout — the same `.git/index.lock`
    * collision, one level up.
    */
   it("serialises across tool sets built from the same plugin", async () => {
     const { exec, peak, total } = overlapping();
-    // One config object, two builds — which is exactly what core does.
+    // One config object, two builds — a parent's and a sub-agent's.
     const config = { exec, git: gitRecorder().git, token: () => TOKEN };
-    const parent = buildRepoTools(config);
-    const subagent = buildRepoTools(config, { workspaceName: "w" });
+    const parent = surface(config);
+    const subagent = surface(config, { workspaceName: "w" });
 
     await Promise.all([
       run(parent, "repo_commit", { dir: "/w/r", message: "a change" }),
@@ -1672,19 +1706,22 @@ describe("concurrent git", () => {
  * Nothing here is held for a person.
  *
  * Pinned because the failure is silent from both directions: a rule that appears
- * parks a round waiting for an approval nobody is expecting, and one that
+ * parks a turn waiting for an approval nobody is expecting, and one that
  * disappears lets a gated call through unasked. The README carries which calls
  * are gated and why.
  */
 describe("what a person approves before it runs", () => {
   it("declares no approval rules at all", () => {
-    const plugin = repo({
+    const actions = repo({
       exec: recorder().exec,
       git: gitRecorder().git,
       token: () => TOKEN
-    } as RepoConfig);
+    }).actions!(testPluginContext());
 
-    expect(plugin.mainAgentToolApproval).toBeUndefined();
+    for (const [name, { config }] of Object.entries(actions)) {
+      expect(config.approval, name).toBeUndefined();
+      expect(config.kind, name).toBeUndefined();
+    }
   });
 });
 
@@ -2253,6 +2290,172 @@ describe("a review, and answering it", () => {
       }
     });
   });
+
+  /**
+   * The two forge writes are Think actions, so a recovered turn replays a
+   * landed write rather than repeating it. What is this plugin's own is the key
+   * — what counts as "the same write" — and which outcomes may settle it.
+   */
+  describe("as actions", () => {
+    const actions = () =>
+      repo({
+        exec: recorder().exec,
+        git: gitRecorder().git,
+        token: () => TOKEN
+      }).actions!(testPluginContext());
+
+    const keyOf = async (
+      name: string,
+      input: Record<string, unknown>,
+      taskId?: string
+    ) => {
+      const key = actions()[name]!.config.idempotencyKey;
+      return typeof key === "function"
+        ? key({ input: input as never, ctx: turnFor(taskId) })
+        : key;
+    };
+
+    const execute = (name: string, input: Record<string, unknown>) =>
+      Promise.resolve(
+        (actions()[name] as Action).config.execute(
+          input as never,
+          turnFor("task-1")
+        )
+      );
+
+    const comment = { dir: "/w/r", number: 7, body: "done" };
+    const reply = { dir: "/w/r", number: 42, threadId: "PRRT_1", body: "ok" };
+
+    it("keys a comment to its task, so the same comment in a later task posts", async () => {
+      // A settled key replays for as long as Think keeps the row. Without the
+      // task in it, "Rebased on main." in next week's task would never post.
+      expect(await keyOf("repo_pr_comment", comment, "t1")).toBe(
+        await keyOf("repo_pr_comment", comment, "t1")
+      );
+      expect(await keyOf("repo_pr_comment", comment, "t1")).not.toBe(
+        await keyOf("repo_pr_comment", comment, "t2")
+      );
+      expect(await keyOf("repo_pr_comment", comment, "t1")).not.toBe(
+        await keyOf("repo_pr_comment", { ...comment, body: "other" }, "t1")
+      );
+      expect(await keyOf("repo_pr_comment", comment, "t1")).not.toBe(
+        await keyOf("repo_pr_comment", { ...comment, number: 8 }, "t1")
+      );
+    });
+
+    it("names the body by digest, never by its text", async () => {
+      const key = await keyOf(
+        "repo_pr_comment",
+        { ...comment, body: "a long review answer" },
+        "t1"
+      );
+      expect(key).not.toContain("a long review answer");
+      expect(key).toMatch(/^t1:\/w\/r#7:comment:[0-9a-f]{64}$/);
+    });
+
+    it("keys a reply to its thread and its resolve flag as well as its body", async () => {
+      // "Fixed." to two threads is two replies.
+      expect(await keyOf("repo_pr_thread_reply", reply, "t1")).not.toBe(
+        await keyOf(
+          "repo_pr_thread_reply",
+          { ...reply, threadId: "PRRT_2" },
+          "t1"
+        )
+      );
+      expect(await keyOf("repo_pr_thread_reply", reply, "t1")).not.toBe(
+        await keyOf("repo_pr_thread_reply", { ...reply, resolve: false }, "t1")
+      );
+      // The resolve-only recovery is its own key, or it would replay the reply.
+      expect(await keyOf("repo_pr_thread_reply", reply, "t1")).not.toBe(
+        await keyOf("repo_pr_thread_reply", { ...reply, body: undefined }, "t1")
+      );
+    });
+
+    it("refuses to key a write to no task", async () => {
+      // Keying without one would be the swallow this key exists to
+      // prevent, and every turn core runs carries one.
+      await expect(
+        keyOf("repo_pr_comment", comment, undefined)
+      ).rejects.toThrow(/no task id/);
+    });
+
+    it("gives the forge longer than an action's default", () => {
+      for (const [name, { config }] of Object.entries(actions()))
+        expect(config.timeoutMs, name).toBeGreaterThan(30_000);
+    });
+
+    it("throws a failed comment, so the key is released and a retry posts", async () => {
+      const spy = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("timed out"));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await expect(execute("repo_pr_comment", comment)).rejects.toThrow(
+          /may exist anyway/
+        );
+      } finally {
+        spy.mockRestore();
+        warn.mockRestore();
+      }
+    });
+
+    it("throws a refusal, which would otherwise answer every retry", async () => {
+      const spy = forgeStub({
+        graphql: () => ({
+          data: {
+            node: {
+              pullRequest: {
+                number: 1,
+                repository: { nameWithOwner: "other/repo" }
+              }
+            }
+          }
+        })
+      });
+      try {
+        await expect(execute("repo_pr_thread_reply", reply)).rejects.toThrow(
+          /belongs to other\/repo/
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("settles a reply that landed on a thread that did not resolve", async () => {
+      // Thrown, the key would be released and the retry would send the
+      // reviewer the reply a second time.
+      const spy = forgeStub({
+        graphql: (query) =>
+          query.includes("addPullRequestReviewThreadReply")
+            ? {
+                data: {
+                  addPullRequestReviewThreadReply: {
+                    comment: { url: "https://github.com/o/r/pull/42#r1" }
+                  }
+                }
+              }
+            : query.includes("resolveReviewThread")
+              ? { data: null, errors: [{ message: "not permitted" }] }
+              : {
+                  data: {
+                    node: {
+                      pullRequest: {
+                        number: 42,
+                        repository: { nameWithOwner: "o/r" }
+                      }
+                    }
+                  }
+                }
+      });
+      try {
+        await expect(execute("repo_pr_thread_reply", reply)).resolves.toContain(
+          "do not send it again"
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
 });
 
 /**
@@ -2282,7 +2485,7 @@ describe("GitHub Enterprise", () => {
  * Reviewing a ref instead of the working tree.
  *
  * The case this exists for is work that arrived on a branch rather than in the
- * reviewer's own tree — a subtask that pushed from a container of its own. The
+ * reviewer's own tree — a sub-agent that pushed from a container of its own. The
  * security property is the same one the rest of this file is about: the ref is
  * model-authored, so it must reach git as a value and never as command text.
  */
@@ -2479,27 +2682,23 @@ describe("a host that keeps worktrees", () => {
       ...config
     });
 
-  it("gives the main agent the switch, and never a delegated subtask", async () => {
+  it("offers the switch only when the host keeps worktrees", () => {
+    // Which is how a sub-agent goes without it: the host passes `worktrees` to
+    // the parent's install and not to the sub-agent's.
     const { seam } = worktrees();
-    const withSeam = plugin({ worktrees: seam });
-    const main = await withSeam.mainAgentTools?.({} as never);
-    expect(Object.keys(main ?? {})).toEqual(
+    const names = (config: Partial<RepoConfig>) =>
+      Object.keys(plugin(config).tools!(testPluginContext()));
+
+    expect(names({ worktrees: seam })).toEqual(
       expect.arrayContaining(["repo_worktree", "repo_worktrees"])
     );
-    const family = withSeam.toolFamilies?.repo?.({ runtime: {} } as never);
-    const delegated = family && "tools" in family ? family.tools : {};
-    expect(Object.keys(delegated)).not.toContain("repo_worktree");
-    expect(Object.keys(delegated)).not.toContain("repo_worktrees");
-
-    const without = await plugin({}).mainAgentTools?.({} as never);
-    expect(Object.keys(without ?? {})).not.toContain("repo_worktree");
+    expect(names({})).not.toContain("repo_worktree");
+    expect(names({})).not.toContain("repo_worktrees");
   });
 
   it("passes the host's answers through, and checks a branch's shape first", async () => {
     const { asked, seam } = worktrees();
-    const main = (await plugin({ worktrees: seam }).mainAgentTools?.(
-      {} as never
-    )) as ToolSet;
+    const main = plugin({ worktrees: seam }).tools!(testPluginContext());
 
     expect(await run(main, "repo_worktrees", {})).toBe("listed");
     expect(

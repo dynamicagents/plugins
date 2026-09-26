@@ -1,16 +1,13 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import type { TestWorkspaceDO } from "../../../test/worker.js";
-import {
-  freshWorkspace,
-  workspaceNamespace
-} from "../../../test/computer/do.js";
-import { DEFAULT_INSTALL_PLAN, type InstallState } from "../install.js";
-import { openWorkspace, openWorkspaceFs } from "../index.js";
-import { DEFAULT_SCRATCH_DIR } from "../../scratch/index.js";
+import type { TestWorkspaceDO } from "../../test/worker.js";
+import { freshWorkspace, workspaceNamespace } from "../../test/workspace/do.js";
+import { DEFAULT_INSTALL_PLAN, type InstallState } from "./install.js";
+import { openWorkspace, openWorkspaceFs } from "./index.js";
+import { DEFAULT_SCRATCH_DIR } from "../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
-import { pathExists } from "../read.js";
-import { readyWithin } from "./workspace.js";
+import { pathExists } from "./read.js";
+import { readyWithin } from "./object.js";
 
 /**
  * The plan `TestWorkspaceDO` is configured with — read here rather than
@@ -22,12 +19,12 @@ const INSTALL_PLAN = { ...DEFAULT_INSTALL_PLAN, overrides: {} };
 /**
  * The install gate, and the two ways it can hang forever.
  *
- * `running` is the only install state that **blocks work**: `sb_exec` waits on
- * it and then refuses to run anything. Every other state is a fact the subagent
+ * `running` is the only install state that **blocks work**: `bash` waits on
+ * it and then refuses to run anything. Every other state is a fact the agent
  * can act on — so `running` is the one that must never outlive the command it
  * describes. A `runtime.exec` that throws on the container's WebSocket is how it
  * gets orphaned: the record stays `running` with nothing draining it and no
- * watchdog armed, and every later `sb_exec` waits ninety seconds and runs
+ * watchdog armed, and every later `bash` waits ninety seconds and runs
  * nothing until the task dies on its own timeout.
  *
  * The tests below run **without a container**, which is not a limitation here
@@ -147,22 +144,22 @@ describe("the install gate", () => {
     const [advisory] = await stub.advisories();
 
     expect(advisory?.kind).toBe("deps-broken");
-    // The message is load-bearing — it is what the subagent reads instead of
+    // The message is load-bearing — it is what the agent reads instead of
     // waiting, so it has to say the command is not coming back.
     if (advisory?.kind === "deps-broken") {
       expect(advisory.error).toMatch(/not going to finish/);
     }
 
-    // And it is written down, so the next `sb_exec` does not re-derive it.
+    // And it is written down, so the next `bash` does not re-derive it.
     expect((await storedInstall(stub))?.state).toBe("failed");
   });
 
   /**
-   * `repo_clone` starts the install, and a retried chunk starts it again — three
+   * `repo_clone` starts the install, and a recovered turn starts it again — three
    * times in fifty seconds is a real rate. Spawns share an exec id, so each
    * displaces the last while the displaced command's drain stays attached: it
    * then writes *its* verdict over a record describing an install that is still
-   * running, and the subagent reads a failure belonging to a command that no
+   * running, and the agent reads a failure belonging to a command that no
    * longer exists.
    */
   it("resolves a running record before starting another install", async () => {
@@ -186,7 +183,7 @@ describe("the install gate", () => {
     // container to re-attach to, resolved is the honest answer.
     expect(state).not.toMatchObject({ state: "running", startedAt });
     // Whatever it decided, the record agrees. A returned verdict that differs
-    // from the stored one is how the subagent ends up reading a result that
+    // from the stored one is how the agent ends up reading a result that
     // describes nothing.
     expect((await storedInstall(stub))?.state).toBe(state.state);
     // The guard's live path — returning the in-flight install untouched — needs
@@ -303,7 +300,7 @@ describe("the install gate", () => {
  * - **A checkout is recorded whether or not anything was installed into it.**
  *   The install resolver skips a checkout it finds nothing to do in, and that
  *   says nothing about whether there is a checkout. See `noteCheckout` in
- *   `./workspace.ts` for why the two records are separate.
+ *   `./object.ts` for why the two records are separate.
  * - **The answer is probed, not remembered.** A recorded path is where to look;
  *   `.git` being there is what makes it true. A session's cwd and the
  *   cancellation `git reset --hard` both act on it, and neither recovers from a
@@ -382,7 +379,7 @@ describe("where the work is", () => {
  * is seen gone. With no container in this pool, every access sees it gone.
  *
  * It still has to be caught here rather than left to `repo_clone`: a follow-up
- * task never calls it, because its checkout is already here, and the round then
+ * task never calls it, because its checkout is already here, and the turn then
  * pays 99 seconds of `npm ci` inside itself. Nor can the gate close it by
  * installing directly — an install started from a poll that returns in
  * milliseconds loses its drain with that invocation and leaves a half-written
@@ -505,8 +502,8 @@ describe("arming an install when the tree is missing", () => {
    *
    * Arming only for `done` leaves a failed record standing, so the next task
    * declines to arm and is rescued only if the parent happens to call
-   * `repo_clone` — and without that coincidence the subagent is back to running
-   * `npm ci` by hand inside the round, which is what all of this prevents.
+   * `repo_clone` — and without that coincidence the agent is back to running
+   * `npm ci` by hand inside the turn, which is what all of this prevents.
    */
   it("arms for a workspace whose last install failed", async () => {
     const stub = freshWorkspace("arm-after-failure");
@@ -565,7 +562,7 @@ describe("arming an install when the tree is missing", () => {
   });
 
   /**
-   * `sb_exec` reads the advisories before its `#ready()` starts a container, so
+   * `bash` reads the advisories before its `#ready()` starts a container, so
    * that read has to arm the install, or the gate lets the command outrun it.
    */
   it("arms from the gate's own read, before a command starts a container", async () => {
@@ -690,7 +687,7 @@ describe("draining an outstanding pull", () => {
 
 /**
  * A reclaimed workspace reads exactly like one nobody ever used, and these hold
- * the line between them — see `reclaimIfIdle` in `./workspace.ts` for why an
+ * the line between them — see `reclaimIfIdle` in `./object.ts` for why an
  * absent `lastUsedAt` must not read as idle.
  */
 describe("reclaiming an idle workspace", () => {
@@ -826,7 +823,7 @@ describe("trusting the interception CA", () => {
 });
 
 /**
- * What a file tool waits for — `__getWorkspaceFsStub` in `./workspace.ts` holds
+ * What a file tool waits for — `__getWorkspaceFsStub` in `./object.ts` holds
  * why.
  *
  * These run **without a container**, which is what makes it observable: the
@@ -858,7 +855,7 @@ describe("the filesystem stub", () => {
     return true;
   }
 
-  /** `sb_exists` takes this path; `.call` on a stub method throws DataCloneError. */
+  /** `pathExists` takes this path; `.call` on a stub method throws DataCloneError. */
   it("answers pathExists over the stub", async () => {
     const stub = freshWorkspace("fs-stub-exists");
     await seedGitCheckout(stub, "/workspace/probe");
@@ -972,7 +969,7 @@ function scheduleRows(
 
 /**
  * A schedule is a minted row rather than a keyed upsert — see `IDLE_RECLAIM_ID`
- * in `./workspace.ts` — so moving a deadline leaves a second row unless it
+ * in `./object.ts` — so moving a deadline leaves a second row unless it
  * cancels the first, and `#touch()` runs on every entry point.
  *
  * Counted through storage rather than through a scheduler handle, because the
@@ -1009,7 +1006,7 @@ describe("the idle deadlines, over a scheduler that has no upsert", () => {
 
   /**
    * Concurrent touches, which is the case that actually happens: several
-   * subagents reach one workspace at once, and each entry point moves both
+   * sub-agents reach one workspace at once, and each entry point moves both
    * deadlines. A move is read-cancel-create-write across several awaits, so if
    * two interleaved they could cancel the same row, create two replacements and
    * keep one id — leaving a schedule nothing can reach.

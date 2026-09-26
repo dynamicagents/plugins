@@ -5,7 +5,7 @@ import type { Workspace } from "@cloudflare/computer";
  * answers for it.
  *
  * `/repo` configures the checkouts it clones and names the identity on every
- * commit it makes — see {@link file://../../repo/checkout.ts writeGitIdentity}.
+ * commit it makes — see {@link file://../repo/checkout.ts writeGitIdentity}.
  * Neither reaches a repository the container made for itself: a submodule
  * checked out by a bootstrap, a `git init`, a second clone from the shell. Those
  * have no identity at all, and git refuses to commit without one — so whatever

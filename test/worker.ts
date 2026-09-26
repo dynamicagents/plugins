@@ -2,7 +2,7 @@ import {
   DEFAULT_INSTALL_PLAN,
   WorkspaceObjectBase,
   type WorkspaceObjectConfig
-} from "../src/computer/index.js";
+} from "../src/workspace/index.js";
 
 // Not one of our classes, and not optional: `CloudflareContainerBackend` builds
 // the container's egress loopback out of `ctx.exports.WorkspaceProxy`, so a host

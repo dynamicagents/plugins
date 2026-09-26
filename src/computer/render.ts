@@ -2,6 +2,7 @@ import type {
   WorkspaceClient,
   WorkspaceRuntimeStatus
 } from "@cloudflare/computer";
+import { truncateOutput } from "../workspace/format.js";
 
 /**
  * Turning a result into the text a model reads.
@@ -21,54 +22,16 @@ import type {
  * A grep match carries the whole line, and a minified bundle is one line of
  * megabytes — a single match in `dist/` would otherwise be the entire result. The
  * head is kept because a match's file and line number are what the model acts on;
- * it reads the region with `sb_read` next.
+ * it reads the region with `read` next.
  */
 const MAX_MATCH_LINE_CHARS = 200;
-
-/**
- * Middle-out truncation, so both the first error and the final summary survive.
- *
- * The guard is not defensive padding. Without it a `max` at or below the marker's
- * own length makes `half` zero or negative, and `slice(-0)` is `slice(0)` — the
- * *whole* string — so the function returns more than it was given: 500 characters
- * in, 543 out at `max: 80`. A silent inversion of the one thing it does,
- * reachable from a public config field.
- */
-export function truncateOutput(text: string, max: number): string {
-  if (text.length <= max) return text;
-
-  const marker = (dropped: number) =>
-    `\n\n… [${dropped} characters omitted from the middle] …\n\n`;
-
-  // No budget for two halves plus the marker: keep the head, which is where the
-  // first error is, and say nothing clever.
-  const half = Math.floor((max - marker(text.length).length) / 2);
-  if (half < 1) return text.slice(0, Math.max(0, max));
-
-  return (
-    text.slice(0, half) + marker(text.length - half * 2) + text.slice(-half)
-  );
-}
-
-/**
- * A byte count in the form a model can act on.
- *
- * A listing that says a file is 4.2 MB tells the model the read it is about to do
- * comes back with a hole in the middle — the one thing it cannot infer from the
- * truncated result itself.
- */
-export function humanBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 /**
  * One `fs.grep` hit, derived from the client rather than imported.
  *
  * `@cloudflare/computer` declares `WorkspaceGrepMatch` but does not re-export it,
  * so there is no name to import. Reading it back off the method keeps this correct
- * by construction — the same structural approach {@link readBounded} takes to `fs`.
+ * by construction.
  */
 type GrepMatch = Awaited<ReturnType<WorkspaceClient["fs"]["grep"]>>[number];
 
@@ -172,14 +135,6 @@ export function renderGrepMatches(
   return { body, shown, capped: hasLongLine.slice(0, shown).includes(true) };
 }
 
-/** Elapsed time in the shape a sentence wants. */
-export function humanMs(ms: number): string {
-  const s = Math.round(ms / 1000);
-  return s < 60
-    ? `${s}s`
-    : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
-}
-
 /**
  * Render a completed command the way a terminal would, minus the noise.
  *
@@ -261,37 +216,5 @@ export function syncPendingNote(
     "the command to force it — that repeats whatever it already did. Read again " +
     "in a moment, and if the workspace still disagrees with what the command " +
     "wrote, say so in your result rather than working around it.)"
-  );
-}
-
-/**
- * Why a command has nothing to show for itself.
- *
- * {@link renderResult} states a non-`completed` status on its verdict line;
- * {@link computerExec} has no verdict line, only the four fields its caller
- * branches on. A *killed* process writes nothing, so without this a `git clone`
- * that hit the ten-minute ceiling reaches the model through
- * `@dynamicagents/plugins/repo` as `clone failed:` with an empty reason — which reads
- * like a bug in the plugin rather than a limit it can work within.
- *
- * Only `cancelled`. A `failed` status is an ordinary non-zero exit, where the
- * command's own stderr is the better explanation and this would be noise on top
- * of it.
- *
- * Both plausible causes are named because the exit code cannot separate them:
- * 137 is SIGKILL, which is what the timeout sends *and* what the kernel sends a
- * container that ran out of memory.
- */
-export function cancelledNote(
-  status: WorkspaceRuntimeStatus | undefined,
-  exitCode: number,
-  timeoutMs: number
-): string | undefined {
-  if (status !== "cancelled") return undefined;
-  return (
-    `the command was killed rather than exiting on its own (exit ${exitCode}), so ` +
-    `anything it had not yet written is gone. The two usual causes are the ` +
-    `per-command time limit — ${humanMs(timeoutMs)} here — and the container ` +
-    `running out of memory.`
   );
 }

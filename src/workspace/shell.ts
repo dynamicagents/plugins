@@ -25,7 +25,7 @@ import { shellQuote } from "@cloudflare/computer";
  * truncated with both ends kept.
  *
  * Requires a shell that implements it — `bash`, `zsh`, `ksh`, not `sh`/dash. A
- * host setting {@link file://./index.ts ComputerConfig.shell} is choosing that
+ * host setting {@link file://./exec.ts WorkspaceClientConfig.shell} is choosing that
  * shell explicitly.
  */
 function wrapped(command: string, shell: string): string {
@@ -33,13 +33,13 @@ function wrapped(command: string, shell: string): string {
 }
 
 /**
- * Run a command under {@link file://./index.ts ComputerConfig.shell} with its
+ * Run a command under {@link file://./exec.ts WorkspaceClientConfig.shell} with its
  * two output streams left as they are, or hand it back untouched when no shell
  * is configured.
  *
  * This is the variant for a caller that **reads the result in code**: `stdout` is
  * a data channel it compares or parses, and `stderr` is a separate diagnostic.
- * {@link file://./index.ts computerExec} is that caller, on behalf of
+ * {@link file://./exec.ts workspaceExec} is that caller, on behalf of
  * `@dynamicagents/plugins/repo`, which asks git questions like
  * `symbolic-ref --short refs/remotes/origin/HEAD` and `rev-list --count` and
  * needs the answer alone.
@@ -56,12 +56,12 @@ export function withShell(command: string, shell: string | undefined): string {
 }
 
 /**
- * Run a command under {@link file://./index.ts ComputerConfig.shell} with its
+ * Run a command under {@link file://./exec.ts WorkspaceClientConfig.shell} with its
  * two output streams merged into one transcript, in the order they were
  * written.
  *
  * This is the variant for a caller whose consumer is **a model reading output**.
- * `sb_exec` is that caller. A project's check is a chain — `wrangler types &&
+ * `bash` is that caller. A project's check is a chain — `wrangler types &&
  * prettier && eslint && tsc` — and *which tool spoke last* is how you know which
  * one failed. A stdout block and a separate stderr block destroy that ordering,
  * and a model that wants it back re-runs the whole gate as
@@ -75,7 +75,7 @@ export function withShell(command: string, shell: string | undefined): string {
  *
  * With no shell configured there is no wrapper process to redirect, so the
  * command goes to the runtime untouched and the two streams arrive separate.
- * That is not a gap: {@link file://./render.ts renderResult} renders them as a
+ * That is not a gap: {@link file://../computer/render.ts renderResult} renders them as a
  * labelled `--- stderr ---` block for exactly this case. The transcript is the
  * better answer, not the only supported one.
  */

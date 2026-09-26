@@ -444,7 +444,7 @@ describe("credential rotation", () => {
   /**
    * The rewrite is what turns the client's own retry into the rotation, and it
    * is the reason nothing here buffers a request body. Left at the upstream's
-   * value the client would sleep for four hours holding a chunk open, which is
+   * value the client would sleep for four hours holding a turn open, which is
    * a stall rather than a rotation.
    */
   it("tells the client to retry in a second, not in four hours", async () => {

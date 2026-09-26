@@ -1,7 +1,8 @@
+import { DEFAULT_CWD, DEFAULT_TIMEOUT_MS } from "../workspace/exec.js";
 import { withAbort } from "@dynamicagents/core";
 import type { WorkspaceClient } from "@cloudflare/computer";
 import { execGate, writeGate, type ExecGate } from "./gate.js";
-import type { WorkspaceAdvisory } from "./advisory.js";
+import type { WorkspaceAdvisory } from "../workspace/advisory.js";
 import type { ComputerConfig } from "./index.js";
 
 /**
@@ -19,12 +20,6 @@ import type { ComputerConfig } from "./index.js";
  * says what actually failed.
  */
 const DEFAULT_MAX_OUTPUT_CHARS = 16_000;
-
-/** A command that has not finished in this long is a hung command. */
-export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
-
-/** Where checkouts live, in the container and in the workspace alike. */
-export const DEFAULT_CWD = "/workspace";
 
 /**
  * How often the install gate re-reads the install's status.
@@ -93,7 +88,7 @@ export function computerContext(
     // is a read of another Durable Object's state. An error must not take out a
     // working shell — running the command is exactly what would have happened
     // before the gate existed, and a spurious blockage would strand the
-    // subagent.
+    // agent.
     const read = async (): Promise<readonly WorkspaceAdvisory[]> => {
       try {
         signal?.throwIfAborted();
@@ -167,18 +162,18 @@ export function computerContext(
   /**
    * Open the workspace, run one file operation in it, and own the failure.
    *
-   * Five lines every file tool would otherwise repeat with only the verb changed
-   * — five chances for the seventh to be written without them. The catch is the
+   * Lines every file tool would otherwise repeat with only the verb changed,
+   * and a chance for the next one to be written without them. The catch is the
    * point: a failed file operation is the model's to recover from, and it can
    * only recover from what it is told, so this returns the sentence rather than
    * throwing it.
    *
-   * `sb_exec` deliberately does not use it. That one recognises `EEXEC_LOST`,
+   * `bash` deliberately does not use it. That one recognises `EEXEC_LOST`,
    * logs, and carries an install warning through the failure path — a bespoke
    * catch saying something this cannot.
    *
-   * It opens through `fsWorkspace`, which is what makes the capability sentence
-   * about these tools true: they answer while the container is down.
+   * It opens through `fsWorkspace`, which is what makes the context block's
+   * sentence about these tools true: they answer while the container is down.
    */
   const inWorkspace = async (
     gerund: string,

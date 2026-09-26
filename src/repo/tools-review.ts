@@ -1,7 +1,13 @@
+import { action, type Action } from "@cloudflare/think";
 import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
-import { FORGE_PAGE_SIZE } from "./context.js";
+import {
+  actionTask,
+  FORGE_ACTION_TIMEOUT_MS,
+  FORGE_PAGE_SIZE,
+  sha256
+} from "./context.js";
 import type { RepoContext } from "./context.js";
 
 /** A review as a conversation: whether it landed, what it said, and answering it. */
@@ -398,31 +404,53 @@ export function reviewTools(ctx: RepoContext): ToolSet {
 
         return bounded(rendered + unread);
       }
-    }),
+    })
+  };
+}
 
-    repo_pr_thread_reply: tool({
+/**
+ * Answering a thread, as a Think action — see
+ * {@link file://./tools-forge.ts forgeActions} for why every failure is
+ * thrown. The one outcome returned short of success is a reply that landed on
+ * a thread that did not resolve: that reply must never be sent again, so it is
+ * settled, and the resolve-only call it asks for is a different key.
+ */
+export function reviewActions(ctx: RepoContext): Record<string, Action> {
+  const { bounded, forgeGraphql, forgeRepo } = ctx;
+
+  const replyInput = z.object({
+    dir: z.string().describe("The checkout directory"),
+    number: z.number().int().positive().describe("Pull request number"),
+    threadId: z
+      .string()
+      .describe("The thread's id, exactly as repo_pr_threads printed it"),
+    body: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "The reply, as markdown. Leave it out to resolve a thread you have already replied to."
+      ),
+    resolve: z
+      .boolean()
+      .optional()
+      .describe("Resolve the thread after replying. Defaults to true.")
+  });
+
+  return {
+    repo_pr_thread_reply: action({
       description:
-        "Answer one review thread on a pull request in the repository you have checked out, and resolve it. Reply with what you changed and where, or with why you did not — either way the thread ends resolved unless you say otherwise.",
-      inputSchema: z.object({
-        dir: z.string().describe("The checkout directory"),
-        number: z.number().int().positive().describe("Pull request number"),
-        threadId: z
-          .string()
-          .describe("The thread's id, exactly as repo_pr_threads printed it"),
-        body: z
-          .string()
-          .optional()
-          .describe(
-            "The reply, as markdown. Leave it out to resolve a thread you have already replied to."
-          ),
-        resolve: z
-          .boolean()
-          .optional()
-          .describe("Resolve the thread after replying. Defaults to true.")
-      }),
+        "Answer one review thread on a pull request in the repository you have checked out, and resolve it. Reply with what you changed and where, or with why you did not — either way the thread ends resolved unless you say otherwise. The same reply to one thread twice in one task is sent once.",
+      inputSchema: replyInput,
+      timeoutMs: FORGE_ACTION_TIMEOUT_MS,
+      // The thread and the resolve flag as well as the body, or the same reply
+      // to two threads — "Fixed." — would be one key.
+      idempotencyKey: async ({ input, ctx: turn }) =>
+        `${actionTask(turn)}:${input.dir}#${input.number}:${input.threadId}:` +
+        `${await sha256(input.body ?? "")}:${input.resolve ?? true}`,
       execute: async ({ dir, number, threadId, body, resolve }) => {
         const target = await forgeRepo(dir);
-        if ("refusal" in target) return target.refusal;
+        if ("refusal" in target) throw new Error(target.refusal);
         const { owner, repo } = decoded(target);
 
         // A thread id is a global node id, so unlike every other tool here this
@@ -436,18 +464,20 @@ export function reviewTools(ctx: RepoContext): ToolSet {
           THREAD_OWNER_QUERY,
           { id: threadId }
         );
-        if (!belongs.ok) return bounded(belongs.message);
+        if (!belongs.ok) throw new Error(bounded(belongs.message));
         const node = (belongs.data as { node?: ThreadOwner | null }).node;
         if (!node?.pullRequest)
-          return `${threadId} is not a review thread — read the ids with repo_pr_threads`;
+          throw new Error(
+            `${threadId} is not a review thread — read the ids with repo_pr_threads`
+          );
         const at = node.pullRequest.repository?.nameWithOwner ?? "";
         if (
           at.toLowerCase() !== `${owner}/${repo}`.toLowerCase() ||
           node.pullRequest.number !== number
         )
-          return (
+          throw new Error(
             `${threadId} belongs to ${at}#${node.pullRequest.number}, not ${owner}/${repo}#${number}. ` +
-            `Read the ids for this pull request with repo_pr_threads.`
+              `Read the ids for this pull request with repo_pr_threads.`
           );
 
         // Resolve-only. The reply and the resolve are two calls, so they fail
@@ -456,15 +486,19 @@ export function reviewTools(ctx: RepoContext): ToolSet {
         // only route back is a second reply the reviewer has already read.
         if (body === undefined) {
           if (resolve === false)
-            return "nothing to do: give a body to reply, or leave resolve unset to resolve the thread";
+            throw new Error(
+              "nothing to do: give a body to reply, or leave resolve unset to resolve the thread"
+            );
           const only = await forgeGraphql(
             "repo_pr_thread_reply",
             THREAD_RESOLVE_MUTATION,
             { id: threadId }
           );
-          return only.ok
-            ? `resolved ${threadId}`
-            : bounded(`resolving the thread failed: ${only.message}`);
+          if (!only.ok)
+            throw new Error(
+              bounded(`resolving the thread failed: ${only.message}`)
+            );
+          return `resolved ${threadId}`;
         }
 
         const replied = await forgeGraphql(
@@ -476,9 +510,11 @@ export function reviewTools(ctx: RepoContext): ToolSet {
           // The hazard `repo_pr_comment` names, and worse here: a reply that
           // landed and an answer that did not arrive look identical, and the
           // retry leaves the reviewer two of them.
-          return bounded(
-            `${replied.message}\nIf this was a timeout rather than a rejection the ` +
-              `reply may exist anyway — read the thread back with repo_pr_threads before retrying.`
+          throw new Error(
+            bounded(
+              `${replied.message}\nIf this was a timeout rather than a rejection the ` +
+                `reply may exist anyway — read the thread back with repo_pr_threads before retrying.`
+            )
           );
         const url =
           (

@@ -1,4 +1,4 @@
-import type { RepoGitResult } from "../../repo/index.js";
+import type { RepoGitResult } from "../repo/index.js";
 import type { AuthCallback, GitClient } from "@cloudflare/computer/git";
 
 /**
@@ -23,7 +23,7 @@ import type { AuthCallback, GitClient } from "@cloudflare/computer/git";
  * the workspace object's job and it must happen first: git here reads that
  * object's SQLite, so a commit made in the container that has not been pulled
  * yet is a commit this code cannot see. The workspace object's `gitClone`,
- * `gitFetch` and `gitPush` in `./workspace.ts` are where that is settled.
+ * `gitFetch` and `gitPush` in `./object.ts` are where that is settled.
  */
 
 export interface GitHostDeps {
@@ -89,7 +89,7 @@ export class WorkspaceGitHost {
         );
       await git.checkout({ dir: req.dir, ref: landed });
       // What a real `git clone` writes and the container's git will look for:
-      // without it the branch tracks nothing, and a subagent reaching for a bare
+      // without it the branch tracks nothing, and an agent reaching for a bare
       // `git status` in the shell sees a branch with no upstream.
       await git.configSet({
         dir: req.dir,

@@ -5,11 +5,11 @@ not a checkout.
 
 ```ts
 import { scratch } from "@dynamicagents/plugins/scratch";
-import { computerExec } from "@dynamicagents/plugins/computer";
+import { workspaceExec } from "@dynamicagents/plugins/workspace";
 
 scratch({
   // Runs in the container. Nothing here ever needs a credential.
-  exec: computerExec({ binding: env.WORKSPACE, workspaceName: () => name })
+  exec: workspaceExec({ binding: env.WORKSPACE, workspaceName: () => name })
 });
 ```
 
@@ -84,7 +84,7 @@ _is_, the host knows how it addresses one.
 
 ```ts
 scratch({
-  exec: computerExec(config),
+  exec: workspaceExec(config),
   // Select the workspace, before any command runs. Synchronous; a throw fails
   // the open, because a host that could not choose has not chosen.
   beforeOpen: () => active.set(SCRATCH),
@@ -113,12 +113,12 @@ not record cannot be delegated into at all.
 
 ## Selection, not a capability
 
-`scratch_open` is a **main-agent tool only** — no tool family, so it is never lent
-to a subagent. Opening a scratchpad _selects a workspace_, exactly as `repo_clone`
-does. A subagent holding it could re-point the workspace its parent prepared
-half-way through its own run; a delegated run works in whatever it was given.
+Install it on a **parent only**, never on a sub-agent. Opening a scratchpad _selects a
+workspace_, exactly as `repo_clone` does. A sub-agent holding it could re-point the
+workspace its parent prepared half-way through its own run; a sub-agent works in whatever
+it was given.
 
-For the same reason, the capability block tells the model that a task works in a
+For the same reason, the context block tells the model that a task works in a
 cloned repository **or** in the scratchpad and not both. A host that keys one
 workspace selection per caller points every other workspace tool at whatever was
 selected last, so an agent that opens a scratchpad mid-checkout has quietly moved
@@ -129,5 +129,5 @@ told the rule instead of being left to discover it.
 ## Requirements
 
 None of its own. It needs a shell in a container — `exec` is injected, so
-[`/computer`](../computer/)'s `computerExec` is one source of it and a host with
+[`/workspace`](../workspace/)'s `workspaceExec` is one source of it and a host with
 its own container is another. No credential, no binding, no secret.

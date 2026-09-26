@@ -1,11 +1,12 @@
 /**
  * One mutation per file at a time, across every tool set in this isolate.
  *
- * `sb_edit` reads, replaces and writes back over RPC, and the AI SDK runs one
+ * `edit` reads, replaces and writes back over RPC, and the AI SDK runs one
  * step's tool calls concurrently — so two edits to one file would both report
- * success and the first would be lost. Module-level because a parent and a
- * subagent can hold separate tool sets over one workspace; another isolate is
- * out of reach.
+ * success and the first would be lost. The workspace's `writeFile` takes the
+ * same lock, so Think's `write` never lands between an edit's read and its
+ * write. Module-level because a parent and a sub-agent can hold separate tool
+ * sets over one workspace; another isolate is out of reach.
  */
 const tails = new Map<string, Promise<unknown>>();
 

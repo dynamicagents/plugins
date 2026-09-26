@@ -97,9 +97,8 @@ export async function resolveDefaultBranch(
  * on the commit itself, which is the one layer a stale config cannot outrank.
  * Underneath, a repository this plugin never cloned falls back to whatever the
  * shell's own git is configured with — which is an identity rather than nothing
- * only where `exec` is backed by the computer plugin, whose workspace writes one
- * per container; see
- * {@link file://../computer/host/git-identity.ts}. `exec` is an arbitrary
+ * only where `exec` is backed by `/workspace`, whose object writes one per
+ * container; see {@link file://../workspace/git-identity.ts}. `exec` is an arbitrary
  * runner, so that is a property of a deployment, not of this plugin.
  *
  * Unchecked, like the config pins at the clone: git's identity is needed by the
@@ -124,13 +123,13 @@ export async function writeGitIdentity(
  *
  * The workspace outlives the task, so a clone target may already hold one —
  * where `git clone` fails with "destination path already exists and is not an
- * empty directory" and the round has to improvise from an error that reads like
+ * empty directory" and the model has to improvise from an error that reads like
  * a bug.
  *
  * The refusal on a dirty tree is the important half. Uncommitted changes there
  * are a *previous task's work* — possibly the thing a human is waiting on — and
  * silently `reset --hard`ing them away to make a fresh clone look clean is the
- * one outcome nobody could recover from. Refusing costs a round; discarding
+ * one outcome nobody could recover from. Refusing costs a tool call; discarding
  * costs the work.
  */
 export async function refreshCheckout({

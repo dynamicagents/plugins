@@ -15,14 +15,14 @@ import { UNSAFE_BRANCH } from "./url.js";
  */
 export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
   const refuse = (branch: string) =>
-    `"${branch}" is not a plain branch name — pass it as the subtask's report named it`;
+    `"${branch}" is not a plain branch name — pass it as the sub-agent's report named it`;
   const unsafe = (branch: string) =>
     branch === "" || UNSAFE_BRANCH.test(branch);
 
   return {
     repo_worktrees: tool({
       description:
-        "List the worktrees your writing subtasks committed in: each one's branch, whether a session is still working in it, and whether its commits are pushed. Pass `release` with a branch to give up its worktree once you have decided not to keep that work — unpushed commits in it are lost.",
+        "List the worktrees your writing sub-agents committed in: each one's branch, whether a session is still working in it, and whether its commits are pushed. Pass `release` with a branch to give up its worktree once you have decided not to keep that work — unpushed commits in it are lost.",
       inputSchema: z.object({
         release: z
           .string()
@@ -38,13 +38,13 @@ export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
 
     repo_worktree: tool({
       description:
-        "Point every repo tool and your file reads at the worktree holding a branch a writing subtask reported — to review its commits with repo_diff, test it, push it and open the pull request from there. Call with no branch to come back to your own checkout.",
+        "Point every repo tool and your file reads at the worktree holding a branch a writing sub-agent reported — to review its commits with repo_diff, test it, push it and open the pull request from there. Call with no branch to come back to your own checkout.",
       inputSchema: z.object({
         branch: z
           .string()
           .optional()
           .describe(
-            "The branch a subtask's report named, e.g. 'claude-coder/<task>/<n>'; omit to go back to your own checkout"
+            "The branch a sub-agent's report named, e.g. 'claude-coder/<task>/<n>'; omit to go back to your own checkout"
           )
       }),
       execute: async ({ branch }) => {

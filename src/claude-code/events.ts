@@ -1,4 +1,4 @@
-import type { ProgressEvent } from "@dynamicagents/core/subtasks";
+import type { NoteData } from "@dynamicagents/core/subagent";
 
 /**
  * `claude -p --output-format stream-json` on the wire, turned into things this
@@ -7,12 +7,13 @@ import type { ProgressEvent } from "@dynamicagents/core/subtasks";
  * ## Pure, and stateless on purpose
  *
  * Nothing here remembers anything between calls. That is not minimalism — it is
- * what makes the drain re-entrant. A Claude Code run is drained in bounded
- * windows across several durable chunks, and a chunk that starts on a fresh
- * isolate re-attaches with `getExec(id, { resume: "tail" })`, which replays. A
- * parser holding a cursor would hand back a different answer depending on which
- * isolate asked, and the difference would show up as duplicated or missing
- * progress in the parent's context rather than as an error.
+ * what makes the drain re-entrant. A drain interrupted by an eviction or a
+ * deploy re-attaches on a fresh isolate with `getExec(id, { resume: seq })`
+ * from the last sequence it stored, and whatever arrived after that store is
+ * read again. A parser holding a cursor would hand back a different answer
+ * depending on which isolate asked, and the difference would show up as
+ * duplicated or missing notes in the parent's transcript rather than as an
+ * error.
  *
  * So the caller owns the position and passes it in. See {@link toProgress}.
  *
@@ -487,8 +488,9 @@ const SAMPLE_MAX_CHARS = 200;
  * derived from it.** Not from the note's content, not from a clock, and not from
  * the Claude Code `uuid` — from position alone.
  *
- * The reason is replay. A chunk that dies mid-drain is retried by the Workflow,
- * the re-attach replays the tail, and the same assistant turn is parsed twice. A
+ * The reason is replay. A drain that dies mid-stream is resumed from the last
+ * stored sequence, whatever arrived after it is read again, and the same
+ * assistant turn is parsed twice. A
  * content-derived key would make two identical notes collide *by luck* (and two
  * genuinely repeated notes — "Running tests" twice — collide wrongly). A
  * clock-derived key would never collide, so every replay would re-post
@@ -498,8 +500,8 @@ const SAMPLE_MAX_CHARS = 200;
 export function toProgress(
   events: readonly ClaudeCodeEvent[],
   from: number
-): ProgressEvent[] {
-  const out: ProgressEvent[] = [];
+): NoteData[] {
+  const out: NoteData[] = [];
   let n = from;
 
   for (const event of events) {

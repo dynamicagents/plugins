@@ -1,5 +1,5 @@
 import type { InstallState } from "./install.js";
-import { humanMs } from "./render.js";
+import { humanMs } from "./format.js";
 
 /**
  * What a caller must not assume about a workspace, and how to say it.
@@ -19,9 +19,9 @@ import { humanMs } from "./render.js";
  *   A ceiling is a hard wall about the Durable Object, and the two are then told
  *   apart only by reading prose.
  * - Capacity must not travel through a channel gated by
- *   {@link file://./gate.ts needsDependencies}, or a full workspace says nothing
+ *   {@link file://../computer/gate.ts needsDependencies}, or a full workspace says nothing
  *   at all to `echo hi > file.txt` — the command whose write is being lost.
- * - "The tree is fine now", after a subagent installed by hand, has no honest
+ * - "The tree is fine now", after an agent installed by hand, has no honest
  *   spelling as a job record: fabricating a `done` rests on the presence of a
  *   `node_modules` directory, which the wreckage of the very install being
  *   overridden already satisfies.
@@ -61,7 +61,7 @@ export type WorkspaceAdvisory =
        * Reported rather than acted on, because its presence proves nothing in
        * either direction. A half-finished `npm ci` leaves the directory behind
        * with an incomplete tree, so treating existence as success hides the
-       * common failure outright; and a subagent that re-ran the install by hand
+       * common failure outright; and an agent that re-ran the install by hand
        * leaves a record the host cannot update, since the host cannot see an
        * install it did not start. Both look identical from here, so the reader
        * is told which way the ambiguity runs rather than being handed a guess.
@@ -371,7 +371,7 @@ export function deriveAdvisories(
 /**
  * Everything a session should know before it starts, or `undefined` for silence.
  *
- * The counterpart to {@link file://./gate.ts execGate}, for the reader that is a
+ * The counterpart to {@link file://../computer/gate.ts execGate}, for the reader that is a
  * whole run rather than one command. It cannot be blocked and does not need to
  * be: it can install dependencies itself, and the only thing it must not do is
  * work silently against a workspace that is not what it assumes.

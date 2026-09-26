@@ -1,7 +1,13 @@
+import { action, type Action } from "@cloudflare/think";
 import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
-import { FORGE_PAGE_SIZE } from "./context.js";
+import {
+  actionTask,
+  FORGE_ACTION_TIMEOUT_MS,
+  FORGE_PAGE_SIZE,
+  sha256
+} from "./context.js";
 import type { RepoContext } from "./context.js";
 
 /** The forge's REST surface: pull requests, issues and their comments. */
@@ -214,23 +220,42 @@ export function forgeTools(ctx: RepoContext): ToolSet {
           ].join("\n")
         );
       }
-    }),
+    })
+  };
+}
 
-    repo_pr_comment: tool({
+/**
+ * The forge writes a recovered turn must not repeat, as Think actions.
+ *
+ * Every failure is thrown rather than returned. Think settles what an action
+ * returns and replays it for the life of the key, so a refusal returned as a
+ * string would answer every retry in the task; a throw releases the key, and
+ * the retry runs.
+ */
+export function forgeActions(ctx: RepoContext): Record<string, Action> {
+  const { bounded, forge, forgeRepo } = ctx;
+
+  const commentInput = z.object({
+    dir: z.string().describe("The checkout directory"),
+    number: z
+      .number()
+      .int()
+      .positive()
+      .describe("Pull request or issue number"),
+    body: z.string().describe("The comment, as markdown")
+  });
+
+  return {
+    repo_pr_comment: action({
       description:
-        "Leave a comment on a pull request or issue in the repository you have checked out. Use this to report what you did, or to answer a review — not to announce work you have not finished.",
-      inputSchema: z.object({
-        dir: z.string().describe("The checkout directory"),
-        number: z
-          .number()
-          .int()
-          .positive()
-          .describe("Pull request or issue number"),
-        body: z.string().describe("The comment, as markdown")
-      }),
+        "Leave a comment on a pull request or issue in the repository you have checked out. Use this to report what you did, or to answer a review — not to announce work you have not finished. The same comment twice in one task is posted once.",
+      inputSchema: commentInput,
+      timeoutMs: FORGE_ACTION_TIMEOUT_MS,
+      idempotencyKey: async ({ input, ctx: turn }) =>
+        `${actionTask(turn)}:${input.dir}#${input.number}:comment:${await sha256(input.body)}`,
       execute: async ({ dir, number, body }) => {
         const target = await forgeRepo(dir);
-        if ("refusal" in target) return target.refusal;
+        if ("refusal" in target) throw new Error(target.refusal);
         const { owner, repo } = target;
 
         const posted = await forge(
@@ -240,11 +265,13 @@ export function forgeTools(ctx: RepoContext): ToolSet {
         );
         if (!posted.ok)
           // The same hazard `repo_open_pr` names, for the same reason: a POST
-          // whose answer never arrived may still have been received, and a blind
-          // retry is how one comment becomes two.
-          return bounded(
-            `${posted.message}\nIf this was a timeout rather than a rejection the ` +
-              `comment may exist anyway — read it back with repo_issue_view before retrying.`
+          // whose answer never arrived may still have been received. The key
+          // is released, so a retry posts again.
+          throw new Error(
+            bounded(
+              `${posted.message}\nIf this was a timeout rather than a rejection the ` +
+                `comment may exist anyway — read it back with repo_issue_view before retrying.`
+            )
           );
         const data = posted.data as { html_url?: string };
         return data.html_url ?? `commented on #${number}`;

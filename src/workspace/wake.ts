@@ -18,7 +18,7 @@ export type WorkspaceWakeHandlers = {
   installRun: () => Promise<void>;
   installWatch: () => Promise<void>;
   idleReclaim: () => Promise<void>;
-  /** Start a cold container before a command needs it — see `./workspace.ts`. */
+  /** Start a cold container before a command needs it — see `./object.ts`. */
   containerWarm: () => Promise<void>;
   // Carries the same count as `syncRetry`, because its deferral is the same
   // wait: this deadline holds a container open while an outstanding pull is
