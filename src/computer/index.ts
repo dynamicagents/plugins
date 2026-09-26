@@ -8,7 +8,7 @@ import {
   workspaceNameFromRuntime,
   type WorkspaceHost
 } from "./open.js";
-import { isComputerWorkspace } from "./proxy.js";
+import { workspaceRoute } from "./proxy.js";
 import { cancelledNote } from "./render.js";
 import { computerContext, DEFAULT_CWD, DEFAULT_TIMEOUT_MS } from "./context.js";
 import { withShell } from "./shell.js";
@@ -366,14 +366,21 @@ const CONTEXT = [
   "`.git` is off limits to these tools, and searches and recursive listings skip it. It is git's internal state — reading it tells you less than the repository tools do, and writing it corrupts the checkout. Repository work goes through the repo tools (`repo_status`, `repo_diff`, `repo_commit`, `repo_push`); if a task needs git state you cannot get that way, say so in your result rather than reaching into `.git` yourself."
 ].join("\n");
 
+/**
+ * The container plugin. Its tools reach the workspace through the agent's own
+ * `computerWorkspace` — the one Think's `read` and `write` use — so the two can
+ * never resolve different ones. `config` answers everything else: the shell,
+ * the limits, the environment.
+ */
 export function computer(config: ComputerConfig): AgentPlugin {
   return definePlugin({
     name: "computer",
 
     tools: (ctx) => {
       // Here, not in `execute`: the start check builds every plugin's tools,
-      // so the split fails the start rather than a turn.
-      if (!isComputerWorkspace(ctx.workspace()))
+      // so a missing workspace fails the start rather than a turn.
+      const route = workspaceRoute(ctx.workspace());
+      if (!route)
         throw new PluginSetupError(
           `plugin "computer" runs \`bash\` in a container, but ${ctx.agentName}'s ` +
             "workspace is not that container's, so Think's `read` and `write` " +
@@ -385,10 +392,7 @@ export function computer(config: ComputerConfig): AgentPlugin {
       // sub-agent's comes from `runtime()`, see {@link WORKSPACE_RUNTIME_KEY} —
       // and a stale stub would silently route a second caller's commands into
       // the first caller's files.
-      const nameOf = () =>
-        workspaceNameFromRuntime(ctx.runtime()) ?? config.workspaceName();
-      const host = () =>
-        config.binding.get(config.binding.idFromName(nameOf()));
+      const host = () => route.host(route.name());
 
       return buildComputerTools(
         () => openWorkspace(host()),
@@ -398,7 +402,7 @@ export function computer(config: ComputerConfig): AgentPlugin {
         // two places.
         () => host().advisories(),
         () => openWorkspaceFs(host()),
-        nameOf
+        route.name
       );
     },
 

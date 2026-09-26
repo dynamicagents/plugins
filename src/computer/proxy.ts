@@ -20,7 +20,9 @@ import type { ComputerConfig } from "./index.js";
  * override workspace = computerWorkspace(config, () => this.pluginContext().runtime());
  * ```
  *
- * and `computer(config).tools(ctx)` refuses to start without it.
+ * and `computer(config).tools(ctx)` refuses to start without it — and reaches
+ * the workspace through it, so the tools and Think's file tools cannot resolve
+ * two different ones.
  *
  * Built on the workspace's own filesystem, not on `@cloudflare/computer`'s
  * Think adapter: that one's `glob` and `readDir` read every entry, and its
@@ -28,20 +30,34 @@ import type { ComputerConfig } from "./index.js";
  */
 
 /**
- * The brand {@link isComputerWorkspace} reads. `Symbol.for`, so a second copy
- * of this module in one bundle still recognises the first's workspaces.
+ * Where a {@link computerWorkspace} sends each call, carried on it under
+ * {@link ROUTE}. `computer()`'s tools route through this rather than through
+ * their own config, which is what makes a workspace built from another config,
+ * or without its runtime, a wrong workspace for both rather than a split.
  */
-const BRAND = Symbol.for("@dynamicagents/plugins/computer:workspace");
+export interface WorkspaceRoute {
+  /** The workspace the running turn names. Read per call. */
+  name(): string;
+  host(name: string): DurableObjectStub<WorkspaceHost>;
+}
+
+/**
+ * The key the route is carried under. `Symbol.for`, so a second copy of this
+ * module in one bundle still recognises the first's workspaces.
+ */
+const ROUTE = Symbol.for("@dynamicagents/plugins/computer:workspace");
 
 type FileInfo = Awaited<ReturnType<WorkspaceLike["glob"]>>[number];
 
+/** The route of a workspace {@link computerWorkspace} built, or `undefined`. */
+export function workspaceRoute(workspace: unknown): WorkspaceRoute | undefined {
+  if (typeof workspace !== "object" || workspace === null) return undefined;
+  return (workspace as Record<symbol, WorkspaceRoute | undefined>)[ROUTE];
+}
+
 /** Whether `workspace` is one {@link computerWorkspace} built. */
 export function isComputerWorkspace(workspace: unknown): boolean {
-  return (
-    typeof workspace === "object" &&
-    workspace !== null &&
-    (workspace as Record<symbol, unknown>)[BRAND] === true
-  );
+  return workspaceRoute(workspace) !== undefined;
 }
 
 /**
@@ -231,13 +247,18 @@ export function computerWorkspace(
     mkdir: (path: string, opts?: { recursive?: boolean }) =>
       withWritableFs(path, "write", (fs) => fs.mkdir(path, opts)),
 
+    // Locked too: a delete landing between an edit's read and its write would
+    // be undone by the write, and both would report success.
     rm: (path: string, opts?: { recursive?: boolean; force?: boolean }) =>
-      withWritableFs(path, "delete", (fs) => fs.rm(path, opts))
+      withWritableFs(path, "delete", (fs, name) =>
+        withFileLock(name, path, () => fs.rm(path, opts))
+      )
 
     // No `writeFileBytes`. Think writes through it on its own account —
     // evicted media, projected skills — and none of that belongs in a
     // repository's checkout. Without it Think skips both, with a warning.
   };
-  Object.defineProperty(workspace, BRAND, { value: true });
+  const route: WorkspaceRoute = { name: named, host };
+  Object.defineProperty(workspace, ROUTE, { value: route });
   return workspace as WorkspaceLike;
 }

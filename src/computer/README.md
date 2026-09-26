@@ -37,7 +37,8 @@ Think's `read`, `write`, `edit` and `delete` work on whatever the agent's
 workspace would run `bash` in the container and `write` in its own SQLite, and
 nothing would say so. So the agent sets `workspace = computerWorkspace(config, …)`,
 and the plugin **refuses to start** on any other — a `PluginSetupError` naming what
-to set.
+to set. Its tools then reach the container through that workspace rather than
+through their own config, so `bash` and Think's `write` always resolve the same one.
 
 `computerWorkspace` reads the workspace object's filesystem directly, without
 starting a container. Every call resolves the workspace the running turn names, so a

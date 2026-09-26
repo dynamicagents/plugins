@@ -1,13 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { WorkspaceClient } from "@cloudflare/computer";
 import {
   buildComputerTools,
+  computer,
   computerWorkspace,
   isComputerWorkspace,
   WORKSPACE_RUNTIME_KEY,
   type ComputerConfig,
   type WorkspaceAdvisory
 } from "./index.js";
+import { testPluginContext } from "../../test/helpers.js";
 
 /**
  * The container's workspace as Think's `read`, `write` and `delete` see it.
@@ -28,17 +30,20 @@ interface Seen {
 function fake(
   seed: Record<string, string> = {},
   advisories: readonly WorkspaceAdvisory[] = [],
-  /** Hold every `readFile` until this settles — for the lock spec. */
-  readGate?: Promise<void>
+  /**
+   * Hold the first `writeFile` until this settles — an edit's write, caught
+   * between its read and its landing, which is where the lock specs look.
+   */
+  holdFirstWrite?: Promise<void>
 ) {
   const files = new Map(Object.entries(seed));
   const seen: Seen = { opened: [], finds: [], readdirs: [] };
+  const writes = { held: false };
   const missing = (path: string) =>
     new Error(`ENOENT: no such file or directory, open '${path}'`);
 
   const fs = {
     readFile: async (path: string, encoding?: "utf8") => {
-      await readGate;
       const content = files.get(path);
       if (content === undefined) throw missing(path);
       return encoding === "utf8" ? content : new Blob([content]).stream();
@@ -74,6 +79,10 @@ function fake(
       return [{ path: `${dir}/a.ts`, type: "file" as const }];
     },
     writeFile: async (path: string, content: string) => {
+      if (holdFirstWrite && !writes.held) {
+        writes.held = true;
+        await holdFirstWrite;
+      }
       files.set(path, content);
     },
     mkdir: async () => undefined,
@@ -102,7 +111,7 @@ function fake(
     binding,
     workspaceName: () => "caller|owner/repo"
   };
-  return { config, files, seen, fs };
+  return { config, files, seen, fs, writes };
 }
 
 describe("computerWorkspace", () => {
@@ -267,15 +276,24 @@ describe("computerWorkspace", () => {
 
   /**
    * The `edit` tool holds the file's lock across its read and its write, and a
-   * `write` through the workspace takes the same lock — so it lands after the
-   * edit rather than between the edit's read and the edit's write, where the
-   * edit would overwrite it.
+   * write or a delete through the workspace takes the same lock — so it lands
+   * after the edit, never between the edit's read and its write, where the
+   * edit's write would undo it and both would report success.
+   *
+   * The edit is caught with its write held, and the other call given time to
+   * land: unlocked, it would, before the edit's write.
    */
-  it("never lands a write inside an edit of the same file", async () => {
+  async function raceAnEdit(
+    other: (workspace: ReturnType<typeof computerWorkspace>) => Promise<void>
+  ) {
     const path = "/workspace/repo/a.ts";
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
-    const { config, files, fs } = fake({ [path]: "const a = 1;\n" }, [], held);
+    const { config, files, fs, writes } = fake(
+      { [path]: "const a = 1;\n" },
+      [],
+      held
+    );
     const client = async () =>
       ({ fs, [Symbol.dispose]: () => {} }) as unknown as WorkspaceClient;
     const tools = buildComputerTools(client, config, undefined, client, () =>
@@ -285,11 +303,54 @@ describe("computerWorkspace", () => {
     const editing = (
       tools.edit!.execute as (i: unknown, o: unknown) => Promise<string>
     )({ path, old_string: "1", new_string: "2" }, {});
-    const writing = computerWorkspace(config).writeFile(path, "rewritten\n");
+    await vi.waitFor(() => expect(writes.held).toBe(true));
+    const racing = other(computerWorkspace(config));
+    await new Promise((resolve) => setTimeout(resolve, 20));
     release();
-    await Promise.all([editing, writing]);
+    await Promise.all([editing, racing]);
+    return files.get(path);
+  }
 
-    expect(files.get(path)).toBe("rewritten\n");
+  it("never lands a write inside an edit of the same file", async () => {
+    expect(
+      await raceAnEdit((ws) => ws.writeFile("/workspace/repo/a.ts", "new\n"))
+    ).toBe("new\n");
+  });
+
+  it("never lands a delete inside an edit of the same file", async () => {
+    expect(
+      await raceAnEdit((ws) => ws.rm("/workspace/repo/a.ts"))
+    ).toBeUndefined();
+  });
+});
+
+/**
+ * `computer()`'s tools reach the workspace through the agent's own, not their
+ * own config. A workspace built from another config, or without the runtime a
+ * sub-agent needs, is then the wrong workspace for both — never one tree for
+ * `bash` and another for Think's `write`.
+ */
+describe("the tools and the workspace", () => {
+  it("reach the one workspace the agent's workspace names", async () => {
+    const theirs = fake({ "/workspace/repo/a.ts": "x" });
+    const ours = fake();
+    const runtime = { [WORKSPACE_RUNTIME_KEY]: "caller|owner/repo#w1" };
+    const workspace = computerWorkspace(theirs.config, () => runtime);
+    const tools = computer(ours.config).tools!(
+      testPluginContext({ workspace: () => workspace })
+    );
+
+    await (tools.list!.execute as (i: unknown, o: unknown) => Promise<string>)(
+      { path: "/workspace/repo" },
+      {}
+    );
+    await workspace.readFile("/workspace/repo/a.ts");
+
+    expect(theirs.seen.opened).toEqual([
+      "caller|owner/repo#w1",
+      "caller|owner/repo#w1"
+    ]);
+    expect(ours.seen.opened).toEqual([]);
   });
 });
 

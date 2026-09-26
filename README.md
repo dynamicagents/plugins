@@ -94,7 +94,7 @@ export function scraper(config: { apiKey: () => string }): AgentPlugin {
 }
 ```
 
-Four rules the whole design rests on:
+The rules the whole design rests on:
 
 - **Never name a consumer's `Env`.** It is an ambient interface `wrangler types` generates
   into _their_ app. Take bindings and secrets as config, which is also the only thing that
