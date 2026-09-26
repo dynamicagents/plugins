@@ -10,7 +10,7 @@ import {
  * The throwaway copy a reading session works in.
  *
  * A reading session shares its parent's container, because that container
- * already holds the checkout and its dependency trees — so a reading subtask
+ * already holds the checkout and its dependency trees — so a reading run
  * costs no clone, no install and no container of its own. What it must not share
  * is the **tree**: the parent's tools and every other reading session read that
  * checkout at the same time, and the container's edits under the workspace mount
@@ -68,7 +68,7 @@ export const WORKSPACE_MOUNT = "/workspace";
  * The copy one session works in: a pure function of its exec id.
  *
  * Derived rather than stored, so `stop` can close the copy of a session whose
- * drain nobody is holding, and a retried chunk finds the copy the first attempt
+ * drain nobody is holding, and a recovered turn finds the copy the first attempt
  * made instead of building a second one.
  */
 export function copyDirFor(execId: string): string {
@@ -81,7 +81,7 @@ export function copyDirFor(execId: string): string {
  *
  * A session cannot outlive `timeoutMs` — the container runtime enforces it — so a
  * copy older than that belongs to a session that has ended. The margin covers a
- * copy made at the end of one chunk and started on at the beginning of the next.
+ * copy made just before a turn was cut and started on once it was recovered.
  */
 const SWEEP_MARGIN_MIN = 15;
 
@@ -279,7 +279,7 @@ async function runScript(
       timeoutMs
     });
   } catch (err) {
-    // A previous attempt at this chunk left it running. Waiting for that one is
+    // A turn cut before it finished left it running. Waiting for that one is
     // the only safe answer: two of these building one copy would each delete
     // what the other is making.
     if (!isExecBusy(err)) throw err;
@@ -312,7 +312,7 @@ async function runScript(
 /**
  * Make the copy one reading session works in, and say where it is.
  *
- * Idempotent: a retried chunk gets the copy the first attempt finished, and one
+ * Idempotent: a recovered turn gets the copy the first attempt finished, and one
  * the first attempt left half-built is rebuilt. Throws when no copy can be made —
  * the session must not fall back to the parent's tree, which is the one thing
  * this exists to prevent.

@@ -1,5 +1,5 @@
 import type { Workspace } from "@cloudflare/computer";
-import type { Deadline } from "@dynamicagents/core/alarm";
+import type { Deadline } from "./alarm/index.js";
 
 /**
  * The host's half of syncing: moving what the container wrote into the object.

@@ -53,7 +53,7 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
           .string()
           .optional()
           .describe(
-            "Review what this checkout's own commits add since a ref — e.g. 'origin/main' — the other direction from `ref`. For a branch a subtask committed in a worktree you have switched into."
+            "Review what this checkout's own commits add since a ref — e.g. 'origin/main' — the other direction from `ref`. For a branch a sub-agent committed in a worktree you have switched into."
           ),
         stat: z
           .boolean()
@@ -139,7 +139,7 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
 
         // Checked rather than fired and forgotten. A failed `add` leaves the
         // index holding less than the model believes, and the commit that
-        // follows still succeeds — so the round reports a commit that quietly
+        // follows still succeeds — so the turn reports a commit that quietly
         // does not contain the change.
         const staged = await plain("add -A", dir);
         if (!staged.success) {
@@ -285,7 +285,7 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         //
         // A branch level with the default branch means the commit went
         // somewhere else, or was never made. Pushing it succeeds, `repo_open_pr`
-        // opens an empty pull request, and the round reports a URL as if the
+        // opens an empty pull request, and the turn reports a URL as if the
         // work had landed — the one outcome worse than an error.
         //
         // The guard is skipped only when there is no baseline to compare
@@ -356,7 +356,7 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         }
 
         // What `--set-upstream` would do as a side effect of the push, written
-        // here because the push happens on the host's side: a subagent reaching
+        // here because the push happens on the host's side: a sub-agent reaching
         // for a bare `git push` in the shell should still find the branch
         // tracking something.
         //

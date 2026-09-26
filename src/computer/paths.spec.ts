@@ -52,41 +52,41 @@ describe("WALK_SKIPS", () => {
 
 describe("guardPath", () => {
   it("clears an ordinary path", () => {
-    expect(guardPath("/workspace/repo/src/a.ts", "sb_read")).toBeUndefined();
+    expect(guardPath("/workspace/repo/src/a.ts", "read")).toBeUndefined();
   });
 
   /**
    * The tree is on the container's disk, so the workspace these tools read has
-   * nothing there. Unlike `.git`, `sb_exec` is the right route.
+   * nothing there. Unlike `.git`, `bash` is the right route.
    */
-  it("routes a node_modules path to sb_exec", () => {
+  it("routes a node_modules path to bash", () => {
     const note = guardPath(
       "/workspace/repo/node_modules/zod/index.js",
-      "sb_read"
+      "read"
     )!;
-    expect(note).toContain("sb_exec");
+    expect(note).toContain("bash");
     expect(
-      guardPath("/workspace/repo/src/node_modules_old/a.ts", "sb_read")
+      guardPath("/workspace/repo/src/node_modules_old/a.ts", "read")
     ).toBeUndefined();
   });
 
   /**
    * `.git` is present and refused, so the note names where repository work
-   * belongs and, emphatically, does *not* offer `sb_exec` — which would hand
+   * belongs and, emphatically, does *not* offer `bash` — which would hand
    * back the exact capability the refusal withholds, in the one place the model
    * is looking for a way around it.
    */
-  it("redirects a .git path to the repo tools, and never to sb_exec", () => {
-    const note = guardPath("/workspace/repo/.git/config", "sb_write")!;
+  it("redirects a .git path to the repo tools, and never to bash", () => {
+    const note = guardPath("/workspace/repo/.git/config", "write")!;
     expect(note).toContain("repo_status");
-    expect(note).not.toContain("sb_exec");
+    expect(note).not.toContain("bash");
   });
 
   /**
-   * The verb is the calling tool's own name. A refusal that says "sb_read cannot
-   * see it" while the model called `sb_grep` reads like a bug in the plugin.
+   * The verb is the calling tool's own name. A refusal that says "read cannot
+   * see it" while the model called `grep` reads like a bug in the plugin.
    */
   it("names the tool that was called", () => {
-    expect(guardPath("/workspace/repo/.git", "sb_grep")).toContain("sb_grep");
+    expect(guardPath("/workspace/repo/.git", "grep")).toContain("grep");
   });
 });

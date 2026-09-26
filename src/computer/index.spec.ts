@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import type { ToolSet } from "ai";
 import type { WorkspaceClient } from "@cloudflare/computer";
+import { assemblePlugins, PluginSetupError } from "@dynamicagents/core";
 import {
   buildComputerTools,
   computer,
+  computerWorkspace,
   withShell,
   withShellTranscript,
   workspaceNameFromRuntime,
@@ -11,6 +13,7 @@ import {
   type ComputerConfig,
   type WorkspaceAdvisory
 } from "./index.js";
+import { testPluginContext } from "../../test/helpers.js";
 
 /** What the stub records off an `fs.grep` call. `@cloudflare/computer` declares
  * these but does not re-export them, so the shape is restated here. */
@@ -85,9 +88,8 @@ function stub(
       /**
        * Honours the byte range, because that is the half of the contract worth
        * asserting. A stub that ignored `byteOffset`/`byteLength` and returned the
-       * whole file would pass every test below while `sb_read` shipped the entire
-       * file across the boundary — the exact failure the bounded read exists to
-       * prevent, invisible to its own tests.
+       * whole file would pass every test below while a read shipped more of the
+       * file across the boundary than it asked for.
        */
       readFile: async (
         path: string,
@@ -264,7 +266,7 @@ const run = (tools: ToolSet, name: string, input: unknown) =>
  * one for as long as it existed.
  */
 /**
- * What `sb_exec` promises the model, which depends on whether a shell was
+ * What `bash` promises the model, which depends on whether a shell was
  * configured.
  *
  * Two of the guarantees are the shell's, not this plugin's: the interleaved
@@ -274,9 +276,9 @@ const run = (tools: ToolSet, name: string, input: unknown) =>
  * documents at length — a model that cannot trust a piped exit code re-runs the
  * whole gate to get one.
  */
-describe("what sb_exec claims for itself", () => {
+describe("what bash claims for itself", () => {
   const describeOf = (shell?: string) =>
-    buildComputerTools(stub().workspace, { ...config, shell }).sb_exec!
+    buildComputerTools(stub().workspace, { ...config, shell }).bash!
       .description!;
 
   it("promises a transcript and first-failure only with a shell", () => {
@@ -374,22 +376,21 @@ describe("the dependency tree", () => {
 
   /**
    * The tree is on the container's disk, so the workspace these tools read has
-   * nothing there. Each file tool refuses it and names `sb_exec`, which reaches
+   * nothing there. Each file tool refuses it and names `bash`, which reaches
    * it; a write would land in the workspace, where nothing would ever read it.
+   * The workspace's own methods refuse it too — see `./proxy.spec.ts`.
    */
-  it("refuses it in every file tool, routing to sb_exec", async () => {
+  it("refuses it in every file tool, routing to bash", async () => {
     const { workspace, files } = stub({ [dep]: "export const z = 1;\n" });
     const tools = buildComputerTools(workspace, config);
 
     for (const [name, input] of [
-      ["sb_read", { path: dep }],
-      ["sb_write", { path: dep, content: "x" }],
-      ["sb_edit", { path: dep, find: "z", replace: "y" }],
-      ["sb_ls", { path: "/workspace/repo/node_modules" }],
-      ["sb_grep", { query: "z", path: "/workspace/repo/node_modules" }],
-      ["sb_exists", { path: dep }]
+      ["edit", { path: dep, old_string: "z", new_string: "y" }],
+      ["list", { path: "/workspace/repo/node_modules" }],
+      ["find", { path: "/workspace/repo/node_modules" }],
+      ["grep", { query: "z", path: "/workspace/repo/node_modules" }]
     ] as const) {
-      expect(await run(tools, name, input)).toContain("sb_exec");
+      expect(await run(tools, name, input)).toContain("bash");
     }
     expect(files.get(dep)).toBe("export const z = 1;\n");
   });
@@ -399,37 +400,34 @@ describe("the dependency tree", () => {
       "/workspace/repo/src/a.ts": "const marker = 1;\n",
       [dep]: "const marker = 2;\n"
     });
-    const out = await run(buildComputerTools(workspace, config), "sb_grep", {
+    const out = await run(buildComputerTools(workspace, config), "grep", {
       query: "marker"
     });
     expect(out).toContain("/workspace/repo/src/a.ts");
     expect(out).not.toContain("node_modules");
   });
 
-  it("steps over it in a recursive listing", async () => {
+  it("steps over it in a subtree listing", async () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_ls", {
-      path: "/workspace/repo",
-      recursive: true
-    });
+    const out = await run(tools, "find", { path: "/workspace/repo" });
     expect(out).toContain("/workspace/repo/src/a.ts");
     expect(out).not.toContain("node_modules");
     expect(out).not.toContain(".git/");
   });
 });
 
-describe("sb_edit", () => {
+describe("edit", () => {
   const path = "/workspace/repo/a.ts";
 
   it("replaces a unique string", async () => {
     const { workspace, files } = stub({ [path]: "const a = 1;\n" });
     const tools = buildComputerTools(workspace, config);
 
-    expect(await run(tools, "sb_edit", { path, find: "1", replace: "2" })).toBe(
-      `edited ${path}`
-    );
+    expect(
+      await run(tools, "edit", { path, old_string: "1", new_string: "2" })
+    ).toBe(`edited ${path}`);
     expect(files.get(path)).toBe("const a = 2;\n");
   });
 
@@ -441,13 +439,13 @@ describe("sb_edit", () => {
     const tools = buildComputerTools(workspace, config);
 
     await Promise.all([
-      run(tools, "sb_edit", { path, find: "a = 1", replace: "a = 2" }),
-      run(tools, "sb_edit", { path, find: "b = 1", replace: "b = 2" })
+      run(tools, "edit", { path, old_string: "a = 1", new_string: "a = 2" }),
+      run(tools, "edit", { path, old_string: "b = 1", new_string: "b = 2" })
     ]);
     expect(files.get(path)).toBe("const a = 2;\nconst b = 2;\n");
   });
 
-  /** A parent and a subagent hold separate tool sets over one workspace. */
+  /** A parent and a sub-agent hold separate tool sets over one workspace. */
   it("keeps both edits across tool sets that share a workspace", async () => {
     const { workspace, files } = stub({
       [path]: "const a = 1;\nconst b = 1;\n"
@@ -469,8 +467,8 @@ describe("sb_edit", () => {
     );
 
     await Promise.all([
-      run(parent, "sb_edit", { path, find: "a = 1", replace: "a = 2" }),
-      run(child, "sb_edit", { path, find: "b = 1", replace: "b = 2" })
+      run(parent, "edit", { path, old_string: "a = 1", new_string: "a = 2" }),
+      run(child, "edit", { path, old_string: "b = 1", new_string: "b = 2" })
     ]);
     expect(files.get(path)).toBe("const a = 2;\nconst b = 2;\n");
   });
@@ -494,16 +492,20 @@ describe("sb_edit", () => {
     const { workspace, files } = stub({ [path]: "const a = MARK;\n" });
     const tools = buildComputerTools(workspace, config);
 
-    expect(await run(tools, "sb_edit", { path, find: "MARK", replace })).toBe(
-      `edited ${path}`
-    );
+    expect(
+      await run(tools, "edit", {
+        path,
+        old_string: "MARK",
+        new_string: replace
+      })
+    ).toBe(`edited ${path}`);
     // The file's bytes, not the tool's answer: the defect this guards returns
     // "edited" either way.
     expect(files.get(path)).toBe(`const a = ${replace};\n`);
   });
 
   /**
-   * Refusing an ambiguous edit is the whole value of this tool over `sb_write`:
+   * Refusing an ambiguous edit is the whole value of this tool over `write`:
    * a silent first-match replace corrupts the file in a way that surfaces much
    * later, usually as a confusing test failure.
    */
@@ -512,7 +514,11 @@ describe("sb_edit", () => {
     const { workspace, files } = stub({ [path]: original });
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_edit", { path, find: "1", replace: "2" });
+    const out = await run(tools, "edit", {
+      path,
+      old_string: "1",
+      new_string: "2"
+    });
     expect(out).toContain("appears 2 times");
     expect(files.get(path)).toBe(original);
   });
@@ -522,7 +528,7 @@ describe("sb_edit", () => {
     const tools = buildComputerTools(workspace, config);
 
     expect(
-      await run(tools, "sb_edit", { path, find: "nope", replace: "x" })
+      await run(tools, "edit", { path, old_string: "nope", new_string: "x" })
     ).toContain("no match");
   });
 
@@ -538,71 +544,30 @@ describe("sb_edit", () => {
    * destructive — one character reports "no match", more than one reports one
    * occurrence per character.
    */
-  it("refuses an empty find at the schema, before any of that can happen", () => {
+  it("refuses an empty old_string at the schema, before any of that can happen", () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
-    const schema = tools.sb_edit!.inputSchema as {
+    const schema = tools.edit!.inputSchema as {
       safeParse: (v: unknown) => { success: boolean };
     };
 
-    expect(schema.safeParse({ path, find: "", replace: "x" }).success).toBe(
-      false
-    );
-    expect(schema.safeParse({ path, find: "a", replace: "x" }).success).toBe(
-      true
-    );
+    expect(
+      schema.safeParse({ path, old_string: "", new_string: "x" }).success
+    ).toBe(false);
+    expect(
+      schema.safeParse({ path, old_string: "a", new_string: "x" }).success
+    ).toBe(true);
   });
 });
 
-/**
- * The budget is enforced where the bytes are read, not after they have all
- * arrived in the isolate — which is the whole point of the range-addressable
- * read the runtime offers. The stub honours the range, so a regression to
- * `readFile(path, "utf8")` fails these rather than passing them with the whole
- * file in the isolate.
- */
-describe("sb_read", () => {
-  const path = "/workspace/repo/big.log";
-
-  it("returns a small file whole", async () => {
-    const { workspace } = stub({ [path]: "const a = 1;\n" });
-    const tools = buildComputerTools(workspace, config);
-
-    expect(await run(tools, "sb_read", { path })).toBe("const a = 1;\n");
-  });
-
-  it("keeps both ends of a large one and says what it dropped", async () => {
-    const body = "HEAD" + "x".repeat(4_000) + "TAIL";
-    const { workspace } = stub({ [path]: body });
-    const tools = buildComputerTools(workspace, {
-      ...config,
-      maxOutputChars: 400
-    });
-
-    const out = await run(tools, "sb_read", { path });
-    expect(out.startsWith("HEAD")).toBe(true);
-    expect(out.endsWith("TAIL")).toBe(true);
-    expect(out).toContain("bytes omitted from the middle");
-    // The ceiling is real, not advisory: the whole file never lands here.
-    expect(out.length).toBeLessThanOrEqual(400);
-  });
-
-  it("still reports a missing file rather than throwing", async () => {
-    const { workspace } = stub();
-    const tools = buildComputerTools(workspace, config);
-
-    expect(await run(tools, "sb_read", { path })).toContain("error reading");
-  });
-});
-
-describe("sb_ls", () => {
+describe("list and find", () => {
   const path = "/workspace/repo";
 
   it("bounds the listing at the source instead of trimming the rendered text", async () => {
     const { workspace, readdirs } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    await run(tools, "sb_ls", { path });
+    await run(tools, "list", { path });
     // One over the ceiling, which is how the tool detects a cut listing without
     // asking twice.
     expect(readdirs[0]?.limit).toBe(1001);
@@ -612,7 +577,7 @@ describe("sb_ls", () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_ls", { path });
+    const out = await run(tools, "list", { path });
     expect(out).toContain("src/");
     expect(out).toContain("package.json\t2.0 KB");
   });
@@ -624,11 +589,11 @@ describe("sb_ls", () => {
    * arm above. `find` takes a limit, so asserting one arrived is asserting the
    * walk stops early.
    */
-  it("bounds a recursive listing at the source rather than scanning the whole subtree", async () => {
+  it("bounds a subtree listing at the source rather than scanning the whole subtree", async () => {
     const { workspace, finds, calls } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    await run(tools, "sb_ls", { path, recursive: true });
+    await run(tools, "find", { path });
 
     expect(finds[0]?.limit).toBe(1001);
     // Whole-subtree, so no pattern — but bounded, which `ls` never was.
@@ -636,23 +601,21 @@ describe("sb_ls", () => {
     expect(calls.ls).toBe(0);
   });
 
-  it("finds files by glob without spending a second tool on it", async () => {
+  it("finds files by glob with one bounded walk", async () => {
     const { workspace, finds, readdirs } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    await run(tools, "sb_ls", { path, pattern: "**/*.ts" });
+    await run(tools, "find", { path, pattern: "**/*.ts" });
 
     expect(finds[0]).toMatchObject({ dir: path, pattern: "**/*.ts" });
-    // A pattern searches the subtree on its own; `recursive` is not needed and
-    // the one-level read must not run.
     expect(readdirs).toHaveLength(0);
   });
 
-  it("marks directories in a recursive listing the way the one-level listing does", async () => {
+  it("marks directories in a subtree listing the way the one-level listing does", async () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_ls", { path, recursive: true });
+    const out = await run(tools, "find", { path });
     expect(out).toContain(`${path}/src/`);
     expect(out).toContain(`${path}/src/a.ts`);
   });
@@ -665,7 +628,7 @@ describe("sb_ls", () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_ls", { path, pattern: "**/*.rs" });
+    const out = await run(tools, "find", { path, pattern: "**/*.rs" });
     expect(out).toContain("**/*.rs");
     expect(out).not.toContain("is empty");
   });
@@ -675,12 +638,12 @@ describe("sb_ls", () => {
  * Search that does not need the container.
  *
  * That is the reason this tool exists rather than leaving the model on
- * `sb_exec("grep -rn …")`: it reads the durable workspace, so it answers during
+ * `bash("grep -rn …")`: it reads the durable workspace, so it answers during
  * exactly the window — container being replaced, install still running — when the
  * shell cannot. The bound at the source is the other half, since `.git` is in the
  * workspace and an unbounded search reads every loose object before answering.
  */
-describe("sb_grep", () => {
+describe("grep", () => {
   const path = "/workspace/repo/a.ts";
   const seed = {
     [path]: "import { z } from 'zod';\nconst a = 1;\nconst b = 2;\n"
@@ -690,7 +653,7 @@ describe("sb_grep", () => {
     const { workspace, greps } = stub(seed);
     const tools = buildComputerTools(workspace, config);
 
-    await run(tools, "sb_grep", { query: "const" });
+    await run(tools, "grep", { query: "const" });
     // One over the ceiling, so a cut result is detected without searching twice.
     expect(greps[0]?.limit).toBe(201);
   });
@@ -702,10 +665,10 @@ describe("sb_grep", () => {
       cwd: "/workspace"
     });
 
-    await run(tools, "sb_grep", { query: "const" });
+    await run(tools, "grep", { query: "const" });
     expect(greps[0]?.path).toBe("/workspace");
 
-    await run(tools, "sb_grep", { query: "const", path: "/workspace/repo" });
+    await run(tools, "grep", { query: "const", path: "/workspace/repo" });
     expect(greps[1]?.path).toBe("/workspace/repo");
   });
 
@@ -713,7 +676,7 @@ describe("sb_grep", () => {
     const { workspace } = stub(seed);
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_grep", { query: "const" });
+    const out = await run(tools, "grep", { query: "const" });
     expect(out).toContain(path);
     expect(out).toContain("  2: const a = 1;");
     expect(out).toContain("  3: const b = 2;");
@@ -721,14 +684,14 @@ describe("sb_grep", () => {
 
   /**
    * The query is a value here, not a fragment of a shell command — which is the
-   * quieter reason to prefer this over `sb_exec`. Through a shell it would pass
+   * quieter reason to prefer this over `bash`. Through a shell it would pass
    * `shellQuote` and be re-parsed on the way to `grep`.
    */
   it("forwards the search options rather than reinterpreting them", async () => {
     const { workspace, greps } = stub(seed);
     const tools = buildComputerTools(workspace, config);
 
-    await run(tools, "sb_grep", {
+    await run(tools, "grep", {
       query: "^const",
       include: "**/*.ts",
       regex: true,
@@ -749,7 +712,7 @@ describe("sb_grep", () => {
     const { workspace } = stub(seed);
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_grep", {
+    const out = await run(tools, "grep", {
       query: "nowhere",
       include: "**/*.ts"
     });
@@ -759,8 +722,8 @@ describe("sb_grep", () => {
   });
 
   /**
-   * The gate holds `sb_exec` while dependencies install. Holding this too would
-   * defeat the point — searching is precisely what a subagent can usefully do in
+   * The gate holds `bash` while dependencies install. Holding this too would
+   * defeat the point — searching is precisely what an agent can usefully do in
    * that window, and it needs no container to do it.
    */
   it("still searches while a dependency install is in flight", async () => {
@@ -777,7 +740,7 @@ describe("sb_grep", () => {
       ]
     );
 
-    const out = await run(tools, "sb_grep", { query: "const" });
+    const out = await run(tools, "grep", { query: "const" });
     expect(out).toContain("const a = 1;");
     expect(out).not.toContain("still installing");
   });
@@ -797,26 +760,17 @@ describe("paths inside .git", () => {
     const tools = buildComputerTools(workspace, config);
     const path = "/workspace/repo/.git/config";
 
-    for (const name of [
-      "sb_read",
-      "sb_ls",
-      "sb_exists",
-      "sb_grep",
-      "sb_edit"
-    ]) {
+    for (const name of ["list", "find", "grep", "edit"]) {
       const out = await run(tools, name, {
         path,
         query: "x",
-        find: "a",
-        replace: "b"
+        old_string: "a",
+        new_string: "b"
       });
       expect(out).toContain(".git");
       // A refusal with no destination gets worked around; this one has one.
       expect(out).toContain("repo_diff");
     }
-
-    const wrote = await run(tools, "sb_write", { path, content: "x" });
-    expect(wrote).toContain("repo_status");
     // The half that matters: nothing landed where a later read would find it.
     expect(files.has(path)).toBe(false);
   });
@@ -837,57 +791,45 @@ describe("paths inside .git", () => {
     };
     const tools = buildComputerTools(counted, config);
 
-    for (const name of [
-      "sb_read",
-      "sb_ls",
-      "sb_exists",
-      "sb_grep",
-      "sb_edit"
-    ]) {
+    for (const name of ["list", "find", "grep", "edit"]) {
       await run(tools, name, {
         path: "/workspace/repo/.git/config",
         query: "x",
-        find: "a",
-        replace: "b"
+        old_string: "a",
+        new_string: "b"
       });
     }
-    await run(tools, "sb_write", {
-      path: "/workspace/repo/.git/config",
-      content: "x"
-    });
     expect(opened).toBe(0);
 
     // The same tools do open it for a path they allow — otherwise this would
     // pass just as well against a build that never reached the workspace.
-    await run(tools, "sb_exists", { path: "/workspace/repo/src/a.ts" });
+    await run(tools, "list", { path: "/workspace/repo/src" });
     expect(opened).toBe(1);
   });
 
   /**
-   * The one prohibition this plugin must never soften. Naming `sb_exec` beside git
+   * The one prohibition this plugin must never soften. Naming `bash` beside git
    * would hand back the exact capability the refusal withholds, in the one place
    * the model is already looking for a way around it — and with the tool's own
    * authority behind it. Asserted against the rendered strings so a later
    * well-meaning rewording fails here rather than shipping.
    */
-  it("never offers sb_exec as a way to reach git", async () => {
+  it("never offers bash as a way to reach git", async () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    const refusal = await run(tools, "sb_read", {
-      path: "/workspace/repo/.git/HEAD"
+    const refusal = await run(tools, "list", {
+      path: "/workspace/repo/.git"
     });
-    expect(refusal).not.toContain("sb_exec");
+    expect(refusal).not.toContain("bash");
 
-    const capability = computer({
-      ...config,
-      binding: undefined as unknown as ComputerConfig["binding"]
-    }).capability!;
-    const gitLine = capability
+    const [block] = computer(config).context!;
+    const context = String(await block.provider!.get());
+    const gitLine = context
       .split("\n")
       .find((line) => line.includes("`.git`"))!;
     expect(gitLine).toBeDefined();
-    expect(gitLine).not.toContain("sb_exec");
+    expect(gitLine).not.toContain("bash");
     // And it still says where to go instead.
     expect(gitLine).toContain("repo_commit");
   });
@@ -899,18 +841,18 @@ describe("paths inside .git", () => {
     });
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_grep", { query: "fix the parser" });
+    const out = await run(tools, "grep", { query: "fix the parser" });
     expect(out).toContain("/workspace/repo/src/a.ts");
     expect(out).not.toContain("COMMIT_EDITMSG");
   });
 
   /**
-   * The round-1 bug this closes. At a repo root `.git` is walked *first* — `.`
+   * The bug this closes. At a repo root `.git` is walked *first* — `.`
    * sorts before alphanumerics — and holds thousands of objects, so an unfiltered
-   * page is a page of `.git` and nothing else: a recursive listing of a real
+   * page is a page of `.git` and nothing else: a subtree listing of a real
    * checkout returned 1000 object hashes and not one source file.
    */
-  it("does not let .git consume a whole recursive listing", async () => {
+  it("does not let .git consume a whole subtree listing", async () => {
     const root = "/workspace/repo";
     const crowded = [
       ...Array.from({ length: 1500 }, (_, i) => ({
@@ -922,7 +864,7 @@ describe("paths inside .git", () => {
     const { workspace } = stub({}, undefined, crowded);
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_ls", { path: root, recursive: true });
+    const out = await run(tools, "find", { path: root });
 
     expect(out).toContain(`${root}/src/a.ts`);
     expect(out).not.toContain("/.git/");
@@ -932,7 +874,7 @@ describe("paths inside .git", () => {
     const { workspace, finds } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    await run(tools, "sb_ls", { path: "/workspace/repo", recursive: true });
+    await run(tools, "find", { path: "/workspace/repo" });
 
     expect(finds[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
   });
@@ -946,10 +888,10 @@ describe("paths inside .git", () => {
     const tools = buildComputerTools(workspace, config);
     // The tool refuses…
     expect(
-      await run(tools, "sb_read", { path: "/workspace/repo/.git/HEAD" })
+      await run(tools, "list", { path: "/workspace/repo/.git" })
     ).toContain("repo_diff");
     // …while the shell path stays open, which is what /repo depends on.
-    await run(tools, "sb_exec", { command: "git rev-parse --git-dir" });
+    await run(tools, "bash", { command: "git rev-parse --git-dir" });
     expect(execs).toHaveLength(1);
   });
 });
@@ -957,8 +899,8 @@ describe("paths inside .git", () => {
 /**
  * Paging, and the bookkeeping that keeps it honest.
  *
- * `sb_ls` gets pages the store has already pruned, so its next offset is plain
- * `offset + shown`. `sb_grep` filters after the fetch, so its offset has to stay a
+ * `find` gets pages the store has already pruned, so its next offset is plain
+ * `offset + shown`. `grep` filters after the fetch, so its offset has to stay a
  * source coordinate — `offset + shown` would repeat or skip exactly when something
  * was dropped, and silently.
  */
@@ -978,7 +920,7 @@ describe("offsets that survive filtering", () => {
     const { workspace } = stub({}, undefined, entries);
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_ls", { path: root, recursive: true });
+    const out = await run(tools, "find", { path: root });
     const next = /offset: (\d+)/.exec(out)?.[1];
     expect(next).toBeDefined();
 
@@ -997,13 +939,9 @@ describe("offsets that survive filtering", () => {
     const { workspace } = stub({}, undefined, entries);
     const tools = buildComputerTools(workspace, config);
 
-    const first = await run(tools, "sb_ls", { path: root, recursive: true });
+    const first = await run(tools, "find", { path: root });
     const next = Number(/offset: (\d+)/.exec(first)![1]);
-    const second = await run(tools, "sb_ls", {
-      path: root,
-      recursive: true,
-      offset: next
-    });
+    const second = await run(tools, "find", { path: root, offset: next });
 
     const lastOfFirst = first
       .split("\n")
@@ -1028,7 +966,7 @@ describe("offsets that survive filtering", () => {
     const { workspace, greps } = stub(seed);
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_grep", { query: "hit", offset: 50 });
+    const out = await run(tools, "grep", { query: "hit", offset: 50 });
     expect(greps[0]?.offset).toBe(50);
     expect(out).toContain("offset:");
   });
@@ -1037,85 +975,12 @@ describe("offsets that survive filtering", () => {
     const { workspace, readdirs } = stub();
     const tools = buildComputerTools(workspace, config);
 
-    await run(tools, "sb_ls", { path: root, offset: 25 });
+    await run(tools, "list", { path: root, offset: 25 });
     expect(readdirs[0]).toMatchObject({ limit: 1001, offset: 25 });
   });
 });
 
-/**
- * Reaching a region the default read will not show.
- *
- * Without a window, a file whose middle was dropped has no route back to it but
- * `sb_exec` with `sed` — which needs a live container, the exact dependency
- * these tools exist to remove — and "narrow it" is the only advice left for a
- * capped 40,000-character minified line, where narrowing cannot possibly help.
- */
-describe("sb_read windows", () => {
-  const path = "/workspace/repo/bundle.js";
-  const body = "HEAD" + "x".repeat(4_000) + "TAIL";
-
-  it("returns the requested window and says where it landed", async () => {
-    const { workspace } = stub({ [path]: body });
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "sb_read", { path, offset: 100, length: 50 });
-
-    expect(out).toContain("--- bytes 100–150 of 4008");
-    // Enough to compute the next offset without a second call.
-    expect(out).toContain("3858 bytes after this");
-  });
-
-  it("does not middle-truncate a window the model chose", async () => {
-    const { workspace } = stub({ [path]: body });
-    const tools = buildComputerTools(workspace, {
-      ...config,
-      maxOutputChars: 400
-    });
-
-    const out = await run(tools, "sb_read", { path, offset: 0, length: 300 });
-    expect(out).not.toContain("omitted from the middle");
-  });
-
-  it("keeps the ceiling even when a larger length is asked for", async () => {
-    const { workspace } = stub({ [path]: body });
-    const tools = buildComputerTools(workspace, {
-      ...config,
-      maxOutputChars: 200
-    });
-
-    const out = await run(tools, "sb_read", {
-      path,
-      offset: 0,
-      length: 99_999
-    });
-    expect(out).toContain("--- bytes 0–200 of 4008");
-  });
-
-  it("says an offset ran off the end rather than returning nothing", async () => {
-    const { workspace } = stub({ [path]: body });
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "sb_read", { path, offset: 99_999 });
-    expect(out).toContain("past the end");
-  });
-
-  /** An unqualified read is unchanged — the middle-out guess is still the default. */
-  it("leaves the default read alone", async () => {
-    const { workspace } = stub({ [path]: body });
-    const tools = buildComputerTools(workspace, {
-      ...config,
-      maxOutputChars: 400
-    });
-
-    const out = await run(tools, "sb_read", { path });
-    expect(out.startsWith("HEAD")).toBe(true);
-    expect(out.endsWith("TAIL")).toBe(true);
-    // …but the marker now names the way back to what it dropped.
-    expect(out).toContain("offset:");
-  });
-});
-
-describe("sb_exec", () => {
+describe("bash", () => {
   it("passes the configured cwd and timeout, and lets the model override cwd", async () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, {
@@ -1124,8 +989,8 @@ describe("sb_exec", () => {
       timeoutMs: 1234
     });
 
-    await run(tools, "sb_exec", { command: "npm test" });
-    await run(tools, "sb_exec", { command: "ls", cwd: "/workspace/repo" });
+    await run(tools, "bash", { command: "npm test" });
+    await run(tools, "bash", { command: "ls", cwd: "/workspace/repo" });
 
     expect(execs[0]).toMatchObject({
       command: "npm test",
@@ -1139,7 +1004,7 @@ describe("sb_exec", () => {
    *
    * `withShell` and `withShellTranscript` are tested above in isolation, which
    * proves they differ but not that each caller picked the right one — and
-   * picking the wrong one is the whole defect. `sb_exec` writes for a model, so
+   * picking the wrong one is the whole defect. `bash` writes for a model, so
    * it wants the transcript; `computerExec` hands its result to `/repo`, which
    * compares `stdout` against a URL, tests it for emptiness to call a tree clean,
    * and reads a sha out of it to push. Merging there turns every one of those
@@ -1149,7 +1014,7 @@ describe("sb_exec", () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, { ...config, shell: "bash" });
 
-    await run(tools, "sb_exec", { command: "npm run check" });
+    await run(tools, "bash", { command: "npm run check" });
 
     expect(execs[0]!.command).toContain("bash -o pipefail -c ");
     expect(execs[0]!.command.endsWith(" 2>&1")).toBe(true);
@@ -1173,7 +1038,7 @@ describe("sb_exec", () => {
       env: () => ({ SET: "yes", UNSET: undefined })
     });
 
-    await run(tools, "sb_exec", { command: "printenv" });
+    await run(tools, "bash", { command: "printenv" });
 
     expect((execs[0]!.options as { env: Record<string, string> }).env).toEqual({
       SET: "yes"
@@ -1197,7 +1062,7 @@ describe("sb_exec", () => {
       }
     });
 
-    await run(tools, "sb_exec", { command: "printenv" });
+    await run(tools, "bash", { command: "printenv" });
 
     expect(reads).toBe(1);
   });
@@ -1219,7 +1084,7 @@ describe("sb_exec", () => {
     const { workspace } = stub({}, lost);
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_exec", { command: "npm test" });
+    const out = await run(tools, "bash", { command: "npm test" });
     expect(out).toContain("container was replaced");
     expect(out).toContain("re-run it");
     expect(out).toContain("workspace is durable");
@@ -1231,13 +1096,13 @@ describe("sb_exec", () => {
     const { workspace } = stub({}, "container unreachable");
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "sb_exec", { command: "npm test" });
+    const out = await run(tools, "bash", { command: "npm test" });
     expect(out).toContain("error running command");
     expect(out).toContain("container unreachable");
   });
 });
 
-describe("the advisory gate on sb_exec", () => {
+describe("the advisory gate on bash", () => {
   const gated = (
     advisories: WorkspaceAdvisory[],
     extra: Partial<ComputerConfig> = {}
@@ -1254,7 +1119,7 @@ describe("the advisory gate on sb_exec", () => {
   it("runs the command when there is nothing to say", async () => {
     const { tools, execs } = gated([]);
     // The verdict line rides along on every result now, including this one.
-    expect(await run(tools, "sb_exec", { command: "npm test" })).toBe(
+    expect(await run(tools, "bash", { command: "npm test" })).toBe(
       "ok\n--- exit 0 ---"
     );
     expect(execs).toHaveLength(1);
@@ -1276,7 +1141,7 @@ describe("the advisory gate on sb_exec", () => {
       }
     ]);
 
-    const out = await run(tools, "sb_exec", { command: "npm test" });
+    const out = await run(tools, "bash", { command: "npm test" });
     expect(out).toContain("still installing");
     expect(out).toContain("npm ci");
     expect(out).toContain("1m05s");
@@ -1307,7 +1172,7 @@ describe("the advisory gate on sb_exec", () => {
       }
     ]);
 
-    const out = await run(tools, "sb_exec", { command: "npm test" });
+    const out = await run(tools, "bash", { command: "npm test" });
     expect(execs).toHaveLength(1);
     // The real output is there...
     expect(out).toContain("ok");
@@ -1329,7 +1194,7 @@ describe("the advisory gate on sb_exec", () => {
       }
     ]);
 
-    await run(tools, "sb_exec", { command: "npm ci --force" });
+    await run(tools, "bash", { command: "npm ci --force" });
     expect(execs).toHaveLength(1);
     expect(execs[0]!.command).toBe("npm ci --force");
   });
@@ -1349,7 +1214,7 @@ describe("the advisory gate on sb_exec", () => {
       }
     ]);
 
-    const out = await run(tools, "sb_exec", { command: "cat README.md" });
+    const out = await run(tools, "bash", { command: "cat README.md" });
     expect(out).not.toContain("ERESOLVE");
     expect(execs).toHaveLength(1);
   });
@@ -1365,7 +1230,7 @@ describe("the advisory gate on sb_exec", () => {
       { kind: "storage-exhausted", bytes: 8.6e9, capBytes: 8e9 }
     ]);
 
-    const out = await run(tools, "sb_exec", { command: "echo hi > /tmp/f" });
+    const out = await run(tools, "bash", { command: "echo hi > /tmp/f" });
     // It ran — permanent things never block, for the deadlock reason above.
     expect(execs).toHaveLength(1);
     expect(out).toContain("nothing further can be written");
@@ -1375,37 +1240,25 @@ describe("the advisory gate on sb_exec", () => {
   /**
    * **The file tools are where the writes are.**
    *
-   * `sb_exec` is not how a coding agent edits source — `sb_write` and `sb_edit`
-   * are, and they went straight to `fs.writeFile` and reported a character
-   * count. Against a workspace that accepts no more writes that count is a
+   * `bash` is not how a coding agent edits source — `write` and `edit` are.
+   * Against a workspace that accepts no more writes, a success report is a
    * fabrication the model has no way to doubt, which is the same silent data
    * loss this whole mechanism is about, at the entry point where most of it
-   * happens.
+   * happens. `write` goes through the workspace, and is held there — see
+   * `./proxy.spec.ts`.
    */
-  it("refuses a write when the workspace cannot keep it", async () => {
-    const path = "/workspace/repo/a.ts";
-    const { workspace, files } = stub();
-    const tools = buildComputerTools(workspace, { ...config }, async () => [
-      { kind: "storage-exhausted", bytes: 8.6e9, capBytes: 8e9 }
-    ]);
-
-    const out = await run(tools, "sb_write", { path, content: "x" });
-    expect(out).toContain("nothing further can be written");
-    expect(out).toContain("Nothing was written");
-    // The half that matters: no success report, and nothing on disk for a later
-    // read to find and conclude the edit had landed.
-    expect(out).not.toContain("character");
-    expect(files.has(path)).toBe(false);
-  });
-
-  it("refuses an edit on the same grounds, leaving the file alone", async () => {
+  it("refuses an edit when the workspace cannot keep it, leaving the file alone", async () => {
     const path = "/workspace/repo/a.ts";
     const { workspace, files } = stub({ [path]: "const a = 1;\n" });
     const tools = buildComputerTools(workspace, { ...config }, async () => [
       { kind: "storage-exhausted", bytes: 8.6e9, capBytes: 8e9 }
     ]);
 
-    const out = await run(tools, "sb_edit", { path, find: "1", replace: "2" });
+    const out = await run(tools, "edit", {
+      path,
+      old_string: "1",
+      new_string: "2"
+    });
     expect(out).toContain("Nothing was written");
     expect(files.get(path)).toBe("const a = 1;\n");
   });
@@ -1415,9 +1268,9 @@ describe("the advisory gate on sb_exec", () => {
    * the write will persist perfectly well, and refusing it would take away the
    * one thing an agent can still usefully do while an install is broken.
    */
-  it("still writes when the only trouble is dependencies", async () => {
+  it("still edits when the only trouble is dependencies", async () => {
     const path = "/workspace/repo/a.ts";
-    const { workspace, files } = stub();
+    const { workspace, files } = stub({ [path]: "const a = 1;\n" });
     const tools = buildComputerTools(workspace, { ...config }, async () => [
       {
         kind: "deps-broken",
@@ -1427,10 +1280,10 @@ describe("the advisory gate on sb_exec", () => {
       }
     ]);
 
-    expect(await run(tools, "sb_write", { path, content: "x" })).toContain(
-      "wrote"
-    );
-    expect(files.get(path)).toBe("x");
+    expect(
+      await run(tools, "edit", { path, old_string: "1", new_string: "2" })
+    ).toBe(`edited ${path}`);
+    expect(files.get(path)).toBe("const a = 2;\n");
   });
 
   /**
@@ -1445,7 +1298,7 @@ describe("the advisory gate on sb_exec", () => {
       { kind: "deps-building", command: "npm ci", startedAt: Date.now() }
     ]);
 
-    const out = await run(tools, "sb_exec", { command: "npm test" });
+    const out = await run(tools, "bash", { command: "npm test" });
     expect(execs).toHaveLength(0);
     expect(out).toContain("still installing");
     expect(out).toContain("nothing further can be written");
@@ -1472,7 +1325,7 @@ describe("the advisory gate on sb_exec", () => {
       ]
     );
 
-    const out = await run(tools, "sb_exec", { command: "npm test" });
+    const out = await run(tools, "bash", { command: "npm test" });
     expect(out).toContain("dependency install `npm ci` **failed**");
     expect(out).toContain("container unreachable");
     expect(execs).toHaveLength(0);
@@ -1490,7 +1343,7 @@ describe("the advisory gate on sb_exec", () => {
     );
 
     const started = Date.now();
-    const out = await run(tools, "sb_exec", { command: "npm test" });
+    const out = await run(tools, "bash", { command: "npm test" });
     const elapsed = Date.now() - started;
 
     expect(out).toContain("still installing");
@@ -1505,7 +1358,7 @@ describe("the advisory gate on sb_exec", () => {
     const tools = buildComputerTools(workspace, config, async () => {
       throw new Error("stub broken");
     });
-    await expect(run(tools, "sb_exec", { command: "npm test" })).resolves.toBe(
+    await expect(run(tools, "bash", { command: "npm test" })).resolves.toBe(
       "ok\n--- exit 0 ---"
     );
     expect(execs).toHaveLength(1);
@@ -1525,16 +1378,15 @@ describe("the advisory gate on sb_exec", () => {
         }
       ]
     );
-    expect(await run(tools, "sb_read", { path })).toBe("x");
+    expect(await run(tools, "grep", { query: "x" })).toContain(path);
   });
 });
 
-describe("the workspace a subtask reaches", () => {
+describe("the workspace a sub-agent reaches", () => {
   /**
-   * A subagent cannot compute the name: it is derived from the verified caller,
-   * and core gives a subagent execution a `callerKey` thunk that throws. The
-   * parent's `resolveRuntime` puts it here, and reading it back is what makes a
-   * delegated subtask land in the checkout its parent cloned.
+   * A sub-agent cannot compute the name: its parent chose the checkout. The
+   * spec's `prepare` puts it in `runtime()`, and reading it back is what makes
+   * a sub-agent land in the checkout its parent cloned.
    */
   it("comes from the runtime when a parent supplied one", () => {
     expect(
@@ -1546,6 +1398,54 @@ describe("the workspace a subtask reaches", () => {
     for (const runtime of [undefined, null, {}, { workspaceName: "" }, 7]) {
       expect(workspaceNameFromRuntime(runtime)).toBeUndefined();
     }
+  });
+});
+
+/**
+ * The plugin as an agent installs it.
+ *
+ * Its tools take Think's names so they replace Think's built-ins, and Think's
+ * `read` and `write` go through the agent's own workspace — so an agent whose
+ * workspace is not this container's would read and write one tree and run
+ * commands in another. That fails the start, not a turn.
+ */
+describe("computer()", () => {
+  const onWorkspace = (workspace: unknown) =>
+    testPluginContext({ workspace: () => workspace as never });
+
+  it("offers its tools under Think's names, so they replace the built-ins", () => {
+    const tools = computer(config).tools!(
+      onWorkspace(computerWorkspace(config))
+    );
+    expect(Object.keys(tools).sort()).toEqual([
+      "bash",
+      "edit",
+      "find",
+      "grep",
+      "list"
+    ]);
+  });
+
+  it("refuses to start on any other workspace, and says what to set", () => {
+    const plugin = computer(config);
+    expect(() => plugin.tools!(onWorkspace({}))).toThrow(PluginSetupError);
+    expect(() => plugin.tools!(onWorkspace({}))).toThrow(
+      /computerWorkspace\(config/
+    );
+  });
+
+  it("fails the start check core runs, not a turn", () => {
+    const assembled = assemblePlugins([computer(config)], {});
+    expect(() => assembled.check(onWorkspace({}))).toThrow(PluginSetupError);
+    expect(() =>
+      assembled.check(onWorkspace(computerWorkspace(config)))
+    ).not.toThrow();
+  });
+
+  it("tells the model about its tools in a block the model cannot rewrite", async () => {
+    const [block] = computer(config).context!;
+    expect(block.provider && "set" in block.provider).toBe(false);
+    expect(await block.provider!.get()).toContain("`bash`");
   });
 });
 
@@ -1575,7 +1475,7 @@ describe("a cancelled command", () => {
   }
 
   const execWith = (tools: ToolSet, input: unknown, abortSignal: AbortSignal) =>
-    (tools.sb_exec!.execute as (i: unknown, o: unknown) => Promise<string>)(
+    (tools.bash!.execute as (i: unknown, o: unknown) => Promise<string>)(
       input,
       { abortSignal }
     );
@@ -1680,7 +1580,7 @@ describe("cancellation before the command runs", () => {
 
     const pending = call(
       tools,
-      "sb_exec",
+      "bash",
       { command: "npm test" },
       controller.signal
     );
@@ -1705,7 +1605,7 @@ describe("cancellation before the command runs", () => {
 
     const pending = call(
       tools,
-      "sb_exec",
+      "bash",
       { command: "npm test" },
       controller.signal
     );
@@ -1740,7 +1640,7 @@ describe("cancellation before the command runs", () => {
 
     const pending = call(
       tools,
-      "sb_exec",
+      "bash",
       { command: "npm test" },
       controller.signal
     );
@@ -1798,24 +1698,22 @@ describe("which way the workspace is opened", () => {
     const path = "/workspace/repo/src/a.ts";
     const { tools, opens } = openers({ [path]: "const a = 1;\n" });
 
-    await run(tools, "sb_read", { path });
-    await run(tools, "sb_ls", { path: "/workspace/repo" });
-    await run(tools, "sb_exists", { path });
-    await run(tools, "sb_grep", { query: "const" });
-    await run(tools, "sb_write", { path, content: "const a = 2;\n" });
-    await run(tools, "sb_edit", {
+    await run(tools, "list", { path: "/workspace/repo" });
+    await run(tools, "find", { path: "/workspace/repo" });
+    await run(tools, "grep", { query: "const" });
+    await run(tools, "edit", {
       path,
-      oldString: "const a = 2;",
-      newString: "const a = 3;"
+      old_string: "const a = 1;",
+      new_string: "const a = 2;"
     });
 
-    expect(opens).toEqual({ exec: 0, fs: 6 });
+    expect(opens).toEqual({ exec: 0, fs: 4 });
   });
 
   it("serves a command from the opener that readies the container", async () => {
     const { tools, opens, execs } = openers();
 
-    await run(tools, "sb_exec", { command: "npm test" });
+    await run(tools, "bash", { command: "npm test" });
 
     expect(opens.exec).toBe(1);
     expect(opens.fs).toBe(0);
@@ -1835,7 +1733,7 @@ describe("which way the workspace is opened", () => {
       return inner.workspace();
     }, config);
 
-    await run(tools, "sb_ls", { path: "/workspace/repo" });
+    await run(tools, "list", { path: "/workspace/repo" });
 
     expect(opens).toBe(1);
   });

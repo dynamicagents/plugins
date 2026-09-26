@@ -6,7 +6,7 @@ import {
   installScheduler,
   namedDeadline,
   type ScheduledHost
-} from "@dynamicagents/core/alarm";
+} from "./alarm/index.js";
 import {
   Workspace,
   type DurableObjectStorageLike,
@@ -20,7 +20,6 @@ import {
 } from "@cloudflare/computer/backends/container";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
-import { MAX_TOOL_CALL_MS } from "@dynamicagents/core";
 import { ContainerTrust } from "./ca-trust.js";
 import { ContainerDeps } from "./container-deps.js";
 import { ContainerGitIdentity } from "./git-identity.js";
@@ -56,7 +55,7 @@ import type { RepoGitResult } from "../../repo/index.js";
  * A directory inside the plugin rather than a subpath beside it, so that one
  * capability stays one import path and a consumer cannot take the tools without
  * the object they address. The bundle cost of that is nothing: `sideEffects` is
- * false, so an agent that only calls `sb_exec` carries no container backend and
+ * false, so an agent that only calls `bash` carries no container backend and
  * no isomorphic-git.
  *
  * What this file must not do is import the plugin barrel. The barrel re-exports
@@ -105,7 +104,7 @@ export const WORKSPACE_DIR = "/workspace";
  * The Durable Object name for one caller's checkout of one repository.
  *
  * Exported because several places must agree on it and none can see the others:
- * the plugin that resolves the stub, the agent that hands it down to subagents,
+ * the plugin that resolves the stub, the agent that hands it down to sub-agents,
  * and the cancellation path. A pipe rather than a slash, so the caller half
  * cannot forge a repository boundary by containing one.
  *
@@ -201,7 +200,7 @@ const CONTAINER_WARM_ID = "container-warm-id";
  * traffic under it never surfaces as an RPC. Set equal to the computer plugin's
  * `DEFAULT_TIMEOUT_MS`, the two timers race and whichever fires first destroys
  * the container the other depends on. Twenty minutes is double that ceiling;
- * raise it, never lower it, if `sb_exec` is given a longer timeout.
+ * raise it, never lower it, if `bash` is given a longer timeout.
  *
  * **The default, not the policy.** "Longest command" is a fact about the agent,
  * so one whose commands run longer must say so via
@@ -236,13 +235,13 @@ const SYNC_DRAIN_GRACE_MS = 30 * 60_000;
 /**
  * How long a container start may take before the calls waiting on it are refused.
  *
- * A minute under core's per-call limit, and tied to it: past that limit core
- * abandons the call anyway, the model reads no reason, and the next call joins
- * the same stuck start. As late as that allows, because refusing a start that
- * was only slow clears `#readying` while it runs, and the next caller starts a
- * second one beside it — and a start pushing a large tree has taken nine minutes.
+ * Late, because refusing a start that was only slow clears `#readying` while it
+ * runs, and the next caller starts a second one beside it — and a start pushing
+ * a large tree has taken nine minutes. Not later, because a turn is cut at
+ * fifteen: past that the model reads no reason, and its next turn joins the
+ * same stuck start.
  */
-const READY_DEADLINE_MS = MAX_TOOL_CALL_MS - 60_000;
+const READY_DEADLINE_MS = 9 * 60_000;
 
 /**
  * `work`, refused once `ms` pass without it settling. The work itself goes on;
@@ -406,8 +405,7 @@ export interface WorkspaceObjectConfig {
  *
  * Abstract because a Durable Object class takes no constructor arguments, so
  * per-agent configuration cannot arrive that way. {@link workspaceConfig} is the
- * seam, and it is the shape core's own `RecipeSubagentBase.subagentRuntime`
- * uses for exactly the same reason.
+ * seam, for the same reason Think's own hooks are methods rather than options.
  *
  * ## Why `backend` and `#workspace` are lazy
  *
@@ -715,7 +713,7 @@ export abstract class WorkspaceObjectBase<
    * method is reachable over RPC — see {@link WorkspaceGitConfig.tokenBinding}.
    *
    * **One start at a time**, because {@link #warmIfCold} makes overlap ordinary:
-   * a warm and the first `sb_exec` want the container at the same moment, as do
+   * a warm and the first `bash` want the container at the same moment, as do
    * a warm and the install alarm. Two starts means two trust commands through a
    * half-established connection, the second pushing the tree again behind the
    * first. Cleared on settle, so the next caller asks about the container that
@@ -900,7 +898,7 @@ export abstract class WorkspaceObjectBase<
   }
 
   /**
-   * Ask the alarm to start the container, so the first `sb_exec` finds one that
+   * Ask the alarm to start the container, so the first `bash` finds one that
    * is up and already holding the tree.
    *
    * What this avoids is the push, not the boot — see {@link __getWorkspaceFsStub}.
@@ -910,7 +908,7 @@ export abstract class WorkspaceObjectBase<
    * nothing to push and nothing to run, and a container it never uses still
    * bills.
    *
-   * Only the arming is awaited. A warm that fails costs the next `sb_exec` the
+   * Only the arming is awaited. A warm that fails costs the next `bash` the
    * start it would have paid for anyway.
    */
   async #warmIfCold(): Promise<void> {
@@ -1050,7 +1048,7 @@ export abstract class WorkspaceObjectBase<
    *
    * Every entry point calls this, which is what makes the idle clock measure
    * *use* rather than "when the agent last said this name". The agent hands a
-   * workspace name to a subagent once and then never sees the traffic; the
+   * workspace name to a sub-agent once and then never sees the traffic; the
    * workspace sees all of it.
    */
   async #touch(): Promise<void> {
@@ -1327,7 +1325,7 @@ export abstract class WorkspaceObjectBase<
       return await pathExists(this.#workspace.fs, `${dir}/.git`);
     } catch (err) {
       // A read of local SQLite that threw says nothing about the tree. Treat it
-      // as absent: refusing a delegation costs a round, starting a session in a
+      // as absent: refusing a delegation costs a tool call, starting a session in a
       // directory that may not exist costs the run.
       console.warn(`[${this.#tag}] could not probe a checkout`, {
         id: this.ctx.id.toString(),
@@ -1340,7 +1338,7 @@ export abstract class WorkspaceObjectBase<
 
   /**
    * Everything currently true about this workspace that a caller must not assume
-   * away — the array `sb_exec`, `sb_write` and `sb_edit` all consult.
+   * away — the array `bash`, `edit` and the workspace's writes all consult.
    *
    * The policy is not here. `deriveAdvisories` decides which facts matter and
    * how they are worded; this method gathers what only the object can see and
@@ -1480,7 +1478,7 @@ export abstract class WorkspaceObjectBase<
    *
    * **Swallows its own failure.** Every other wake here is work somebody waits
    * for; this one is early, so a container that will not start must cost the
-   * next `sb_exec` a start rather than put the scheduler's retry ladder behind a
+   * next `bash` a start rather than put the scheduler's retry ladder behind a
    * deployment fault that will refuse for as long as it stands.
    */
   async #onContainerWarm(): Promise<void> {

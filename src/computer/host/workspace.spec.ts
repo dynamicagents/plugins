@@ -6,7 +6,15 @@ import {
   workspaceNamespace
 } from "../../../test/computer/do.js";
 import { DEFAULT_INSTALL_PLAN, type InstallState } from "../install.js";
-import { openWorkspace, openWorkspaceFs } from "../index.js";
+import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
+import {
+  computer,
+  computerWorkspace,
+  openWorkspace,
+  openWorkspaceFs,
+  type ComputerConfig
+} from "../index.js";
+import { testPluginContext } from "../../../test/helpers.js";
 import { DEFAULT_SCRATCH_DIR } from "../../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
 import { pathExists } from "../read.js";
@@ -22,12 +30,12 @@ const INSTALL_PLAN = { ...DEFAULT_INSTALL_PLAN, overrides: {} };
 /**
  * The install gate, and the two ways it can hang forever.
  *
- * `running` is the only install state that **blocks work**: `sb_exec` waits on
- * it and then refuses to run anything. Every other state is a fact the subagent
+ * `running` is the only install state that **blocks work**: `bash` waits on
+ * it and then refuses to run anything. Every other state is a fact the agent
  * can act on — so `running` is the one that must never outlive the command it
  * describes. A `runtime.exec` that throws on the container's WebSocket is how it
  * gets orphaned: the record stays `running` with nothing draining it and no
- * watchdog armed, and every later `sb_exec` waits ninety seconds and runs
+ * watchdog armed, and every later `bash` waits ninety seconds and runs
  * nothing until the task dies on its own timeout.
  *
  * The tests below run **without a container**, which is not a limitation here
@@ -147,22 +155,22 @@ describe("the install gate", () => {
     const [advisory] = await stub.advisories();
 
     expect(advisory?.kind).toBe("deps-broken");
-    // The message is load-bearing — it is what the subagent reads instead of
+    // The message is load-bearing — it is what the agent reads instead of
     // waiting, so it has to say the command is not coming back.
     if (advisory?.kind === "deps-broken") {
       expect(advisory.error).toMatch(/not going to finish/);
     }
 
-    // And it is written down, so the next `sb_exec` does not re-derive it.
+    // And it is written down, so the next `bash` does not re-derive it.
     expect((await storedInstall(stub))?.state).toBe("failed");
   });
 
   /**
-   * `repo_clone` starts the install, and a retried chunk starts it again — three
+   * `repo_clone` starts the install, and a recovered turn starts it again — three
    * times in fifty seconds is a real rate. Spawns share an exec id, so each
    * displaces the last while the displaced command's drain stays attached: it
    * then writes *its* verdict over a record describing an install that is still
-   * running, and the subagent reads a failure belonging to a command that no
+   * running, and the agent reads a failure belonging to a command that no
    * longer exists.
    */
   it("resolves a running record before starting another install", async () => {
@@ -186,7 +194,7 @@ describe("the install gate", () => {
     // container to re-attach to, resolved is the honest answer.
     expect(state).not.toMatchObject({ state: "running", startedAt });
     // Whatever it decided, the record agrees. A returned verdict that differs
-    // from the stored one is how the subagent ends up reading a result that
+    // from the stored one is how the agent ends up reading a result that
     // describes nothing.
     expect((await storedInstall(stub))?.state).toBe(state.state);
     // The guard's live path — returning the in-flight install untouched — needs
@@ -382,7 +390,7 @@ describe("where the work is", () => {
  * is seen gone. With no container in this pool, every access sees it gone.
  *
  * It still has to be caught here rather than left to `repo_clone`: a follow-up
- * task never calls it, because its checkout is already here, and the round then
+ * task never calls it, because its checkout is already here, and the turn then
  * pays 99 seconds of `npm ci` inside itself. Nor can the gate close it by
  * installing directly — an install started from a poll that returns in
  * milliseconds loses its drain with that invocation and leaves a half-written
@@ -505,8 +513,8 @@ describe("arming an install when the tree is missing", () => {
    *
    * Arming only for `done` leaves a failed record standing, so the next task
    * declines to arm and is rescued only if the parent happens to call
-   * `repo_clone` — and without that coincidence the subagent is back to running
-   * `npm ci` by hand inside the round, which is what all of this prevents.
+   * `repo_clone` — and without that coincidence the agent is back to running
+   * `npm ci` by hand inside the turn, which is what all of this prevents.
    */
   it("arms for a workspace whose last install failed", async () => {
     const stub = freshWorkspace("arm-after-failure");
@@ -565,7 +573,7 @@ describe("arming an install when the tree is missing", () => {
   });
 
   /**
-   * `sb_exec` reads the advisories before its `#ready()` starts a container, so
+   * `bash` reads the advisories before its `#ready()` starts a container, so
    * that read has to arm the install, or the gate lets the command outrun it.
    */
   it("arms from the gate's own read, before a command starts a container", async () => {
@@ -858,7 +866,7 @@ describe("the filesystem stub", () => {
     return true;
   }
 
-  /** `sb_exists` takes this path; `.call` on a stub method throws DataCloneError. */
+  /** `pathExists` takes this path; `.call` on a stub method throws DataCloneError. */
   it("answers pathExists over the stub", async () => {
     const stub = freshWorkspace("fs-stub-exists");
     await seedGitCheckout(stub, "/workspace/probe");
@@ -1009,7 +1017,7 @@ describe("the idle deadlines, over a scheduler that has no upsert", () => {
 
   /**
    * Concurrent touches, which is the case that actually happens: several
-   * subagents reach one workspace at once, and each entry point moves both
+   * sub-agents reach one workspace at once, and each entry point moves both
    * deadlines. A move is read-cancel-create-write across several awaits, so if
    * two interleaved they could cancel the same row, create two replacements and
    * keep one id — leaving a schedule nothing can reach.
@@ -1246,4 +1254,95 @@ describe("releasing a container", () => {
 
     expect(await stub.releaseContainer()).toEqual({ released: true });
   });
+});
+
+/**
+ * Think's file tools over a real workspace object.
+ *
+ * `read`, `write` and `delete` are Think's, reaching the container's tree
+ * through `computerWorkspace`; `grep`, `find`, `list` and `edit` are this
+ * plugin's. The tree is checkout-sized, with a `.git` beside the source that
+ * the walks prune — the fixture the migration's cost measurement ran on.
+ */
+describe("the file tools over a checkout", () => {
+  const root = "/workspace/app";
+  const line = (i: number) => `export const value${i} = ${i}; // padding\n`;
+  const body = (i: number) =>
+    Array.from({ length: 60 }, (_, k) => line(i * 100 + k)).join("");
+
+  const run = (tool: unknown, input: unknown) =>
+    (tool as { execute: (i: unknown, o: unknown) => Promise<unknown> }).execute(
+      input,
+      { toolCallId: "t", messages: [] }
+    );
+
+  it("serves Think's tools and ours from the durable tree", async () => {
+    // Named here rather than by `freshWorkspace`, which makes its name unique:
+    // the workspace reaches the object by name, as an agent's would.
+    const name = `think-tools-${crypto.randomUUID()}`;
+    const stub = workspaceNamespace.get(workspaceNamespace.idFromName(name));
+    {
+      using ws = await openWorkspaceFs(stub);
+      await ws.fs.mkdir(`${root}/.git/objects`, { recursive: true });
+      for (let d = 0; d < 40; d++)
+        await ws.fs.mkdir(`${root}/src/m${d}`, { recursive: true });
+      for (let i = 0; i < 1_200; i++)
+        await ws.fs.writeFile(`${root}/src/m${i % 40}/f${i}.ts`, body(i));
+      for (let i = 0; i < 3_000; i++)
+        await ws.fs.writeFile(`${root}/.git/objects/${i}`, "blob");
+    }
+
+    const config: ComputerConfig = {
+      binding: workspaceNamespace as unknown as ComputerConfig["binding"],
+      workspaceName: () => name
+    };
+    const workspace = computerWorkspace(config);
+    const think = createWorkspaceTools(workspace, { bash: false });
+    const ours = computer(config).tools!(
+      testPluginContext({ workspace: () => workspace })
+    );
+    const file = `${root}/src/m7/f7.ts`;
+
+    const read = (await run(think.read, { path: file })) as {
+      totalLines: number;
+    };
+    expect(read.totalLines).toBe(61);
+
+    await run(think.write, {
+      path: `${root}/src/new/a.ts`,
+      content: body(9_999)
+    });
+    expect(await workspace.readFile(`${root}/src/new/a.ts`)).toBe(body(9_999));
+
+    await run(think.edit, {
+      path: file,
+      old_string: "value700 = 700",
+      new_string: "value700 = -1"
+    });
+    expect(
+      await run(ours.edit, {
+        path: file,
+        old_string: "value701 = 701",
+        new_string: "value701 = -1"
+      })
+    ).toBe(`edited ${file}`);
+    expect(await workspace.readFile(file)).toContain("value700 = -1");
+    expect(await workspace.readFile(file)).toContain("value701 = -1");
+
+    expect(
+      await run(ours.grep, { query: "value119959 =", path: `${root}/src` })
+    ).toContain("f1199.ts");
+
+    const found = (await run(ours.find, {
+      path: root,
+      pattern: "**/f11*.ts"
+    })) as string;
+    expect(found).toContain(`${root}/src/m30/f1150.ts`);
+    expect(found).not.toContain(".git");
+
+    expect(await run(ours.list, { path: `${root}/src` })).toContain("m7/");
+
+    await run(think.delete, { path: `${root}/src/new/a.ts` });
+    expect(await workspace.stat(`${root}/src/new/a.ts`)).toBeNull();
+  }, 60_000);
 });

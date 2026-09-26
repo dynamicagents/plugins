@@ -1,3 +1,4 @@
+import type { ActionContext } from "@cloudflare/think";
 import { DEFAULT_ALLOWED_HOSTS, parseRepo, repoLocation } from "./url.js";
 import type {
   RepoCheckout,
@@ -22,7 +23,7 @@ const DEFAULT_MAX_OUTPUT_CHARS = 16_000;
  * Ceiling on every call this plugin makes to the forge's API.
  *
  * Not configurable, because it is not a tuning knob: it exists so an API that
- * stops answering costs a round rather than the task. These are single small
+ * stops answering costs a tool call rather than the task. These are single small
  * requests, and thirty seconds is already generous for one.
  */
 const FORGE_TIMEOUT_MS = 30_000;
@@ -139,13 +140,13 @@ function unreachableNote(err: unknown): string {
  * than waiting if it is already held. A model may emit several tool calls in one
  * turn and the SDK runs them concurrently, so unserialised a `repo_commit` and a
  * `repo_push` race: the commit fails, the push succeeds against the previous
- * state, and the round reports work that never landed.
+ * state, and the turn reports work that never landed.
  *
  * Held here rather than in {@link repoContext}'s closure, because that closure
- * is too short-lived to be the boundary. Core rebuilds `mainAgentTools` every
- * turn and gives each subagent execution its own tool family, so a per-call queue
- * leaves a subagent racing its parent over one checkout — the same collision, one
- * level up. The config object is the plugin instance, and a `WeakMap` means a
+ * is too short-lived to be the boundary. The tools are built for every turn, and
+ * a sub-agent builds its own from the same config, so a per-call queue leaves a
+ * sub-agent racing its parent over one checkout — the same collision, one level
+ * up. The config object is the plugin instance, and a `WeakMap` means a
  * discarded agent takes its queue with it.
  *
  * A promise chain rather than a lock, because that is all the scope needs: one
@@ -183,11 +184,10 @@ const gitQueues = new WeakMap<RepoConfig, { tail: Promise<unknown> }>();
  *
  * A command whose container or host never answers — a workspace object that
  * reset under it — would otherwise hold every git command behind it for the life
- * of the isolate, each abandoned in turn at core's per-call limit. Past this the
- * command is reported unreachable and the queue moves on. It may still be
- * running; a later command that meets its `index.lock` fails fast and says so.
- * Under that per-call limit, so the tool answers for itself rather than being
- * abandoned, and far longer than any git command here takes.
+ * of the isolate. Past this the command is reported unreachable and the queue
+ * moves on. It may still be running; a later command that meets its
+ * `index.lock` fails fast and says so. Far longer than any git command here
+ * takes.
  */
 const GIT_SLOT_MS = 8 * 60_000;
 
@@ -249,9 +249,52 @@ export interface RepoContext {
   ) => Promise<{ owner: string; repo: string } | { refusal: string }>;
 }
 
+/**
+ * How long a forge action may run before Think gives up on it.
+ *
+ * An action's default is thirty seconds, which is {@link FORGE_TIMEOUT_MS}
+ * alone — and a thread reply is three forge calls, after an `origin` read that
+ * waits its turn in the git queue.
+ */
+export const FORGE_ACTION_TIMEOUT_MS = 120_000;
+
+/**
+ * The task an action runs for, which leads its idempotency key.
+ *
+ * Think replays a settled key for as long as it keeps the row
+ * (`actionLedgerRetention`), so a key without the task would replay, not post,
+ * the same comment in a later task. Every turn core runs carries a task id, so
+ * a missing one is a wiring fault — and keying without it would be the silent
+ * version of that fault.
+ */
+export function actionTask(ctx: ActionContext): string {
+  const task = ctx.agent.activeTurnMetadata?.taskId;
+  if (typeof task !== "string")
+    throw new Error(
+      "this turn carries no task id, so a forge write cannot be keyed to it — " +
+        "the repo plugin's actions run only in turns core started for a task"
+    );
+  return task;
+}
+
+/** A hex SHA-256, so a key names a body without carrying it. */
+export async function sha256(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text)
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export function repoContext(
   config: RepoConfig,
-  runtime?: unknown
+  /**
+   * The running sub-agent's `runtime()`, read per command. Forwarded to every
+   * `exec`; see {@link RepoExec}'s `runtime` option.
+   */
+  runtime: () => unknown = () => undefined
 ): RepoContext {
   const workdir = config.workdir ?? DEFAULT_WORKDIR;
   const apiBase = config.apiBase ?? DEFAULT_API_BASE;
@@ -418,7 +461,7 @@ export function repoContext(
   ) =>
     run(script, () => ({
       cwd,
-      runtime,
+      runtime: runtime(),
       env: { GIT_TERMINAL_PROMPT: "0", ...vars }
     }));
 

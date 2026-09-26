@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Workspace } from "@cloudflare/computer";
-import type { Deadline } from "@dynamicagents/core/alarm";
+import type { Deadline } from "./alarm/index.js";
 import {
   SYNC_DRAIN_MAX_BACKOFF_MS,
   SYNC_DRAIN_RESUME_MS,

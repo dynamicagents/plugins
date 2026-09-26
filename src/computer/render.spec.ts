@@ -117,7 +117,7 @@ describe("renderResult", () => {
 });
 
 /**
- * `renderResult` says this on its verdict line, so `sb_exec` has always had it.
+ * `renderResult` says this on its verdict line, so `bash` has always had it.
  * `computerExec` has no verdict line and dropped `status` entirely — and a killed
  * process writes nothing, so `/repo` reported `clone failed:` with nothing after
  * the colon for a clone that hit the ceiling.

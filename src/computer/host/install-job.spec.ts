@@ -157,10 +157,10 @@ describe("what an install says when the container cannot be reached", () => {
   it("tells an operator to redeploy when the image cannot authenticate", async () => {
     const state = await failedInstall(AUTH_FAULT, "install-auth-fault");
     expect(state.state).toBe("failed");
-    // The record is what reaches the subagent, so it must not send it after a
+    // The record is what reaches the agent, so it must not send it after a
     // command that would have to reach the same container this one could not.
     expect(state.state === "failed" && state.error).toMatch(/redeploy/);
-    expect(state.state === "failed" && state.error).not.toMatch(/sb_exec/);
+    expect(state.state === "failed" && state.error).not.toMatch(/bash/);
   });
 
   it("tells an operator to redeploy when the re-attach cannot reach it", async () => {
@@ -180,14 +180,14 @@ describe("what an install says when the container cannot be reached", () => {
     });
     expect(state.state).toBe("failed");
     expect(state.state === "failed" && state.error).toMatch(/redeploy/);
-    expect(state.state === "failed" && state.error).not.toMatch(/sb_exec/);
+    expect(state.state === "failed" && state.error).not.toMatch(/bash/);
   });
 
-  it("still sends the subagent after an unreachable container", async () => {
+  it("still sends the agent after an unreachable container", async () => {
     // The guard: without it the test above passes against a version that gives
     // every spawn failure the same sentence.
     const state = await failedInstall(UNREACHABLE, "install-unreachable");
     expect(state.state).toBe("failed");
-    expect(state.state === "failed" && state.error).toMatch(/sb_exec/);
+    expect(state.state === "failed" && state.error).toMatch(/bash/);
   });
 });

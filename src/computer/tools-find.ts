@@ -3,13 +3,17 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import { guardPath, isSkipped, skipNames, WALK_SKIPS } from "./paths.js";
 import { humanBytes, packBlocks, renderGrepMatches } from "./render.js";
-import { collectVisible, listingNote, pathExists } from "./read.js";
+import { collectVisible, listingNote } from "./read.js";
 import type { ComputerContext } from "./context.js";
 
-/** Finding things: what is in a directory, what a file contains, what exists. */
+/**
+ * Finding things: what is in a directory, where a file is, what a file
+ * contains. Under Think's names, so they replace its built-ins — whose `find`
+ * and `grep` walk every file under the root through the workspace.
+ */
 
 /**
- * How many directory entries one `sb_ls` returns.
+ * How many directory entries one `list` or `find` returns.
  *
  * A bound on the *listing*, not on the rendered text — `maxOutputChars` still
  * applies on top, and the order matters. Bounding only the text means `readdir`
@@ -21,7 +25,7 @@ import type { ComputerContext } from "./context.js";
 const DEFAULT_MAX_ENTRIES = 1000;
 
 /**
- * How many matches one `sb_grep` returns.
+ * How many matches one `grep` returns.
  *
  * Bounded at the source like {@link DEFAULT_MAX_ENTRIES}, and for a sharper reason
  * than a listing: without a `limit`, `fs.grep` reads *every* file under the path
@@ -36,23 +40,15 @@ export function findTools(ctx: ComputerContext): ToolSet {
   const { cwd, maxChars, inWorkspace } = ctx;
 
   return {
-    sb_ls: tool({
+    list: tool({
       description:
-        "List files in a workspace directory, or find files by name. Without `pattern` it lists one level: directories with a trailing slash, files with their size — check that before reading a large one, since sb_read truncates. " +
-        "`pattern` is a glob matched against paths relative to `path`, and searches the whole subtree: `*` stays within one path segment, `**/` crosses directories, `?` matches one character. So `*.ts` finds top-level TypeScript files and `**/*.ts` finds them at any depth. " +
-        "A cut listing reports the `offset` that continues it. Subtree listings leave out `.git` and `node_modules`.",
+        "List one level of a workspace directory: directories with a trailing slash, files with their size — check that before reading a large one. " +
+        "A cut listing reports the `offset` that continues it. To search a subtree, use find.",
       inputSchema: z.object({
-        path: z.string().describe("Absolute directory path"),
-        recursive: z
-          .boolean()
-          .optional()
-          .describe("List the whole subtree rather than one level"),
-        pattern: z
+        path: z
           .string()
           .optional()
-          .describe(
-            "Glob relative to path, e.g. '**/*.spec.ts'. Searches the subtree, so `recursive` is not needed with it."
-          ),
+          .describe(`Absolute directory path (default: ${cwd})`),
         offset: z
           .number()
           .int()
@@ -60,57 +56,25 @@ export function findTools(ctx: ComputerContext): ToolSet {
           .optional()
           .describe("Entries to skip — use the offset a cut listing reports")
       }),
-      execute: async ({ path, recursive, pattern, offset }) => {
-        const refusal = guardPath(path, "sb_ls");
+      execute: async ({ path, offset }) => {
+        const target = path ?? cwd;
+        const refusal = guardPath(target, "list");
         if (refusal) return refusal;
         const from = offset ?? 0;
-        return inWorkspace("listing", path, async (fs) => {
-          if (recursive || pattern) {
-            // `find` rather than `ls`, which took no bound: a prefix scan
-            // returned every path in the subtree and the ceiling then threw most
-            // of them away — the same read-everything-then-discard shape the
-            // `readdir` limit below exists to avoid. Two differences follow from
-            // the swap, both improvements: directories appear (rendered like the
-            // arm below renders them), and order is the walk's — pre-order, by
-            // name — rather than one flat sort.
-            //
-            // `.git` and `node_modules` are pruned by the store, not filtered
-            // here: at a repo root either one outnumbers a page on its own.
-            const entries = await fs.find(path, pattern, {
-              limit: DEFAULT_MAX_ENTRIES + 1,
-              offset: from,
-              exclude: WALK_SKIPS.map((segment) => `**/${segment}`)
-            });
-            if (entries.length === 0)
-              return pattern
-                ? `(nothing under ${path} matches ${pattern})`
-                : `(${path} is empty)`;
-
-            const blocks = entries
-              .slice(0, DEFAULT_MAX_ENTRIES)
-              .map((e) => [e.type === "dir" ? `${e.path}/` : e.path]);
-            const { body, shown } = packBlocks(blocks, maxChars);
-            const page = {
-              rawIndex: entries.map((_, i) => from + i),
-              rawEnd: from + entries.length,
-              exhausted: entries.length <= DEFAULT_MAX_ENTRIES,
-              crowded: false
-            };
-            return body + listingNote(page, shown, "entries", "`pattern`");
-          }
+        return inWorkspace("listing", target, async (fs) => {
           // One over the ceiling: enough to know the listing was cut without a
           // second round trip to find out, and the extra entry is not shown.
           // Unfiltered on purpose — one line naming a directory that is really
           // there is honest, and costs a line rather than a page. It is the
-          // *subtree* walk above that cannot afford to descend into them.
-          const entries = await fs.readdir(path, {
+          // *subtree* walk in `find` that cannot afford to descend into them.
+          const entries = await fs.readdir(target, {
             limit: DEFAULT_MAX_ENTRIES + 1,
             offset: from
           });
           if (entries.length === 0)
             return from > 0
-              ? `(no entries in ${path} past offset ${from})`
-              : `(${path} is empty)`;
+              ? `(no entries in ${target} past offset ${from})`
+              : `(${target} is empty)`;
           const blocks = entries
             .slice(0, DEFAULT_MAX_ENTRIES)
             .map((e) => [
@@ -121,9 +85,64 @@ export function findTools(ctx: ComputerContext): ToolSet {
           return (
             body +
             (more
-              ? `\n… showed ${shown} entries; there are more. Continue with \`offset: ${from + shown}\`, or narrow with \`pattern\`.`
+              ? `\n… showed ${shown} entries; there are more. Continue with \`offset: ${from + shown}\`, or search with find.`
               : "")
           );
+        });
+      }
+    }),
+
+    find: tool({
+      description:
+        "Find files and directories under a workspace directory, by glob. `pattern` is matched against paths relative to `path`: `*` stays within one path segment, `**/` crosses directories, `?` matches one character. So `*.ts` finds top-level TypeScript files and `**/*.ts` finds them at any depth; without `pattern` the whole subtree is listed. " +
+        "A cut listing reports the `offset` that continues it. `.git` and `node_modules` are left out.",
+      inputSchema: z.object({
+        pattern: z
+          .string()
+          .optional()
+          .describe("Glob relative to path, e.g. '**/*.spec.ts'"),
+        path: z
+          .string()
+          .optional()
+          .describe(`Absolute directory to search from (default: ${cwd})`),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Entries to skip — use the offset a cut listing reports")
+      }),
+      execute: async ({ pattern, path, offset }) => {
+        const target = path ?? cwd;
+        const refusal = guardPath(target, "find");
+        if (refusal) return refusal;
+        const from = offset ?? 0;
+        return inWorkspace("searching", target, async (fs) => {
+          // Bounded at the source: the store walks only as far as the page, so
+          // a listing that would be cut never reads the rest of the tree.
+          // `.git` and `node_modules` are pruned by the store, not filtered
+          // here: at a repo root either one outnumbers a page on its own.
+          const entries = await fs.find(target, pattern, {
+            limit: DEFAULT_MAX_ENTRIES + 1,
+            offset: from,
+            exclude: WALK_SKIPS.map((segment) => `**/${segment}`)
+          });
+          if (entries.length === 0)
+            return pattern
+              ? `(nothing under ${target} matches ${pattern})`
+              : `(${target} is empty)`;
+
+          const blocks = entries
+            .slice(0, DEFAULT_MAX_ENTRIES)
+            .map((e) => [e.type === "dir" ? `${e.path}/` : e.path]);
+          const { body, shown } = packBlocks(blocks, maxChars);
+          const page = {
+            rawIndex: entries.map((_, i) => from + i),
+            rawEnd: from + entries.length,
+            exhausted: entries.length <= DEFAULT_MAX_ENTRIES,
+            crowded: false
+          };
+          return body + listingNote(page, shown, "entries", "`pattern`");
         });
       }
     }),
@@ -131,25 +150,28 @@ export function findTools(ctx: ComputerContext): ToolSet {
     /**
      * Search, without the container.
      *
-     * The tool this replaces is `sb_exec("grep -rn …")`, and the case for a native
-     * one is not that shelling out fails — it is where the search runs. `fs.grep`
-     * reads the Durable Object's SQLite, so it answers while the container is
-     * being replaced or an install is still running, which is exactly the window
-     * the install gate leaves a subagent with nothing to do. It is also why this
-     * tool is not gated: see {@link file://./context.ts awaitAdvisories}.
+     * The alternative is `bash("grep -rn …")`, and the case for a native one is
+     * not that shelling out fails — it is where the search runs. `fs.grep` reads
+     * the Durable Object's SQLite, so it answers while the container is being
+     * replaced or an install is still running, which is exactly the window the
+     * install gate leaves an agent with nothing to do. It is also why this tool
+     * is not gated: see {@link file://./context.ts awaitAdvisories}.
+     *
+     * And not Think's `grep`, which globs every file under the root and reads
+     * each one through the workspace.
      *
      * Two lesser reasons that still matter. The query arrives as a value rather
      * than through `shellQuote` and a shell that would re-parse it. And the result
      * is bounded by a `limit` at the source instead of being middle-truncated
      * afterwards, which for a match list means losing whole files silently.
      */
-    sb_grep: tool({
+    grep: tool({
       description:
         "Search file contents across the workspace. Returns matching lines grouped by file, each with its line number. " +
         "The query is matched literally — set `regex` to interpret it as a regular expression. " +
         "Pass `include` to limit which files are searched, e.g. '**/*.ts' — without it every file under `path` is read, which is slower and rarely what you meant. " +
         "A cut result reports the `offset` that continues it. Use `context` to see the lines around a match. " +
-        "Results from `.git` and `node_modules` are left out — search node_modules with sb_exec.",
+        "Results from `.git` and `node_modules` are left out — search node_modules with bash.",
       inputSchema: z.object({
         query: z.string().describe("Text to find, e.g. 'buildComputerTools'"),
         path: z
@@ -191,7 +213,7 @@ export function findTools(ctx: ComputerContext): ToolSet {
         offset
       }) => {
         const target = path ?? cwd;
-        const refusal = guardPath(target, "sb_grep");
+        const refusal = guardPath(target, "grep");
         if (refusal) return refusal;
         const from = offset ?? 0;
         return inWorkspace("searching", target, async (fs) => {
@@ -218,7 +240,7 @@ export function findTools(ctx: ComputerContext): ToolSet {
           );
           if (page.items.length === 0)
             return page.crowded
-              ? `every match for ${JSON.stringify(query)} from offset ${from} is inside ${skipNames(skips)}, which ${skips.length > 1 ? "are" : "is"} not searched. Add \`include\` (e.g. '**/*.ts') to search the working tree instead, or use sb_exec to search \`node_modules\`.`
+              ? `every match for ${JSON.stringify(query)} from offset ${from} is inside ${skipNames(skips)}, which ${skips.length > 1 ? "are" : "is"} not searched. Add \`include\` (e.g. '**/*.ts') to search the working tree instead, or use bash to search \`node_modules\`.`
               : `no matches for ${JSON.stringify(query)} in ${target}${
                   include ? ` (${include})` : ""
                 }${from > 0 ? ` past offset ${from}` : ""}`;
@@ -231,23 +253,9 @@ export function findTools(ctx: ComputerContext): ToolSet {
             body +
             listingNote(page, shown, "matches", "`include`") +
             (capped
-              ? `\n(Some lines were shortened. Read one in full with \`sb_read\` and an \`offset\`.)`
+              ? `\n(Some lines were shortened. Read one in full with \`read\`, passing its line number as \`offset\`.)`
               : "")
           );
-        });
-      }
-    }),
-
-    sb_exists: tool({
-      description: "Check whether a path exists in the workspace.",
-      inputSchema: z.object({ path: z.string().describe("Absolute path") }),
-      execute: async ({ path }) => {
-        const refusal = guardPath(path, "sb_exists");
-        if (refusal) return refusal;
-        return inWorkspace("checking", path, async (fs) => {
-          return (await pathExists(fs, path))
-            ? `${path} exists`
-            : `${path} does not exist`;
         });
       }
     })

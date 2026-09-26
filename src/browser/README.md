@@ -9,9 +9,8 @@ browser({ binding: env.BROWSER });
 ```
 
 Four tools — `browser_markdown`, `browser_extract`, `browser_links`,
-`browser_scrape` — offered to the **main agent** and available to a subagent recipe as the
-`browser` tool family. Both, because both want them: a main agent reads a page to answer
-directly, a delegated research subtask reads a dozen.
+`browser_scrape` — the same for whichever agent installs the plugin: a parent reads a page
+to answer directly, a research sub-agent reads a dozen.
 
 ## Config
 

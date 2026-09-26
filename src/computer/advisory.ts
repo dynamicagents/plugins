@@ -21,7 +21,7 @@ import { humanMs } from "./render.js";
  * - Capacity must not travel through a channel gated by
  *   {@link file://./gate.ts needsDependencies}, or a full workspace says nothing
  *   at all to `echo hi > file.txt` — the command whose write is being lost.
- * - "The tree is fine now", after a subagent installed by hand, has no honest
+ * - "The tree is fine now", after an agent installed by hand, has no honest
  *   spelling as a job record: fabricating a `done` rests on the presence of a
  *   `node_modules` directory, which the wreckage of the very install being
  *   overridden already satisfies.
@@ -61,7 +61,7 @@ export type WorkspaceAdvisory =
        * Reported rather than acted on, because its presence proves nothing in
        * either direction. A half-finished `npm ci` leaves the directory behind
        * with an incomplete tree, so treating existence as success hides the
-       * common failure outright; and a subagent that re-ran the install by hand
+       * common failure outright; and an agent that re-ran the install by hand
        * leaves a record the host cannot update, since the host cannot see an
        * install it did not start. Both look identical from here, so the reader
        * is told which way the ambiguity runs rather than being handed a guess.

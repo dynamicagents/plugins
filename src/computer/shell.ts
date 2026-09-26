@@ -61,7 +61,7 @@ export function withShell(command: string, shell: string | undefined): string {
  * written.
  *
  * This is the variant for a caller whose consumer is **a model reading output**.
- * `sb_exec` is that caller. A project's check is a chain — `wrangler types &&
+ * `bash` is that caller. A project's check is a chain — `wrangler types &&
  * prettier && eslint && tsc` — and *which tool spoke last* is how you know which
  * one failed. A stdout block and a separate stderr block destroy that ordering,
  * and a model that wants it back re-runs the whole gate as

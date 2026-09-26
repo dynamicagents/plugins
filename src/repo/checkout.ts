@@ -124,13 +124,13 @@ export async function writeGitIdentity(
  *
  * The workspace outlives the task, so a clone target may already hold one —
  * where `git clone` fails with "destination path already exists and is not an
- * empty directory" and the round has to improvise from an error that reads like
+ * empty directory" and the model has to improvise from an error that reads like
  * a bug.
  *
  * The refusal on a dirty tree is the important half. Uncommitted changes there
  * are a *previous task's work* — possibly the thing a human is waiting on — and
  * silently `reset --hard`ing them away to make a fresh clone look clean is the
- * one outcome nobody could recover from. Refusing costs a round; discarding
+ * one outcome nobody could recover from. Refusing costs a tool call; discarding
  * costs the work.
  */
 export async function refreshCheckout({

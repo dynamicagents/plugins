@@ -5,7 +5,7 @@ import type {
   WorkspaceRuntimeGetOptions,
   WorkspaceRuntimeKillOptions
 } from "@cloudflare/computer";
-import type { ProgressEvent } from "@dynamicagents/core/subtasks";
+import type { NoteData } from "@dynamicagents/core/subagent";
 import {
   parseStream,
   toProgress,
@@ -20,9 +20,9 @@ import {
 } from "./config.js";
 
 /**
- * Launching Claude Code in the workspace container, and draining it in windows.
+ * Launching Claude Code in the workspace container, and draining it to its end.
  *
- * ## One Dynamic Agents subtask is one `claude -p` session
+ * ## One sub-agent run is one `claude -p` session
  *
  * Not one turn, and not one tool call. The unit has to be substantial because of
  * what an invocation costs before it does anything: the harness carries an
@@ -31,19 +31,21 @@ import {
  *
  * ## Detached, then re-attached — never owned by a request
  *
- * The run is spawned under an exec id and left running. Each chunk re-attaches,
- * drains for a bounded window, and returns. That shape is not a preference: a
- * drain owned by an RPC that returns in milliseconds gets disposed mid-command
- * — the same way a dependency install dies halfway through `npm ci`.
+ * The run is spawned under an exec id and left running, and a drain reads it to
+ * its exit. A drain cut short — an eviction, a deploy — does not take the
+ * session with it: the next one re-attaches under the same id. That shape is
+ * not a preference: a session owned by the request that started it dies with
+ * that request — the same way a dependency install dies halfway through
+ * `npm ci`.
  *
  * ## The cursor
  *
  * `getExec(id, { resume })` accepts `"tail"`, `"full"` **or an event sequence
- * number**, and the number is what this uses. Each chunk records the last `seq`
- * it consumed, so the next one resumes exactly there instead of replaying an
- * arbitrary tail. Replay still happens when a chunk dies before it can
- * checkpoint, which is why the progress keys stay positional (see
- * `toProgress`); the cursor makes replay rare, the keys make it harmless.
+ * number**, and the number is what this uses. The caller stores the last `seq`
+ * consumed, so a resumed drain starts exactly there instead of replaying an
+ * arbitrary tail. Replay still happens when a drain dies before the cursor is
+ * stored, which is why the note keys stay positional (see `toProgress`); the
+ * cursor makes replay rare, the keys make it harmless.
  *
  * The cursor also carries the **exec id** and the **parsed result**, and both
  * are there for reasons that only show up under concurrency or retry — see
@@ -77,29 +79,28 @@ export const CLAUDE_EXEC_PREFIX = "claude-code-run";
 /**
  * The exec id one session occupies.
  *
- * **Per subtask, not fixed**, and the difference is load-bearing. A workspace is
- * one Durable Object and one container, but subtasks are a flat *concurrent*
- * fan-out — two `claude-code` subtasks for the same caller and repository run at
- * the same time, against the same workspace. Under a single shared id they
- * would spawn over one another, each drain would attach to whichever exec won,
- * and `killRun` would stop somebody else's session. That is the displacement bug
- * the coder's install guard exists to prevent, in a new place; here the answer
- * is simply not to share the id.
+ * **Per run, not fixed**, and the difference is load-bearing. A workspace is
+ * one Durable Object and one container, but runs are concurrent — reading runs
+ * share their parent's container — so under a single shared id they would spawn
+ * over one another, each drain would attach to whichever exec won, and
+ * `killRun` would stop somebody else's session. That is the displacement bug the
+ * coder's install guard exists to prevent, in a new place; here the answer is
+ * simply not to share the id.
  *
- * Fixed *per subtask*, though, because the point is still to find it again: an
+ * Fixed *per run*, though, because the point is still to find it again: an
  * isolate that dies mid-drain leaves the session running in the container, and
- * `getExec` is how the next chunk re-attaches instead of starting a second one.
+ * `getExec` is how the next drain re-attaches instead of starting a second one.
  */
-export function execIdFor(subtaskId: string | number): string {
-  return `${CLAUDE_EXEC_PREFIX}:${subtaskId}`;
+export function execIdFor(runId: string): string {
+  return `${CLAUDE_EXEC_PREFIX}:${runId}`;
 }
 
 /**
- * The id a subtask's follow-up turn runs under — its own, because the session's
- * exec has already finished under {@link execIdFor} and an id names one process.
+ * The id a run's follow-up turn runs under — its own, because the session's exec
+ * has already finished under {@link execIdFor} and an id names one process.
  */
-export function followUpExecIdFor(subtaskId: string | number): string {
-  return `${execIdFor(subtaskId)}:follow-up`;
+export function followUpExecIdFor(runId: string): string {
+  return `${execIdFor(runId)}:follow-up`;
 }
 
 /**
@@ -127,7 +128,7 @@ export const CREDENTIAL_PLACEHOLDER = "sk-ant-oat01-" + "0".repeat(24);
 const RESERVED_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
 
 export interface LaunchOptions {
-  /** The subtask's prompt — the whole of what this session is asked to do. */
+  /** The run's prompt — the whole of what this session is asked to do. */
   prompt: string;
   /**
    * Where the checkout is. The session runs with this as its cwd, unless
@@ -260,8 +261,8 @@ function gitIdentityEnv(
  * Build the command and environment for one session.
  *
  * `--output-format stream-json` with `--verbose`, because the stream is the only
- * way to report progress before the run ends and a run legitimately lasts longer
- * than any single chunk. `--verbose` is required: without it Claude Code emits
+ * way to report progress before the run ends, and a run lasts for minutes.
+ * `--verbose` is required: without it Claude Code emits
  * only the final result even in stream mode.
  *
  * Note what is **absent**. No `--bare`, no `--settings` override, no
@@ -379,16 +380,17 @@ export function buildLaunch(options: LaunchOptions): Launch {
   };
 }
 
-/** Where a drain got to. Persisted between chunks by the caller. */
+/** Where a drain got to. Stored by the caller, so a cut-short drain resumes. */
 export interface DrainCursor {
   /**
    * The exec id this session occupies.
    *
    * Carried rather than derived so a re-attach cannot compute a different one
-   * from the subtask id it happens to have in hand.
+   * from the run id it happens to have in hand — and because a run's follow-up
+   * is a second exec, and the cursor says which of the two it names.
    */
   execId: string;
-  /** The last event sequence consumed; the next chunk resumes from here. */
+  /** The last event sequence consumed; a resumed drain starts here. */
   seq: number;
   /** Bytes after the last newline — an incomplete line the next read finishes. */
   carry: string;
@@ -397,11 +399,11 @@ export interface DrainCursor {
   /**
    * The `result` line, once seen.
    *
-   * Carried because it and the `exit` event are two separate events and a window
-   * can end between them. Without this a run whose result arrived in the last
-   * moments of one chunk reports a terminal outcome with **no result** in the
-   * next — and `persistResult` converts an empty report into a failure, so a
-   * successful session would be recorded as a failed one.
+   * Carried because it and the `exit` event are two separate events and a
+   * drain can be cut short between them. Without this a run whose result
+   * arrived just before an eviction reports a terminal outcome with **no
+   * result** after it resumes — and a successful session would be reported as
+   * one that died without a word.
    */
   result?: ClaudeCodeResult;
   /**
@@ -416,15 +418,15 @@ export interface DrainCursor {
    * this the caller can only report an exit code.
    *
    * Carried on the cursor rather than kept local because the death and the exit
-   * event can land in different windows.
+   * event can land either side of an eviction.
    */
   stderr?: string;
   /**
    * Whether this session runs in a throwaway copy that has to be deleted when it
    * ends — a reading session; see {@link file://./copy.ts}.
    *
-   * Carried because the chunk that sees the session end is rarely the one that
-   * started it, and it is the only one that can close the copy.
+   * Carried because the drain that sees the session end is not always the one
+   * that started it, and it is the only one that can close the copy.
    */
   copy?: true;
 }
@@ -463,30 +465,30 @@ function changedReading(
   );
 }
 
-/** Distinguishes "the window ran out" from a real stream event in the race below. */
-const WINDOW_EXPIRED = Symbol("window-expired");
+/** Distinguishes "the caller stopped the drain" from a stream event in the race below. */
+const STOPPED = Symbol("stopped");
 
 export type DrainOutcome =
   | {
       done: false;
       cursor: DrainCursor;
-      progress: ProgressEvent[];
+      progress: NoteData[];
       /**
-       * The bucket as the client reported it **during this window**, if it did.
+       * The bucket as the client reported it **during this drain**, if it did.
        *
        * Deliberately not carried on the cursor the way `result` is. A caller
        * acts on this against whichever credential is leading *now*, so a reading
-       * replayed on every later chunk would let one window's observation retire
-       * a credential that was not even in use when it was taken. Absent means
-       * "this window learned nothing", which is the honest answer.
+       * replayed on every resumed drain would let one old observation retire a
+       * credential that was not even in use when it was taken. Absent means
+       * "this drain learned nothing", which is the honest answer.
        */
       rateLimit?: RateLimitInfo;
     }
   | {
       done: true;
       cursor: DrainCursor;
-      progress: ProgressEvent[];
-      /** The bucket as reported **in this window**. See the `done: false` arm. */
+      progress: NoteData[];
+      /** The bucket as reported **in this drain**. See the `done: false` arm. */
       rateLimit?: RateLimitInfo;
       exitCode: number;
       /** Absent when the process died without ever emitting a `result` line. */
@@ -501,68 +503,40 @@ export type DrainOutcome =
 
 export interface DrainOptions {
   /**
-   * How long this chunk may block before checkpointing and yielding.
-   *
-   * **This is the coder path's soft limit**, justified the same way core's
-   * `CHUNK_SOFT_MS` is — by the step timeout — but checked as a deadline on
-   * reading the session's stdout stream rather than between turns, because a
-   * `claude -p` session runs its own loop inside the container and there are no
-   * core-visible turns to stop between. The stream is the only synchronisation
-   * point there is. {@link file://./config.ts ClaudeCodeConfig.windowMs} holds
-   * how the default is sized against that timeout, what the headroom it leaves
-   * is for, and why that headroom is an expectation rather than a guarantee.
-   *
-   * It is also what stops a run burning its whole chunk allowance in seconds: a
-   * drain that returned the moment it had nothing to read would exhaust
-   * `MAX_CHUNKS_PER_BRANCH` before the session finished thinking.
-   *
-   * **It is not the reporting interval**, and reading it as one is the mistake
-   * {@link DrainOptions.onProgress} exists to remove: a session that finishes
-   * inside a single window reaches no boundary at all, so a caller with nothing
-   * but the outcome learns everything at once, once the work is over.
-   */
-  windowMs: number;
-  /**
    * Called with each note as it is parsed, rather than with all of them when the
-   * window ends.
+   * drain ends — a session runs for minutes, and a caller with nothing but the
+   * outcome would learn everything at once, once the work is over.
    *
-   * Notes are still returned on the outcome as well, so a caller that posts from
-   * here must drop what it is handed back, or the same note is posted twice. The
-   * keys are positional, so the gatekeeper would dedupe it, but paying for the
-   * second post to be discarded is not a plan.
+   * Notes are still returned on the outcome as well, so a caller that files them
+   * from here must drop what it is handed back, or the same note is filed twice.
+   * The keys are positional, so the transcript would dedupe it, but paying for
+   * the second one to be discarded is not a plan.
    *
-   * **Never awaited inside the read loop.** A post is a signed round trip to the
-   * gatekeeper — measured at ~700 ms — and awaiting one per note would stall
-   * reading the container's stream for as long as the session is talkative.
-   * Calls are chained instead, so they stay in order, and the chain is settled
-   * before the drain returns.
+   * **Never awaited inside the read loop.** Calls are chained instead, so they
+   * stay in order without stalling the read of the container's stream for as
+   * long as the session is talkative, and the chain is settled before the drain
+   * returns.
    */
-  onProgress?: (event: ProgressEvent) => void | Promise<void>;
+  onProgress?: (note: NoteData) => void | Promise<void>;
   /**
-   * Called with a cursor that is safe to persist, no more often than
+   * Called with a cursor that is safe to store, no more often than
    * {@link CHECKPOINT_MIN_MS}.
    *
    * **Only meaningful alongside `onProgress`, and that coupling is the whole
-   * point.** A caller normally commits the cursor after the drain returns,
-   * because a cursor written ahead of consuming events would skip events a retry
-   * never saw. A cursor offered here names a position whose notes have *already
-   * been handed to the sink*, so resuming from it loses nothing a person saw —
-   * which is only true because the sink posted them.
+   * point.** A cursor names a position whose notes have *already been handed to
+   * the sink* — it rides the same chain, after them — so resuming from it loses
+   * nothing the parent was sent.
    *
-   * Without it, a chunk that dies mid-window resumes from the last committed
-   * position, which is wherever the previous window ended. One production run
-   * lost six and a half minutes of a session that way and re-derived it by
-   * replaying the whole stream.
+   * Without it, a drain that dies mid-stream resumes from the start of the
+   * session. One production run lost six and a half minutes of a session that
+   * way and re-derived it by replaying the whole stream.
    */
   onCheckpoint?: (cursor: DrainCursor) => void | Promise<void>;
   /**
-   * Ends the window now, as if it had run out: the cursor comes back and the
-   * session goes on running.
-   *
-   * How a chunk replaced by a retry of itself lets go of the session's one
-   * subscriber — the host fires it from core's `yieldRun`. Not honoured once the
-   * process has exited, because the read to the end carries the filesystem sync;
-   * see the loop in {@link drainRun}.
+   * Stops the drain now: the cursor comes back as `done: false`, and the
+   * session goes on running — stopping *it* is the caller's, with
+   * {@link killRun}. Not honoured once the process has exited, because the read
+   * to the end carries the filesystem sync; see the loop in {@link drainRun}.
    */
   signal?: AbortSignal;
   now?: () => number;
@@ -590,27 +564,27 @@ export function isExecBusy(err: unknown): boolean {
  * `EEXEC_LOST` is the runtime saying the container that held the execution was
  * replaced. The session died with it, and no attachment will ever find it — so
  * unlike `EEXEC_BUSY`, which is a live session reached the wrong way, there is
- * nothing to recover and retrying only spends chunks discovering that again.
+ * nothing to recover and retrying only discovers that again.
  */
 export function isExecLost(err: unknown): boolean {
   return (err as { code?: unknown } | null | undefined)?.code === "EEXEC_LOST";
 }
 
 /**
- * Whether a thrown value is the *previous* window's attachment, not yet released.
+ * Whether a thrown value is the *previous* drain's attachment, not yet released.
  *
- * An exec's event stream admits one subscriber at a time. A chunk boundary asks
- * for the next one within milliseconds of the last one returning, and the
- * release on the far side is asynchronous and unobservable from here — the
- * workspace client carries `Symbol.dispose`, not `Symbol.asyncDispose`, so
- * there is nothing a caller can await to know the attachment is gone. So the
- * boundary races the teardown every time, and {@link attachRun} answers by
+ * An exec's event stream admits one subscriber at a time. A drain resumed after
+ * an eviction, or a follow-up asked for the moment a session ends, can ask for
+ * the next one while the last is still being released — and the release on the
+ * far side is asynchronous and unobservable from here: the workspace client
+ * carries `Symbol.dispose`, not `Symbol.asyncDispose`, so there is nothing a
+ * caller can await to know the attachment is gone. {@link attachRun} answers by
  * waiting rather than by failing.
  *
  * **Matched on the message, not on a code, and that is not laziness.** This one
  * is raised inside the container image rather than by the runtime client: the
- * string appears nowhere in the Worker bundle, and it arrives at a Workflow step
- * as a plain `Error` with no `code` — unlike `EEXEC_BUSY` and `EEXEC_LOST`
+ * string appears nowhere in the Worker bundle, and it arrives here as a plain
+ * `Error` with no `code` — unlike `EEXEC_BUSY` and `EEXEC_LOST`
  * above, which the client throws and codes. The code is checked first anyway, so
  * the day the container starts sending one this keeps working and the string
  * test becomes the fallback it should have been.
@@ -630,11 +604,11 @@ function isExecSubscribed(err: unknown): boolean {
  * Bounded, because what it is waiting on may not be a teardown at all: an
  * isolate that is genuinely wedged holding the stream releases it when it dies,
  * and nothing here can tell that apart from one that is a moment from
- * finishing. Exceeding this rethrows, so the Workflow step retries with a fresh
- * isolate — which is the right escalation, and the one this whole mechanism
- * exists to stop being the *first* resort.
+ * finishing. Exceeding this rethrows, so the turn fails and Think's recovery
+ * retries it on a fresh isolate — which is the right escalation, and the one
+ * this whole mechanism exists to stop being the *first* resort.
  *
- * Sized well above what the race costs in practice. The boundary normally clears
+ * Sized well above what the race costs in practice. The race normally clears
  * on the first or second look, and a deployment where it took fifteen seconds is
  * what this is sized to outlast.
  */
@@ -657,18 +631,18 @@ const ATTACH_CAP_MS = 2_000;
  * Start a session, detached.
  *
  * **Falls back to attaching when the id is already live**, which is not a
- * nicety. `start` spawns and then drains for minutes, so a chunk that fails
- * anywhere after the spawn is retried by the Workflow with no cursor to resume
- * from — and `@cloudflare/computer` refuses to reuse an id whose execution is
- * still running (`EEXEC_BUSY`). Without this the retry throws, every later retry
+ * nicety. `start` spawns and then drains for minutes, so a turn cut anywhere
+ * after the spawn is recovered with no cursor stored yet — and
+ * `@cloudflare/computer` refuses to reuse an id whose execution is still
+ * running (`EEXEC_BUSY`). Without this the recovery throws, every later one
  * throws the same way, and a perfectly healthy session in the container becomes
  * unreachable.
  *
  * **The sync stays on the default, and `defer` is not an option here.** A
  * deferred exec skips the post-command pull entirely and settles the outcome
  * from the cursor instead — and its `cancel` reads the stream to the end first,
- * so ending a window would block until the session exits rather than yielding
- * the chunk. Both halves are exactly what this drain is built not to do.
+ * so stopping a drain would block until the session exits. Both halves are
+ * exactly what this drain is built not to do.
  */
 export async function startRun(
   runtime: SessionRuntime,
@@ -704,22 +678,21 @@ export async function startRun(
 export interface AttachOptions {
   now?: () => number;
   wait?: (ms: number) => Promise<void>;
-  /** Stops the wait: this chunk has been replaced — see `DrainOptions.signal`. */
+  /** Stops the wait — see `DrainOptions.signal`. */
   signal?: AbortSignal;
 }
 
 /**
  * Re-attach to a session this isolate did not start.
  *
- * **Waits out a subscriber the previous window has not released yet**, and that
+ * **Waits out a subscriber the previous drain has not released yet**, and that
  * wait is the point of this function rather than a refinement of it. The
- * alternative is not "fail fast" — it is spending a Workflow retry to discover a
- * condition that clears on its own in a second, when a chunk step's retries are
- * what a deploy, a severed stub and a network drop have to be covered out of.
- * Core sizes that budget and says why; what matters here is that this must not
- * be charged to it. A deployment lost a twenty-one-minute session exactly that
- * way — consecutive attach races used the retries up, and the redeploy that
- * followed had no attempt left to be retried on. See {@link isExecSubscribed}.
+ * alternative is not "fail fast" — it is spending a recovery to discover a
+ * condition that clears on its own in a second, when recoveries are what a
+ * deploy, a severed stub and a network drop have to be covered out of. A
+ * deployment lost a twenty-one-minute session exactly that way — consecutive
+ * attach races used the retries up, and the redeploy that followed had no
+ * attempt left to be retried on. See {@link isExecSubscribed}.
  *
  * Everything else is rethrown on the first look, `EEXEC_LOST` above all: it is
  * the runtime saying the container was replaced, `resume` turns it into a report
@@ -741,7 +714,7 @@ export async function attachRun(
       return await runtime.getExec(cursor.execId, {
         encoding: "utf8",
         // `0` is a legal seq and also the beginning, so a fresh cursor resumes
-        // from the start either way. Later chunks name their own place.
+        // from the start either way. A stored cursor names its own place.
         resume: cursor.seq
       });
     } catch (err) {
@@ -760,9 +733,9 @@ export async function attachRun(
       const waitMs = Math.min(backoff, deadline - now());
       // One line per wait, not per attempt: this is the condition whose
       // frequency is worth watching, and it went unnamed in the logs for as
-      // long as the Workflow was absorbing it a retry at a time.
+      // long as retries were absorbing it one at a time.
       console.info(
-        "[claude-code] the previous window is still attached — waiting",
+        "[claude-code] the previous drain is still attached — waiting",
         { execId: cursor.execId, waitMs }
       );
       await wait(waitMs);
@@ -772,33 +745,31 @@ export async function attachRun(
 }
 
 /**
- * Drain a session for one bounded window.
+ * Drain a session to its end.
  *
- * Returns `done: false` when the window expired with the process still running —
- * the caller checkpoints the cursor and comes back — or `done: true` once the
- * stream has finished.
+ * Returns `done: true` once the stream has finished, or `done: false` when the
+ * caller's signal stopped the drain with the process still running.
  */
 export async function drainRun(
   handle: WorkspaceRuntimeExecHandle<"utf8">,
   cursor: DrainCursor,
-  options: DrainOptions
+  options: DrainOptions = {}
 ): Promise<DrainOutcome> {
   const now = options.now ?? Date.now;
-  const deadline = now() + options.windowMs;
 
   const reader = handle.getReader();
   /**
-   * The window's notes, in order — built as the stream is parsed rather than
+   * The drain's notes, in order — built as the stream is parsed rather than
    * from a list of events at the end, so there is one place a note is numbered
    * and the sink below cannot disagree with what is returned.
    */
-  const progress: ProgressEvent[] = [];
+  const progress: NoteData[] = [];
   let emitted = cursor.emitted;
   let buffer = cursor.carry;
   let seq = cursor.seq;
   let result = cursor.result;
-  // This window's reading only — see `DrainOutcome`. Starting undefined also
-  // means the first reading of each window reaches the log, which is what keeps
+  // This drain's reading only — see `DrainOutcome`. Starting undefined also
+  // means the first reading of each drain reaches the log, which is what keeps
   // a resumed session's bucket visible without carrying a stale one forward.
   let rateLimit: RateLimitInfo | undefined;
   let stderr = cursor.stderr ?? "";
@@ -807,11 +778,11 @@ export async function drainRun(
   /**
    * The sink's calls, chained rather than awaited.
    *
-   * Ordering matters — these are sentences in a conversation — and a post is a
-   * signed round trip, so awaiting one inside the read loop would stall the
-   * drain for as long as the session keeps talking. Failures are swallowed here
-   * because the sink's own contract is best-effort; settled before the drain
-   * returns, so nothing is cut short when the RPC unwinds.
+   * Ordering matters — these are sentences in a conversation — and awaiting
+   * one inside the read loop would stall the drain for as long as the session
+   * keeps talking. Failures are swallowed here because the sink's own contract
+   * is best-effort; settled before the drain returns, so nothing is cut short
+   * when it unwinds.
    */
   let sunk: Promise<void> = Promise.resolve();
 
@@ -819,10 +790,10 @@ export async function drainRun(
    * Parse whatever complete lines the buffer now holds.
    *
    * Called after **every** stdout event rather than once at the end. Claude
-   * Code's stream carries whole tool results, so a chunk that only parsed on the
-   * way out would hold a whole window's transcript of a noisy build in a Durable
-   * Object's memory; parsing eagerly keeps only `carry`, which is at most one
-   * incomplete line.
+   * Code's stream carries whole tool results, so a drain that only parsed on
+   * the way out would hold a whole session's transcript of a noisy build in a
+   * Durable Object's memory; parsing eagerly keeps only `carry`, which is at
+   * most one incomplete line.
    */
   const absorb = (): void => {
     const parsed = parseStream(buffer);
@@ -859,9 +830,9 @@ export async function drainRun(
       }
     }
     // Numbered from the running total, so a note has the same key whether it is
-    // posted from here or returned on the outcome — and the same key again when
-    // a retry replays this part of the stream, which is what makes the duplicate
-    // harmless. See `toProgress`.
+    // filed from here or returned on the outcome — and the same key again when
+    // a resumed drain replays this part of the stream, which is what makes the
+    // duplicate harmless. See `toProgress`.
     for (const note of toProgress(parsed.events, emitted)) {
       progress.push(note);
       emitted++;
@@ -892,7 +863,7 @@ export async function drainRun(
    * One object, so `seq`, `carry` and `emitted` are written together — a cursor
    * that advanced its position without its note count would renumber every key
    * after it, and a replay would then post the whole tail again under keys the
-   * gatekeeper has never seen.
+   * transcript has never seen.
    */
   const checkpoint = (): DrainCursor => ({
     execId: cursor.execId,
@@ -905,7 +876,7 @@ export async function drainRun(
   });
 
   /**
-   * Offer the caller a cursor to persist, at most every
+   * Offer the caller a cursor to store, at most every
    * {@link CHECKPOINT_MIN_MS}.
    *
    * Fire-and-forget onto the same chain the notes ride, so a storage write
@@ -915,9 +886,9 @@ export async function drainRun(
   const offerCheckpoint = (): void => {
     const sink = options.onCheckpoint;
     // **Refused without `onProgress`, not merely discouraged.** A checkpoint is
-    // only safe because the notes behind it have been posted; offered to a
-    // caller that posts nothing, it advances a cursor past notes that were never
-    // delivered, and a chunk dying after it loses them permanently. The
+    // only safe because the notes behind it have been filed; offered to a
+    // caller that files nothing, it advances a cursor past notes that were never
+    // delivered, and a drain dying after it loses them permanently. The
     // documented unsafe combination is one nothing can reach.
     if (!sink || !options.onProgress) return;
     if (now() - checkpointedAt < CHECKPOINT_MIN_MS) return;
@@ -929,8 +900,8 @@ export async function drainRun(
   const finish = async (code?: number): Promise<DrainOutcome> => {
     const next = checkpoint();
     // Everything the sink was given has been delivered before the outcome
-    // naming it is returned, so a caller cannot commit a cursor that claims
-    // notes nobody posted.
+    // naming it is returned, so a caller cannot store a cursor that claims
+    // notes nobody filed.
     await sunk;
     return code === undefined
       ? {
@@ -975,14 +946,11 @@ export async function drainRun(
        * outstanding pull; see this plugin's README.
        *
        * It is also unbounded, deliberately: the pull carries whatever the
-       * session wrote, an install's dependency tree included, so this last read
-       * can outlast the window that was left — and the step with it. Cutting it
-       * short to keep the window would trade a late chunk for edits that never
-       * land, and that trade is not close: a step killed with the pull still in
-       * flight is retried, and the sync resumes from the blocks it has already
-       * committed. A pull that *fails* is the case above, and nothing retries
-       * that. See {@link file://./config.ts ClaudeCodeConfig.windowMs} for how
-       * the window is sized around an unbounded tail.
+       * session wrote, an install's dependency tree included. Cutting it short
+       * would trade a late report for edits that never land, and that trade is
+       * not close: a drain cut with the pull still in flight is resumed, and
+       * the sync resumes from the blocks it has already committed. A pull that
+       * *fails* is the case above, and nothing retries that.
        */
       if (exitCode !== undefined) {
         const next = await reader.read();
@@ -991,19 +959,19 @@ export async function drainRun(
         continue;
       }
 
-      const remaining = deadline - now();
-      if (remaining <= 0 || options.signal?.aborted) return await yieldWindow();
+      if (options.signal?.aborted) return await stop();
 
-      const timer = windowTimer(remaining, options.signal);
-      const next = await Promise.race([reader.read(), timer.expired]).finally(
-        timer.clear
-      );
+      const stopping = stopped(options.signal);
+      const next = await Promise.race([
+        reader.read(),
+        stopping.promise
+      ]).finally(stopping.clear);
 
-      if (next === WINDOW_EXPIRED) return await yieldWindow();
+      if (next === STOPPED) return await stop();
       if (next.done) {
         // The stream ended without an `exit` event — the container went away
         // under the run. Report it as a failure rather than as still-running,
-        // or the caller waits out its whole chunk budget on a dead process.
+        // or the caller would wait on a dead process.
         return await finish(-1);
       }
       consume(next.value);
@@ -1037,27 +1005,23 @@ export async function drainRun(
   }
 
   /**
-   * End the window with the session still running.
+   * End the drain with the session still running.
    *
    * **Cancels rather than merely releasing the lock.** Releasing leaves the
-   * attachment and its pending read alive on the far side, and a chunked run
-   * would strand one per window. `cancel` is the wrapper's own designed exit —
-   * it settles the pending read, resolves the sync outcome as `pending`, and
-   * lets the next chunk's `getExec` open a fresh attachment that will run the
-   * real sync when the session finally ends.
+   * attachment and its pending read alive on the far side, and the next drain
+   * would find it still subscribed. `cancel` is the wrapper's own designed exit
+   * — it settles the pending read, resolves the sync outcome as `pending`, and
+   * lets the next `getExec` open a fresh attachment that will run the real sync
+   * when the session finally ends.
    *
-   * **Cancels before settling the sinks, not after.** `finish` awaits every
-   * progress post this window queued — signed round trips to the gatekeeper, one
-   * per note — and holding the attachment open across them handed the next chunk
-   * a subscriber that was still live for no reason but ordering. Safe in this
-   * order because `finish` reads only what `consume` already put in local state,
-   * and takes nothing off the stream. It does not close the race that
-   * {@link attachRun} waits out — the release is still asynchronous on the far
-   * side — it just stops this end adding to it.
+   * **Cancels before settling the sinks, not after**, so the attachment is not
+   * held open across notes still being filed. Safe in this order because
+   * `finish` reads only what `consume` already put in local state, and takes
+   * nothing off the stream.
    */
-  async function yieldWindow(): Promise<DrainOutcome> {
+  async function stop(): Promise<DrainOutcome> {
     absorb();
-    await reader.cancel("chunk window expired").catch(() => {});
+    await reader.cancel("drain stopped").catch(() => {});
     return await finish();
   }
 }
@@ -1067,33 +1031,23 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * What's left of the window, as a race a read can win — cut short when `signal`
- * asks for the window back.
+ * The caller's signal, as a race a read can win.
  *
- * Cleared by the caller whichever side wins: one is armed per read, and a timer
- * left pending holds the facet's `executeChunk` open until the window's end, so
- * a session that finishes in seconds would still cost the whole window.
+ * Cleared by the caller whichever side wins: one listener is added per read,
+ * and a session is many reads.
  */
-function windowTimer(
-  ms: number,
-  signal?: AbortSignal
-): {
-  expired: Promise<typeof WINDOW_EXPIRED>;
+function stopped(signal?: AbortSignal): {
+  promise: Promise<typeof STOPPED>;
   clear: () => void;
 } {
-  let id: ReturnType<typeof setTimeout> | undefined;
   let onAbort = (): void => {};
-  const expired = new Promise<typeof WINDOW_EXPIRED>((resolve) => {
-    id = setTimeout(() => resolve(WINDOW_EXPIRED), ms);
-    onAbort = () => resolve(WINDOW_EXPIRED);
+  const promise = new Promise<typeof STOPPED>((resolve) => {
+    onAbort = () => resolve(STOPPED);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
   return {
-    expired,
-    clear: () => {
-      clearTimeout(id);
-      signal?.removeEventListener("abort", onAbort);
-    }
+    promise,
+    clear: () => signal?.removeEventListener("abort", onAbort)
   };
 }
 

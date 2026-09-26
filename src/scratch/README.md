@@ -113,12 +113,12 @@ not record cannot be delegated into at all.
 
 ## Selection, not a capability
 
-`scratch_open` is a **main-agent tool only** — no tool family, so it is never lent
-to a subagent. Opening a scratchpad _selects a workspace_, exactly as `repo_clone`
-does. A subagent holding it could re-point the workspace its parent prepared
-half-way through its own run; a delegated run works in whatever it was given.
+Install it on a **parent only**, never on a sub-agent. Opening a scratchpad _selects a
+workspace_, exactly as `repo_clone` does. A sub-agent holding it could re-point the
+workspace its parent prepared half-way through its own run; a sub-agent works in whatever
+it was given.
 
-For the same reason, the capability block tells the model that a task works in a
+For the same reason, the context block tells the model that a task works in a
 cloned repository **or** in the scratchpad and not both. A host that keys one
 workspace selection per caller points every other workspace tool at whatever was
 selected last, so an agent that opens a scratchpad mid-checkout has quietly moved

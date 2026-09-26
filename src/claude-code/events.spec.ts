@@ -9,8 +9,8 @@ import {
 /**
  * The stream parser, and the three ways it can quietly ruin a run.
  *
- * It can **duplicate** — a retried chunk replays the tail, and a key that does
- * not collide re-posts everything the parent already saw. It can **flood** — the
+ * It can **duplicate** — a resumed drain replays the tail, and a key that does
+ * not collide re-files everything the parent already saw. It can **flood** — the
  * inner subagent tree talks on the same stream, and forwarding it fills the
  * parent's context with work the parent can neither read nor cancel. And it can
  * **lose everything** — one unrecognised line thrown from the parser discards
@@ -351,7 +351,7 @@ describe("parseStream", () => {
 });
 
 describe("toProgress", () => {
-  it("keys notes by position, continuing from where the last chunk stopped", () => {
+  it("keys notes by position, continuing from where the last drain stopped", () => {
     const { events } = parseStream(assistant("one") + assistant("two"));
 
     expect(toProgress(events, 0).map((p) => p.key)).toEqual([
@@ -367,9 +367,9 @@ describe("toProgress", () => {
   /**
    * The replay case, and the reason the key is positional.
    *
-   * A chunk that dies mid-drain is retried, the re-attach replays the tail, and
+   * A drain that dies mid-stream is resumed, the re-attach replays the tail, and
    * the same turns are parsed again. Re-parsing from the same offset must
-   * produce the same keys, so the gatekeeper drops the repeats.
+   * produce the same keys, so the transcript drops the repeats.
    */
   it("produces identical keys when a replayed tail is parsed twice", () => {
     const tail = assistant("running tests") + assistant("running tests");

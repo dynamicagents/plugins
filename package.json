@@ -1,13 +1,12 @@
 {
   "name": "@dynamicagents/plugins",
   "version": "0.12.0",
-  "description": "Optional, composable capabilities for a Dynamic Agent: browser rendering, a Linux container, git and pull requests, workspace, and episodic recall. One subpath per plugin, so a bundle grows only with what it imports.",
+  "description": "Optional, composable capabilities for a Dynamic Agent: browser rendering, a Linux container, git and pull requests, a scratchpad, and Claude Code sessions. One subpath per plugin, so a bundle grows only with what it imports.",
   "keywords": [
     "ai-agents",
     "cloudflare-workers",
     "durable-objects",
     "agents-sdk",
-    "vectorize",
     "browser-rendering",
     "containers",
     "git",
@@ -34,14 +33,6 @@
     "./browser": {
       "types": "./dist/browser/index.d.ts",
       "import": "./dist/browser/index.js"
-    },
-    "./workspace": {
-      "types": "./dist/workspace/index.d.ts",
-      "import": "./dist/workspace/index.js"
-    },
-    "./recall": {
-      "types": "./dist/recall/index.d.ts",
-      "import": "./dist/recall/index.js"
     },
     "./repo": {
       "types": "./dist/repo/index.d.ts",
@@ -80,18 +71,14 @@
   },
   "peerDependencies": {
     "@cloudflare/computer": "^0.3.1",
-    "@cloudflare/shell": "^0.4.3",
+    "@cloudflare/think": ">=0.19.0 <0.20.0",
     "@dynamicagents/core": ">=0.12.0 <0.13.0",
     "@platformatic/vfs": "^0.4.0",
     "agents": ">=0.24.0 <0.25.0",
     "ai": "^7.0.88",
-    "workers-ai-provider": "^4.0.0",
     "zod": "^4.4.3"
   },
   "peerDependenciesMeta": {
-    "@cloudflare/shell": {
-      "optional": true
-    },
     "@cloudflare/computer": {
       "optional": true
     },
@@ -101,10 +88,10 @@
   },
   "devDependencies": {
     "@cloudflare/computer": "^0.3.1",
-    "@cloudflare/shell": "0.4.3",
-    "@platformatic/vfs": "^0.4.0",
+    "@cloudflare/think": "^0.19.0",
     "@cloudflare/vitest-plugin": "^1.1.9",
     "@dynamicagents/core": "git+https://github.com/dynamicagents/core.git#main",
+    "@platformatic/vfs": "^0.4.0",
     "@types/node": "^26.5.1",
     "agents": "^0.24.0",
     "ai": "^7.0.101",

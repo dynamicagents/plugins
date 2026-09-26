@@ -4,7 +4,7 @@ import { needsDependencies } from "./gate.js";
 /**
  * The half of the install gate that is a decision rather than a wait.
  *
- * `execGate` and `execLostNote` are asserted through `sb_exec` in
+ * `execGate` and `execLostNote` are asserted through `bash` in
  * `index.spec.ts`, where the advisories they read actually come from, and what
  * each advisory *means* is asserted in `advisory.spec.ts` — this file is the
  * command classifier, which is pure and has the sharpest failure modes.
@@ -19,7 +19,7 @@ import { needsDependencies } from "./gate.js";
  * when in doubt the answer is to gate.
  */
 describe("needsDependencies", () => {
-  it("does not gate reads, listings or git — what a subagent can do while npm ci runs", () => {
+  it("does not gate reads, listings or git — what an agent can do while npm ci runs", () => {
     // Every one of these was observed queued behind an install it had no use
     // for, costing 57 seconds before the first useful command ran.
     for (const command of [
@@ -105,7 +105,7 @@ describe("needsDependencies", () => {
    * The case that made position matter. A word-boundary match anywhere in the
    * string passes every other test here and still fails this one: `\bvitest\b`
    * fires on `vitest.config.ts` because `.` is a word boundary, and config files
-   * are exactly what a subagent reads while orienting itself.
+   * are exactly what an agent reads while orienting itself.
    */
   it("reads a build tool's config file without gating on it", () => {
     for (const command of [

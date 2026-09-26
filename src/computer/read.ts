@@ -12,114 +12,6 @@ import type { WorkspaceClient } from "@cloudflare/computer";
  */
 
 /**
- * Read a file without pulling more of it across the boundary than the model will
- * be shown.
- *
- * `readFile(path, "utf8")` materialises the whole file in the isolate before
- * `truncateOutput` throws most of it away. Harmless on a source file, and the
- * wrong shape against a Durable Object's 128 MB — `sb_read` is one model decision
- * away from a lockfile, a bundle or a captured build log. The read is
- * range-addressable, so the budget is enforced at the source.
- *
- * Two reads rather than one, because the budget is spent from both ends for the
- * reason {@link truncateOutput} documents — the first error is at the top of a
- * file and the summary is at the bottom.
- *
- * ## The one place the budget is spent in bytes
- *
- * `maxChars` is a character ceiling everywhere else — see
- * {@link ComputerConfig.maxOutputChars} — and here it is spent against
- * `byteOffset`/`byteLength`, which are the only units the transport has, and the
- * only ones that bound what crosses it. Safe in the direction that matters: a
- * UTF-8 byte is never more than one UTF-16 code unit, so *N* bytes decode to at
- * most *N* characters. Reading the character budget as bytes therefore always
- * honours the ceiling, and errs low on a file that is mostly non-ASCII — a CJK
- * source file is cut at about a third of the characters it could have shown. The
- * alternative is a second round trip on every read, to recover a bound the
- * marker already announces.
- *
- * ## Why `stat` first
- *
- * Sizing off the returned string instead would be wrong in a way that hides
- * itself. `byteLength` counts bytes and `String.length` counts UTF-16 code units,
- * so a file of two-byte characters comes back *under* a character budget while
- * still being over the byte budget — and the read would look complete with half
- * the file missing and no marker saying so. One extra round trip buys the
- * distinction.
- *
- * A slice boundary can land mid-codepoint, which the decoder resolves to a single
- * replacement character. That is one glyph of noise at a cut that already
- * announces itself as a cut.
- */
-export async function readBounded(
-  fs: WorkspaceClient["fs"],
-  path: string,
-  maxChars: number
-): Promise<string> {
-  const { size } = await fs.stat(path);
-  if (size <= maxChars) return fs.readFile(path, "utf8");
-
-  // Names the way out, rather than only the size of the hole. Before `offset`
-  // existed the honest answer was "use sb_exec with sed", which needs a live
-  // container — the dependency these tools exist to remove.
-  const marker = (dropped: number, at: number) =>
-    `\n\n… [${dropped} bytes omitted from the middle — read them with ` +
-    `\`offset: ${at}\`] …\n\n`;
-
-  const half = Math.floor((maxChars - marker(size, size).length) / 2);
-  // No budget for two ends plus the marker: keep the head, where the first error
-  // is. The same fallback `truncateOutput` makes at the same ceiling.
-  if (half < 1)
-    return fs.readFile(path, {
-      encoding: "utf8",
-      byteLength: Math.max(0, maxChars)
-    });
-
-  const [head, tail] = await Promise.all([
-    fs.readFile(path, { encoding: "utf8", byteOffset: 0, byteLength: half }),
-    fs.readFile(path, {
-      encoding: "utf8",
-      byteOffset: size - half,
-      byteLength: half
-    })
-  ]);
-  return head + marker(size - half * 2, half) + tail;
-}
-
-/**
- * A byte window the model asked for, with its coordinates stated.
- *
- * No middle-out here, deliberately: {@link readBounded} guesses at what matters when
- * nobody said, but an explicit `offset` *is* the model saying. Trimming the middle
- * of a region it chose would defeat the request and, worse, make the next offset
- * unknowable.
- *
- * The window line is what makes paging work at all — the model needs to know where
- * it landed and how much is left to compute the next `offset`.
- */
-export async function readWindow(
-  fs: WorkspaceClient["fs"],
-  path: string,
-  offset: number,
-  length: number,
-  maxChars: number
-): Promise<string> {
-  const { size } = await fs.stat(path);
-  if (offset >= size)
-    return `(offset ${offset} is past the end of ${path}, which is ${size} bytes)`;
-
-  const byteLength = Math.min(length, maxChars, size - offset);
-  const body = await fs.readFile(path, {
-    encoding: "utf8",
-    byteOffset: offset,
-    byteLength
-  });
-  const end = offset + byteLength;
-  const rest = end < size ? `; ${size - end} bytes after this` : "";
-  return `${body}\n--- bytes ${offset}–${end} of ${size}${rest} ---`;
-}
-
-/**
  * Fetch a page, drop what is off-limits, and keep the source offsets that make the
  * *next* page exact.
  *
@@ -134,7 +26,7 @@ export async function readWindow(
  * dependency tree runs to tens of thousands of files — so one fetch can come back
  * entirely excluded. `maxRounds` is the caller's: a retry re-reads and re-scans
  * every file the last one looked at. For a walk the store can prune instead, see
- * `sb_ls`, which passes exclusions to `find` and needs none of this.
+ * the `find` tool, which passes exclusions to the store and needs none of this.
  *
  * Deliberately no slicing to `want`: the caller needs the extra item to know a next
  * page exists, and its index to say where.

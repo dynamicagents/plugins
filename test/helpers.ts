@@ -1,3 +1,5 @@
+import type { WorkspaceLike } from "@cloudflare/think";
+import type { PluginContext } from "@dynamicagents/core";
 import type { Tool, ToolSet } from "ai";
 
 /**
@@ -64,4 +66,22 @@ export function acceptsInput(tool: Tool, value: unknown): boolean {
     safeParse(v: unknown): { success: boolean };
   };
   return schema.safeParse(value).success;
+}
+
+/**
+ * The `PluginContext` an agent hands a plugin, with nothing behind it. A spec
+ * overrides what it reads; anything else it touches throws or is empty.
+ */
+export function testPluginContext(
+  overrides: Partial<PluginContext<never>> = {}
+): PluginContext<never> {
+  return {
+    env: {} as never,
+    storage: {} as DurableObjectStorage,
+    agentName: "test-agent",
+    callerKey: () => "test-caller",
+    workspace: () => ({}) as WorkspaceLike,
+    runtime: () => undefined,
+    ...overrides
+  };
 }

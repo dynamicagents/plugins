@@ -54,7 +54,7 @@ export function execTools(ctx: ComputerContext): ToolSet {
   } = ctx;
 
   return {
-    sb_exec: tool({
+    bash: tool({
       /**
        * States what the tool guarantees, rather than what it might withhold.
        *
@@ -101,7 +101,7 @@ export function execTools(ctx: ComputerContext): ToolSet {
          * held, how long the command took, what it exited with — answer it
          * directly.
          *
-         * Timed around the gate as well as the command, since a subagent blocked
+         * Timed around the gate as well as the command, since an agent blocked
          * waiting for `npm ci` and one running a slow test suite are
          * indistinguishable from the outside and want opposite fixes.
          */
@@ -114,16 +114,15 @@ export function execTools(ctx: ComputerContext): ToolSet {
          * where the call stopped. A command that outran the limit once will again;
          * one that never started because the workspace did not answer may not.
          *
-         * `sb_exec` reads its call's signal rather than leaving the wait to core,
-         * and this is why: core's abandonment can say only that the command may
-         * still be running. Core's `TOOL_CALL_GRACE_MS` is the window this answer
-         * has to arrive in, and it covers sending the kill below.
+         * `bash` reads its call's signal rather than leaving the wait to Think,
+         * and this is why: an abandoned wait can say only that the command may
+         * still be running, and the kill below is what stops it.
          */
         const stopped = (gateMs: number, started: boolean): string => {
           const timedOut =
             (abortSignal?.reason as { name?: string } | undefined)?.name ===
             "TimeoutError";
-          console.info("[computer] sb_exec stopped", {
+          console.info("[computer] bash stopped", {
             command,
             gateMs,
             durationMs: Date.now() - startedAtMs - gateMs,
@@ -137,9 +136,9 @@ export function execTools(ctx: ComputerContext): ToolSet {
             : "the command did not run: this call reached its time limit while the workspace was still getting ready, so nothing was changed. Try again; if it happens again, the workspace is not responding.";
         };
 
-        // Only `sb_exec` waits on an install. The file tools read and write
+        // Only `bash` waits on an install. The file tools read and write
         // source, which is in the workspace and unaffected by an install in
-        // flight — blocking them would stop the subagent doing the reading it
+        // flight — blocking them would stop the agent doing the reading it
         // could usefully do while it waits. They do consult `writeGate`, which
         // is a different question: not "is the tree ready" but "does a write
         // survive at all".
@@ -154,7 +153,7 @@ export function execTools(ctx: ComputerContext): ToolSet {
         }
         const gateMsWaited = Date.now() - startedAtMs;
         if (gate.block) {
-          console.info("[computer] sb_exec blocked by a workspace advisory", {
+          console.info("[computer] bash blocked by a workspace advisory", {
             command,
             gateMs: gateMsWaited
           });
@@ -205,7 +204,7 @@ export function execTools(ctx: ComputerContext): ToolSet {
           const result = await withAbort(abortSignal, handle.result(), () =>
             handle.kill("SIGTERM")
           );
-          console.info("[computer] sb_exec", {
+          console.info("[computer] bash", {
             command,
             exitCode: result.exitCode,
             // Split so a slow command and a slow *wait* never look alike.
@@ -219,7 +218,7 @@ export function execTools(ctx: ComputerContext): ToolSet {
         } catch (err) {
           if (abortSignal?.aborted) return note(stopped(gateMsWaited, started));
           const lost = execLostNote(err);
-          console.warn("[computer] sb_exec failed", {
+          console.warn("[computer] bash failed", {
             command,
             gateMs: gateMsWaited,
             durationMs: Date.now() - startedAtMs - gateMsWaited,
