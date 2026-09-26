@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import type { ToolSet } from "ai";
 import {
   scratch,
   DEFAULT_SCRATCH_DIR,
@@ -7,6 +6,7 @@ import {
   type ScratchConfig,
   type ScratchReadiness
 } from "./index.js";
+import { callNamed, testPluginContext } from "../../test/helpers.js";
 
 /**
  * The scratchpad's mechanics, with no container.
@@ -70,16 +70,12 @@ const nothingThere = (command: string) =>
 const open = async (
   config: ScratchConfig,
   input: { reset?: boolean } = {}
-): Promise<string> => {
-  const tools = (await scratch(config).mainAgentTools?.(
-    {} as never
-  )) as ToolSet;
-  const execute = tools[SCRATCH_OPEN_TOOL]!.execute as (
-    input: unknown,
-    options: unknown
-  ) => Promise<string>;
-  return await execute(input, {});
-};
+): Promise<string> =>
+  callNamed(
+    scratch(config).tools!(testPluginContext()),
+    SCRATCH_OPEN_TOOL,
+    input
+  );
 
 describe("finding out whether there is one", () => {
   /**
@@ -365,15 +361,16 @@ describe("the host's half", () => {
   });
 });
 
-describe("the capability block", () => {
+describe("the context block", () => {
   /**
    * The mixing rule earns its tokens: a host keying one workspace selection per
    * caller points *every* workspace tool at whatever was selected last, so an
    * agent that opens a scratchpad mid-checkout has silently moved its own
    * `repo_diff` and `repo_commit` with it.
    */
-  it("names the directory, the absent remote and the mixing rule", () => {
-    const capability = scratch({ exec: fakeExec().exec }).capability ?? "";
+  it("names the directory, the absent remote and the mixing rule", async () => {
+    const [block] = scratch({ exec: fakeExec().exec }).context!;
+    const capability = String(await block.provider!.get());
 
     expect(capability).toContain(DEFAULT_SCRATCH_DIR);
     expect(capability).toContain("Nothing in it is ever pushed");

@@ -1,7 +1,7 @@
 # `@dynamicagents/plugins/claude-code`
 
-Subtasks that run the **Claude Code CLI** inside the agent's workspace container,
-against the durable checkout.
+Sub-agents whose model is the **Claude Code CLI**, running inside the agent's
+workspace container against the durable checkout.
 
 ## Why this exists
 
@@ -16,25 +16,33 @@ and Haiku 4.5 all answer, at `service_tier: standard`. **The harness is the
 unlock, not the credential.** So the way to reach those models on a subscription
 is to run the sanctioned client, which is what this plugin makes delegable.
 
-## The shape: one subtask type, no tools
+## The shape: two sub-agents, and the session is their model
 
 Unusual for this package, and it is the whole design. Claude Code brings its own
-tools, its own loop and its own context management, so there is nothing for
-core's resumable runner to drive. The plugin declares a subtask type; the host's
-subagent overrides `executeChunk` and drives a session instead.
+tools, its own loop and its own context management, so there is nothing for an
+agent loop to drive. So this package exports no plugin: it exports two
+`SubAgentSpec`s — `CLAUDE_CODE_AGENT` (`claude_code`, which writes) and
+`CLAUDE_CODE_READER_AGENT` (`claude_code_read`, which works in a throwaway copy) —
+and `claudeCodeModel`, a language model whose one call runs a session. A host binds
+each spec to a `SubAgent` whose `getModel()` returns one, and Think's recovery does
+the rest: a turn cut by an eviction or a deploy is continued, and the model resumes
+the session from where it was.
 
-**One Dynamic Agents subtask is one `claude -p` session.** Not one turn, and not
-one tool call — the unit has to be substantial, because of what an invocation
-costs before it does anything (see [Costs](#costs)).
+Both run **detached**: the parent's call returns at once, and the report arrives
+as a later turn. A session runs for up to its `timeoutMs`, past a parent's turn.
+
+**One sub-agent run is one `claude -p` session.** Not one turn, and not one tool
+call — the unit has to be substantial, because of what an invocation costs before
+it does anything (see [Costs](#costs)).
 
 Two nested notions of "subagent" that must never be conflated:
 
-|                                      | Dynamic Agents subtask                         | Claude Code subagent          |
-| ------------------------------------ | ---------------------------------------------- | ----------------------------- |
-| Durable                              | yes                                            | no                            |
-| Visible to Dynamic Agents' scheduler | yes                                            | **no**                        |
-| Cancellable by Dynamic Agents        | yes                                            | **no**                        |
-| Bounded by                           | `timeoutMs`, enforced by the container runtime | `CLAUDE_CODE_MAX_*`, advisory |
+|                               | Dynamic Agents sub-agent run                   | Claude Code subagent          |
+| ----------------------------- | ---------------------------------------------- | ----------------------------- |
+| Durable                       | yes                                            | no                            |
+| Visible to the parent agent   | yes                                            | **no**                        |
+| Cancellable by Dynamic Agents | yes                                            | **no**                        |
+| Bounded by                    | `timeoutMs`, enforced by the container runtime | `CLAUDE_CODE_MAX_*`, advisory |
 
 ## The credential never enters the container
 
@@ -119,7 +127,7 @@ announces itself, exactly, the moment it is empty. So the credential is a
 The `retry-after` rewrite is what turns the client's existing retry into the
 rotation, and it is why nothing here buffers a request body. Left at the
 upstream's value — four hours — the client would sleep inside the container
-holding a chunk open, which is a stall rather than a rotation.
+holding a turn open, which is a stall rather than a rotation.
 
 Three behaviours are worth knowing before you rely on it:
 
@@ -217,33 +225,6 @@ readonly #session = claudeCodeSession({
       this.env.CLAUDE_CODE_OAUTH_TOKEN_1,
       this.env.CLAUDE_CODE_OAUTH_TOKEN_2
     ].filter(Boolean),
-  // How a *reading* subtask finds this workspace — see below. A reading session
-  // shares its container, because the checkout and the dependency tree are
-  // already here, and works in a throwaway copy of the checkout on container disk.
-  workspaceName: () => this.#name(),
-  // A *writing* subtask gets a workspace no other live session shares: two
-  // autonomous sessions in one container edit one working tree. The host answers
-  // which object that is, because cloning into one needs a remote url, a
-  // directory convention and a host allowlist — all of which belong to `/repo`.
-  // It may keep these workspaces and hand them out again, and `continue` is the
-  // branch the delegating model asked to add to.
-  //
-  // One subtask must get one name on every chunk: core resolves runtime once per
-  // *chunk*, so a name that moved would hand chunk two a different container
-  // than chunk one.
-  subtaskWorkspace: async ({ taskId, subtaskId, continue: branch }) =>
-    this.#allocateWorkspace({ taskId, subtaskId, branch }),
-  // Every terminal outcome releases it. Must tolerate a subtask that never
-  // resolved one.
-  releaseSubtaskWorkspace: async ({ taskId, subtaskId }) =>
-    this.#releaseWorkspace({ taskId, subtaskId }),
-  // A canceled execution also discards what it committed — before the release.
-  abortSubtaskWorkspace: async ({ taskId, subtaskId }) =>
-    this.#discardCommits({ taskId, subtaskId }),
-  // One the Workflow gave up on keeps it instead, and answers where it is, for
-  // the failure the delegating model reads — see `failSubtaskWorkspace`.
-  failSubtaskWorkspace: async ({ taskId, subtaskId }) =>
-    this.#keepWork({ taskId, subtaskId }),
   // Who the session's own commits, amends and rebases are attributed to. The
   // same pair the workspace's `git.author` takes: a session commits in
   // repositories nothing configured, and a checkout's config is a value frozen
@@ -271,8 +252,8 @@ readonly backend = new CloudflareContainerBackend({
 
 `egress` takes the store as an **argument** rather than reading it off the
 config, and that is deliberate: the same config object is also held by the
-parent's plugin list and by the subagent facet, and neither of those has
-storage. Making it a field would force both of them to invent one.
+agents that run sessions, which have no storage of their own for it. Making it a
+field would force them to invent one.
 
 > **`mode: "http-gateway"` intercepts _all_ egress**, so a restriction you do
 > configure is load-bearing for `npm ci` too. A restricted gateway that forgets
@@ -357,81 +338,81 @@ and the path does not exist.
 > container starts with `enableInternet: false`, so such a connection has
 > nowhere to go at all. Plan for that rather than expecting a certificate error.
 
-And the subagent drives the session:
+And a sub-agent runs a session as its model:
 
 ```ts
-protected override async executeChunk(...): Promise<RecipeChunkResult> {
-  const sinks = {
-    // Post each note the moment it is parsed. Core labels and delivers it.
-    onProgress: (event) => this.postProgress(event),
-    // Only safe alongside `onProgress` — see below.
-    onCheckpoint: (cursor) => this.ctx.storage.put(CURSOR_KEY, cursor)
-  };
-  const outcome = cursor
-    ? await session.resume(runtime, cursor, sinks)
-    // The subtask's `type` is required. A reading session's throwaway copy of
-    // `dir` is made inside the session rather than asked for: a host able to ask
-    // for it is a host able to leave it out, and the session would then run in
-    // the tree its parent and every other reader share.
-    : await session.start(runtime, subtaskId, type, prompt, dir, sinks);
+export class ClaudeCoderSession extends SubAgent<Env> {
+  // `prepare` claims a workspace of this run's own and returns where its
+  // checkout is; `settle` releases it on every terminal. Both are the host's:
+  // which object a run gets, and how it acquires a checkout, are facts about a
+  // deployment, and cloning belongs to `/repo`.
+  static override spec = { ...CLAUDE_CODE_AGENT, prepare, settle };
 
-  await this.ctx.storage.put(CURSOR_KEY, outcome.cursor);
-  // Empty, because `onProgress` already posted them. Returning them here as well
-  // would post every note twice.
-  if (!outcome.done) return { done: false, progress: [] };
-  return { done: true, progress: [], result: report(outcome) };
+  override getModel() {
+    const { workspaceName, dir } = this.pluginContext().runtime() as {
+      workspaceName: string;
+      dir: string;
+    };
+    const stub = this.env.CLAUDE_CODER_WORKSPACE.get(
+      this.env.CLAUDE_CODER_WORKSPACE.idFromName(workspaceName)
+    );
+    return claudeCodeModel({
+      config: CLAUDE_CODE_SESSION,
+      workspace: () => openWorkspace(stub) as Promise<SessionWorkspace>,
+      storage: this.ctx.storage,
+      runId: this.name,
+      kind: "write",
+      dir,
+      note: (key, text) => this.note(key, text),
+      // Once per run, before the session starts. A throw fails the run with its
+      // message — how a host refuses a run its credentials cannot pay for.
+      brief: async (task) => this.#brief(task, stub),
+      // One more turn for a session that left work uncommitted, or none.
+      followUp: async (session) => this.#uncommittedPrompt(session),
+      // What the parent receives. Run once, and kept.
+      report: async ({ session, followUp }) => this.#report(session, followUp)
+    });
+  }
 }
 ```
 
-`DrainCursor` is the only state, and the caller persists it. A fresh isolate
-resumes from the exact event sequence the last one consumed.
+The model keeps every step it has taken in the sub-agent's own storage — the
+brief, the drain's cursor, the session's end, whether a follow-up was asked for
+and how it ended, and the report. A continued turn calls it again and finds them,
+so it re-attaches rather than starting a second session, asks nothing twice, and
+reports once.
 
-**One more turn for a finished writing session** is `session.followUp(runtime,
-subtaskId, result.sessionId, prompt, dir, sinks)`: `claude -p --resume` under an exec
-id of its own, drained like `start` and continued with `resume`. The transcript is on
-the container's disk, so it runs in the workspace the session did. `stop` ends it with
-the session.
+**The report is the only text the model streams.** A run's result is what its
+assistant messages say, so narration streamed as text would become the result.
+What the session says as it works goes to the parent as **notes**, through
+`note`, each keyed on its exec and its position: the parent's transcript dedupes
+on the key, so a note filed again after a restart is dropped, and two runs in one
+task never collide. Nothing else is streamed at all — Think's stall watchdog is
+off, so a silent stream is not cut.
 
-**The drain window is not the reporting interval.** Whatever `windowMs` is set to,
-a session that finishes inside one window reaches no boundary at all, so a host
-with nothing but the outcome learns everything at once, once the work is over. One production session ran thirteen minutes in a
-single chunk and its sixteen notes arrived in the eleven seconds after it stopped
-working.
+**The follow-up is a second exec.** `claude -p --resume` under an exec id of its
+own, so its cursor and its notes are its own. The transcript is on the container's
+disk, so it runs in the workspace the session did. `stop` ends it with the session.
 
-`onProgress` is handed each note as the line is parsed, so a host can post it
-then. The notes still arrive on the outcome, so a host that passes no sink is
-unaffected — and a host that passes one must return an empty `progress` or pay
-for every note twice.
+**The cursor is stored behind the notes.** It rides the same chain as the notes it
+counts, so a stored position never names a note that was not filed; a drain that
+dies resumes from it and files only what came after. Without it, a drain that died
+would replay the whole stream — one production run lost six and a half minutes of
+a session that way.
 
-**`onCheckpoint` is only correct alongside `onProgress`.** A cursor is normally
-committed after the drain returns, because one written ahead of consuming events
-would skip events a retry never saw. A cursor offered to `onCheckpoint` names a
-position whose notes have _already been handed to the sink_, so resuming from it
-loses nothing anybody saw — which is true only because the sink posted them.
-Without it, a chunk that dies mid-window resumes from wherever the previous
-window ended; one production run lost six and a half minutes that way and
-re-derived it by replaying the stream from the start.
+**`runId` namespaces the exec id, and it is not optional.** Runs are concurrent —
+reading runs share their parent's container — so two sessions sharing an id would
+spawn over each other, each drain would attach to whichever won, and `stop` would
+kill the wrong one.
 
-**`subtaskId` namespaces the exec id, and it is not optional.** Subtasks are a
-flat concurrent fan-out and a workspace is one container, so two sessions
-sharing an id would spawn over each other, each drain would attach to whichever
-won, and `stop` would kill the wrong one.
+**A cancelled turn stops the session.** The model's abort signal stops the drain,
+kills both execs and deletes a reading run's copy.
 
-**`runtime` is where the workspace name comes from**, and it is the reason
-`workspaceName` is on the config:
-
-```ts
-const name = runtime?.[WORKSPACE_RUNTIME_KEY] as string | undefined;
-const stub = env.CLAUDE_CODER_WORKSPACE.get(idFromName(name));
-using ws = await getWorkspace(stub); // ws.runtime satisfies SessionRuntime
-```
-
-The plugin's `resolveRuntime` writes it on the **parent**, where the verified
-caller is known; core dispatches that hook to whichever plugin declared the
-subtask type, which is this one, so nothing else can supply it. A facet cannot
-work the name out for itself — `callerKey()` throws there by design — and it is
-deliberately not a subtask param, because those are rendered to the delegating
-model and a model-authored workspace name would let it name somebody else's.
+**`runtime()` is where the workspace comes from.** The spec's `prepare` runs on the
+parent, where the caller is known, and returns the workspace name and the
+checkout; the sub-agent reads both back from `runtime()`. It is deliberately not
+the sub-agent's input, because the parent's model writes that, and a model-authored
+workspace name would let it name somebody else's.
 
 `getWorkspace` rebuilds a real `WorkspaceRuntimeExecHandle` on the client side
 from the stub's byte stream, so the drain works across a Durable Object boundary
@@ -456,7 +437,7 @@ That makes the CLI's default mode unusable here, in a way that does not look lik
 a failure. `default` gates Write, Edit and every Bash command, so a session left
 on it reads the repository perfectly, cannot change one byte of it, and reports
 prose that reads like considered reluctance rather than a blocked tool. It exits
-0, and the subtask is recorded as completed.
+0, and the run is reported as completed.
 
 Both of those are still true, and they are why the mode is set explicitly rather
 than left to a reader of the report to notice. What has changed is that the
@@ -485,7 +466,7 @@ cloned repository's `postinstall` and its test suite, which is arbitrary code
 execution by design. Gating the agent's own edits while those doors stand open
 costs the agent its job and buys nothing. Containment is the credential swap.
 
-**A reading subtask runs under the same mode.** What keeps it from touching
+**A reading session runs under the same mode.** What keeps it from touching
 anything is where it runs, not what it may do: a copy of the parent's checkout on
 container disk, outside the workspace mount, deleted when the session ends — see
 `copy.ts`. Every mode that refuses an edit also refuses the commands a question
@@ -506,17 +487,17 @@ picking something other than the default a decision rather than a surprise.
 ## Costs
 
 What drives the sizing here is not a spend cap — this package deliberately does
-not have one — but `timeoutMs`, `maxSubtasks`, `effort`, and how large a brief is
-worth writing.
+not have one — but `timeoutMs`, how many sessions run at once, `effort`, and how
+large a brief is worth writing.
 
 **The harness prefix is ~18.7-27k cached tokens per invocation.** A ten-call
 burst billed **twenty** raw input tokens against 187,130 cache reads. On anything
-short the prefix is the bill — which is why a subtask must be a substantial unit
-of work, and why warm containers and temporally clustered subtasks matter.
+short the prefix is the bill — which is why a run must be a substantial unit of
+work, and why warm containers and temporally clustered runs matter.
 
 **A 5-hour session is worth roughly $10 of Opus-equivalent.** Usage draws the
 interactive session bucket, so agent work competes with whoever is using Claude
-Code at their desk — expect about one substantial round per window, per
+Code at their desk — expect about one substantial session per window, per
 credential in the pool. Rotation does not create allowance; it moves to the next
 bucket when one runs out, and then stops cleanly.
 
@@ -525,7 +506,7 @@ a session rather than being paid once, and the client's own cost table is where
 the multiple is legible: against `high`, which is what the frontier models
 default to, Opus 5 prices `xhigh` at 1.6x and `max` at 1.7x. Set against a bucket
 nobody can read, that is a choice about how many sessions a credential holds.
-Depth is usually the right thing to buy here — a coding subtask that finishes is
+Depth is usually the right thing to buy here — a coding run that finishes is
 worth more than two that half-finish — but it is bought, not free.
 
 ## What this deliberately does not do
@@ -542,8 +523,8 @@ worth more than two that half-finish — but it is bought, not free.
 - **No metering in the gateway.** Spend estimates were tried and removed; the
   bucket says when it is empty, and rotation acts on that. See above.
 - **No `--max-turns`.** A ceiling on the outer session's turns bounds nothing
-  the package can see: Claude Code's own subagent tree is invisible to Dynamic
-  Agents' scheduler and multiplies whatever the flag says. What it does instead
+  the package can see: Claude Code's own subagent tree is invisible to the agent
+  running the session and multiplies whatever the flag says. What it does instead
   is stop a long session mid-edit at a number picked without reference to the
   task, leaving a half-finished checkout that costs more to read than the turns
   saved. `timeoutMs` is the ceiling, and the container runtime enforces it.

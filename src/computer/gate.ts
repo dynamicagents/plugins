@@ -14,7 +14,7 @@ import { renderAdvisory, shapeOf, type WorkspaceAdvisory } from "./advisory.js";
  */
 
 /**
- * The one `sb_exec` failure that is not the command's fault.
+ * The one `bash` failure that is not the command's fault.
  *
  * An execution running when the container is replaced throws `EEXEC_LOST`.
  * Unexplained, the model receives `Execution "…" was lost when its container
@@ -129,7 +129,7 @@ export function execGate(
 /**
  * Whether a write should happen at all, and what to say when it should not.
  *
- * `sb_write` and `sb_edit` do not go through {@link execGate}: they run no
+ * `write`, `edit` and `delete` do not go through {@link execGate}: they run no
  * command, and a dependency install has nothing to do with writing source. One
  * thing does reach them, and it is the worst of the set — a workspace that
  * accepts no further writes takes an edit, reports the character count, and
@@ -164,7 +164,7 @@ export function writeGate(
  * Position is what makes this usable rather than merely cautious. Matching these
  * anywhere in the string looks equivalent and is not: `\bvitest\b` also fires on
  * `cat vitest.config.ts`, and `next.config.js`, `eslint.config.js` and
- * `vite.config.ts` are exactly the files a subagent reads while orienting itself.
+ * `vite.config.ts` are exactly the files an agent reads while orienting itself.
  * Every one of those reads would then queue behind an `npm ci` it has no use for,
  * which is the cost this whole check exists to remove.
  */

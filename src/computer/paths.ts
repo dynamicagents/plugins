@@ -30,8 +30,9 @@ export function isGitInternal(path: string): boolean {
 }
 
 /**
- * What every walk steps over. `find` prunes these in the store; `grep` takes no
- * exclusion, so `sb_grep` filters its results instead.
+ * What every walk steps over. The workspace's `glob` prunes these in the store;
+ * the store's `grep` takes no exclusion, so the `grep` tool filters its results
+ * instead.
  */
 export const WALK_SKIPS = [".git", "node_modules"] as const;
 
@@ -52,7 +53,7 @@ export function skipNames(skips: readonly string[]): string {
 function dependencyTreeNote(path: string, verb: string): string {
   return (
     `${path} is inside node_modules, which lives on the container's disk rather ` +
-    `than in the workspace ${verb} works on. Use sb_exec there — ` +
+    `than in the workspace ${verb} works on. Use bash there — ` +
     `\`cat\`, \`ls\`, \`rg\`.`
   );
 }
@@ -63,9 +64,9 @@ function dependencyTreeNote(path: string, verb: string): string {
  * Names a route deliberately: a refusal with no destination is worse than no
  * refusal, because the model retries and then works around it.
  *
- * What it must never name is `sb_exec`. That hands back the exact capability
+ * What it must never name is `bash`. That hands back the exact capability
  * being withheld, in the one place the model is already looking for a way around
- * it, with the tool's own authority behind it. `sb_exec` is unguarded because a
+ * it, with the tool's own authority behind it. `bash` is unguarded because a
  * shell takes an opaque command string and pattern-matching git out of one is
  * neither reliable nor this guard's job — a fact about the implementation, not a
  * route to advertise.
@@ -75,14 +76,15 @@ function gitInternalNote(path: string, verb: string): string {
     `${path} is inside .git — git's internal state, which ${verb} does not touch. ` +
     `Reading it tells you less than the repository tools do, and writing it ` +
     `corrupts the checkout. Repository work goes through the repo tools ` +
-    `(\`repo_status\`, \`repo_diff\`, \`repo_commit\`, \`repo_push\`), which the ` +
-    `main agent holds. If this task needs git state you cannot get that way, say ` +
-    `so in your result rather than reaching into .git yourself.`
+    `(\`repo_status\`, \`repo_diff\`, \`repo_commit\`, \`repo_push\`). If this ` +
+    `task needs git state you cannot get that way, say so in your result rather ` +
+    `than reaching into .git yourself.`
   );
 }
 
 /**
- * The path check every file tool makes, before it opens anything.
+ * The path check every file tool and every workspace call makes, before it
+ * opens anything.
  *
  * Returns the sentence to hand back, or `undefined` to proceed. One string
  * comparison — no `stat`, no round trip — which is why every file tool can
@@ -93,15 +95,15 @@ function gitInternalNote(path: string, verb: string): string {
  * The note names the tools repository work belongs to, because the case that
  * actually happens is a model reaching into `.git/HEAD` to fix a merge.
  *
- * It is not containment, and this is the only place worth saying so. `sb_exec`
- * is in the same tool family, granted per family rather than per tool, so every
- * agent holding these file tools also holds a shell that reads and writes `.git`
- * directly.
+ * It is not containment, and this is the only place worth saying so. An agent
+ * that can write files here almost always holds `bash` too, which reads and
+ * writes `.git` directly.
  *
  * Symlinks are not resolved, for the same reason: a tracked
  * `docs/notes.md -> ../.git/config` only matters to an agent given these tools
- * *without* the shell, which the family granularity makes unbuildable. If that
- * ever becomes buildable, the **write** path is the half to restore —
+ * *without* the shell. A read-only install — `restrictTools` down to `grep`,
+ * with Think's writing tools left out — is that agent, and it cannot write. If a writing agent
+ * without the shell ever exists, the **write** path is the half to restore —
  * `.git/config` is an input to the credentialed push, and a planted hook runs
  * under a container-side `repo_commit`. Reading `.git` discloses nothing that is
  * not already readable, so the read half is not worth an `lstat` per call. The

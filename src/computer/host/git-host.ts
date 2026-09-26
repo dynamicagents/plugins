@@ -89,7 +89,7 @@ export class WorkspaceGitHost {
         );
       await git.checkout({ dir: req.dir, ref: landed });
       // What a real `git clone` writes and the container's git will look for:
-      // without it the branch tracks nothing, and a subagent reaching for a bare
+      // without it the branch tracks nothing, and an agent reaching for a bare
       // `git status` in the shell sees a branch with no upstream.
       await git.configSet({
         dir: req.dir,

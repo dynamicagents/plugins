@@ -21,7 +21,7 @@ import type {
  * A grep match carries the whole line, and a minified bundle is one line of
  * megabytes — a single match in `dist/` would otherwise be the entire result. The
  * head is kept because a match's file and line number are what the model acts on;
- * it reads the region with `sb_read` next.
+ * it reads the region with `read` next.
  */
 const MAX_MATCH_LINE_CHARS = 200;
 
@@ -51,24 +51,11 @@ export function truncateOutput(text: string, max: number): string {
 }
 
 /**
- * A byte count in the form a model can act on.
- *
- * A listing that says a file is 4.2 MB tells the model the read it is about to do
- * comes back with a hole in the middle — the one thing it cannot infer from the
- * truncated result itself.
- */
-export function humanBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
  * One `fs.grep` hit, derived from the client rather than imported.
  *
  * `@cloudflare/computer` declares `WorkspaceGrepMatch` but does not re-export it,
  * so there is no name to import. Reading it back off the method keeps this correct
- * by construction — the same structural approach {@link readBounded} takes to `fs`.
+ * by construction.
  */
 type GrepMatch = Awaited<ReturnType<WorkspaceClient["fs"]["grep"]>>[number];
 

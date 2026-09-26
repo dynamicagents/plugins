@@ -156,7 +156,7 @@ describe("openCopy", () => {
   });
 
   /**
-   * A retried chunk finds the first attempt's script still running. Two of them
+   * A recovered turn finds the first attempt's script still running. Two of them
    * building one copy would each delete what the other was making, so the retry
    * waits on the first instead.
    */

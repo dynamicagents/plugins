@@ -1,14 +1,20 @@
 import type { ToolSet } from "ai";
-import { definePlugin } from "@dynamicagents/core";
+import { definePlugin, PluginSetupError } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
-import { getWorkspace } from "@cloudflare/computer";
-import type { WorkspaceClient, WorkspaceStub } from "@cloudflare/computer";
+import type { WorkspaceClient } from "@cloudflare/computer";
+import {
+  openWorkspace,
+  openWorkspaceFs,
+  workspaceNameFromRuntime,
+  type WorkspaceHost
+} from "./open.js";
+import { workspaceRoute } from "./proxy.js";
 import { cancelledNote } from "./render.js";
 import { computerContext, DEFAULT_CWD, DEFAULT_TIMEOUT_MS } from "./context.js";
 import { withShell } from "./shell.js";
 import { execTools } from "./tools-exec.js";
 import { fileTools } from "./tools-file.js";
-import { findTools } from "./tools-find.js";
+import { grepTools } from "./tools-grep.js";
 import type { WorkspaceAdvisory } from "./advisory.js";
 
 /**
@@ -19,17 +25,16 @@ import type { WorkspaceAdvisory } from "./advisory.js";
  * the same tree over RPC; and when the container is replaced the tree is pushed
  * back into the new one.
  *
- * Not to be confused with `@dynamicagents/plugins/workspace`, which is a virtual
- * filesystem with no processes and nothing to run. Install exactly one
- * filesystem plugin — an agent holding two gives the model no way to know which
- * one a path refers to.
+ * The agent's own workspace has to be this one — `computerWorkspace` — or
+ * Think's `read` and `write` would work on a different tree from `bash`. The
+ * plugin refuses to start otherwise; see `./proxy.ts`.
  *
  * ## The dependency tree is not in the workspace
  *
  * The one thing to internalise before reading further. A package root's
  * `node_modules` is a bind mount of the container's disk, so installs never
- * sync, and a new container reinstalls — see `./host/container-deps.ts`. The file tools read
- * the workspace, so they refuse it; `sb_exec` reaches it. `paths.ts` owns what a
+ * sync, and a new container reinstalls — see `./host/container-deps.ts`. The file
+ * tools read the workspace, so they refuse it; `bash` reaches it. `paths.ts` owns what a
  * path may be and what walks drop.
  *
  * Requires the Workers **Paid** plan (containers) and a Durable Object binding
@@ -102,129 +107,15 @@ export {
 // `exists`, which a `stat`-only probe never asks for.
 export { pathExists } from "./read.js";
 
-/**
- * This plugin's tool-family name, as a recipe's `toolFamilies` lists it.
- *
- * `"sandbox"` names the capability — a shell and a filesystem — rather than the
- * package providing it, and it appears in recipes, souls and allowlists that
- * have nothing to do with either. Renaming it would have `validateRecipe`
- * silently drop the family from every recipe that still says `sandbox`: a
- * subagent with no tools and no error explaining why.
- */
-export const SANDBOX_FAMILY = "sandbox";
-
-/**
- * Where a parent puts the workspace name so its subagents reach the same one.
- *
- * A subagent cannot compute this itself. The name is derived from the verified
- * caller and the repository, and core deliberately gives a subagent execution a
- * `callerKey` thunk that **throws** — "a subagent execution has no caller
- * identity". So a facet running a `code` subtask would fail at its first tool
- * call, with the parent's checkout sitting in a workspace it cannot name.
- *
- * `resolveRuntime` runs on the parent, where the name resolves, and its return
- * value reaches every tool family as `ToolFamilyContext.runtime`. That is the
- * channel core built for exactly this, and it is emphatically *not* `params`,
- * which are declared in the subtask type's schema and rendered to the delegating
- * model — a workspace name there would be model-authored, and a model naming
- * another caller's workspace would get that caller's files.
- */
-export const WORKSPACE_RUNTIME_KEY = "workspaceName";
-
-/**
- * Read a parent-resolved workspace name off a subtask's runtime state.
- *
- * Returns `undefined` rather than throwing on anything unexpected: the main
- * agent's tools have no runtime at all, and falling back to the configured thunk
- * is right there.
- */
-export function workspaceNameFromRuntime(runtime: unknown): string | undefined {
-  const value = (runtime as Record<string, unknown> | null | undefined)?.[
-    WORKSPACE_RUNTIME_KEY
-  ];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
+export {
+  openWorkspace,
+  openWorkspaceFs,
+  workspaceNameFromRuntime,
+  WORKSPACE_RUNTIME_KEY,
+  type WorkspaceHost
+} from "./open.js";
+export { computerWorkspace, isComputerWorkspace } from "./proxy.js";
 export { withShell, withShellTranscript } from "./shell.js";
-
-/**
- * The Durable Object the workspace lives in, as this plugin needs to see it.
- *
- * Structural rather than imported: the class is the host's — it owns the
- * container binding, the alarm and the install job — and a plugin that imported
- * it would stop a second host from bringing its own. `__getWorkspaceStub` is the
- * one method `getWorkspace()` calls across the boundary, and it is what
- * `withWorkspace` installs (or what a host that constructs `Workspace` itself
- * reimplements, which is the same three lines).
- */
-export interface WorkspaceHost extends Rpc.DurableObjectBranded {
-  // Typed as `WorkspaceStub` rather than `unknown`, and not for documentation:
-  // Workers RPC maps an `unknown` return to `never`, which makes any concrete
-  // Durable Object class fail to satisfy this interface.
-  __getWorkspaceStub(): Promise<WorkspaceStub>;
-  /**
-   * The same workspace for filesystem-only work, which the host must serve
-   * **without starting a container**.
-   *
-   * The filesystem is the Durable Object's own SQLite, while the first command
-   * in a fresh container waits for the whole tree to be pushed into it — so a
-   * file tool served the other way waits minutes for a local `readdir`. See
-   * `WorkspaceObjectBase.__getWorkspaceFsStub` in `./host/workspace.ts`.
-   *
-   * Required rather than optional, for the reason {@link advisories} gives. A
-   * host with nothing to distinguish returns its own `__getWorkspaceStub()`.
-   */
-  __getWorkspaceFsStub(): Promise<WorkspaceStub>;
-  /**
-   * Everything currently true about the workspace that a caller must not assume
-   * away — see {@link file://./advisory.ts}. An empty array is the good case.
-   *
-   * Required rather than optional, and not only because Workers RPC types an
-   * optional method as a union nothing can call. A host with nothing to report
-   * returns `[]` in one line; a host that forgot to expose it gets a compile
-   * error instead of an `sb_exec` that silently runs against a half-built
-   * `node_modules`, or against a workspace whose writes are being dropped.
-   *
-   * `deriveAdvisories` builds the array from what the host already knows, so
-   * implementing this is gathering what the host has rather than writing policy.
-   */
-  advisories(): Promise<readonly WorkspaceAdvisory[]>;
-}
-
-/**
- * Open the workspace behind a Durable Object stub.
- *
- * The cast is unavoidable, and narrow enough to be worth isolating here rather
- * than repeating. `getWorkspace` wants a handle whose `__getWorkspaceStub()`
- * resolves to a `WorkspaceStub` — the concrete class, private fields and all.
- * Across a Durable Object boundary Workers RPC hands back a structural
- * `Stub<WorkspaceStub>`, which forwards every method faithfully but carries none
- * of the class's private brand: runtime-compatible, type-incompatible. This is
- * the only place in the plugin that gap is crossed.
- */
-export function openWorkspace(
-  host: DurableObjectStub<WorkspaceHost>
-): Promise<WorkspaceClient> {
-  return getWorkspace(host as unknown as Parameters<typeof getWorkspace>[0]);
-}
-
-/**
- * The same workspace, opened for filesystem work alone.
- *
- * `getWorkspace` calls exactly one method on what it is handed, so the host is
- * wrapped in an object answering it from the other side of the seam — see
- * {@link WorkspaceHost.__getWorkspaceFsStub}. Everything past that is identical.
- *
- * **Only the file tools take this.** `sb_exec` and {@link computerExec} need the
- * container started and its CA installed, so they open it the other way.
- */
-export function openWorkspaceFs(
-  host: DurableObjectStub<WorkspaceHost>
-): Promise<WorkspaceClient> {
-  return getWorkspace({
-    __getWorkspaceStub: () => host.__getWorkspaceFsStub()
-  } as unknown as Parameters<typeof getWorkspace>[0]);
-}
 
 export interface ComputerConfig {
   /**
@@ -275,18 +166,16 @@ export interface ComputerConfig {
    * characters far better than they track UTF-8 bytes. So the name moved to meet
    * the implementation rather than the other way round.
    *
-   * `sb_read` is the one place a byte bound survives, and it is derived from
-   * this rather than separate — see `readBounded`.
    */
   maxOutputChars?: number;
   /**
-   * How long `sb_exec` waits for a running dependency install before giving the
+   * How long `bash` waits for a running dependency install before giving the
    * turn back. Defaults to 90 seconds.
    *
-   * Bounded rather than open-ended because the wait happens inside a subagent's
-   * chunk, and a tool call that blocks for the length of an `npm ci` is exactly
-   * the thing moving the install out of the round loop was meant to prevent. On
-   * expiry the tool runs nothing and says so, which costs one cheap turn.
+   * Bounded rather than open-ended because the wait happens inside a turn, and
+   * a tool call that blocks for the length of an `npm ci` is exactly what
+   * running the install as the host's own job was meant to prevent. On expiry
+   * the tool runs nothing and says so, which costs one cheap step.
    */
   installGateMs?: number;
   /**
@@ -300,8 +189,8 @@ export interface ComputerConfig {
    *
    * ## Put no secret here
    *
-   * *Every* command gets this environment, and `sb_exec`'s command is written by
-   * the model: `sb_exec("printenv")` prints all of it, and so does a
+   * *Every* command gets this environment, and `bash`'s command is written by
+   * the model: `bash("printenv")` prints all of it, and so does a
    * `postinstall` script in a repository the agent was asked to clone, which
    * nobody vetted.
    *
@@ -349,7 +238,7 @@ export function buildComputerTools(
   return {
     ...execTools(ctx),
     ...fileTools(ctx),
-    ...findTools(ctx)
+    ...grepTools(ctx)
   };
 }
 
@@ -404,7 +293,7 @@ export function computerExec(config: ComputerConfig): (
 }> {
   return async (command, options) => {
     // The caller forwards its execution's runtime state opaquely; only this side
-    // knows the key it might carry. That is what lets `/repo` reach a subagent's
+    // knows the key it might carry. That is what lets `/repo` reach a sub-agent's
     // shared workspace without importing anything from here.
     const name =
       workspaceNameFromRuntime(options?.runtime) ?? config.workspaceName();
@@ -456,59 +345,68 @@ export function computerExec(config: ComputerConfig): (
   };
 }
 
+const CONTEXT = [
+  "You have a Linux container with a shell, a package manager and network access:",
+  "- `bash` runs any shell command — builds, tests, installs, git.",
+  "- `read` / `write` / `edit` / `delete` work on files; `edit` replaces an exact unique string and is the right tool for a small change.",
+  "- `grep` searches file contents; `list` lists a directory; `find` finds files by glob.",
+  // The reason to prefer them is the one thing the model cannot infer from a
+  // tool description: these read the durable workspace directly, so they are
+  // the only tools that still answer while the container is unavailable.
+  "Search with `grep` and `find` rather than running them through `bash`. They read the workspace directly, so they keep working while the container is restarting or an install is still running, and they come back with line numbers and a bounded result instead of a wall of text.",
+  "Command output is truncated from the middle when large, so run targeted commands and read specific files rather than printing everything.",
+  // Both halves of this matter and they pull in opposite directions, which
+  // is why they are stated together rather than left for the model to work
+  // out from a confusing result.
+  "The checkout is durable: it survives between tasks and is still there after the container restarts, so it may already contain work from an earlier task — check before assuming it is empty.",
+  "`node_modules` is not durable: it lives on the container's disk, so a new container reinstalls it, and the file tools cannot see inside it — use `bash` there. It is a mount point, so `rm -rf node_modules` fails; `npm ci` clears it itself.",
+  // Stated up front rather than left to a refusal, so the model does not spend
+  // a turn discovering it. The destination matters as much as the rule: a
+  // prohibition with nowhere to go gets worked around.
+  "`.git` is off limits to these tools, and searches and recursive listings skip it. It is git's internal state — reading it tells you less than the repository tools do, and writing it corrupts the checkout. Repository work goes through the repo tools (`repo_status`, `repo_diff`, `repo_commit`, `repo_push`); if a task needs git state you cannot get that way, say so in your result rather than reaching into `.git` yourself."
+].join("\n");
+
+/**
+ * The container plugin. Its tools reach the workspace through the agent's own
+ * `computerWorkspace` — the one Think's `read` and `write` use — so the two can
+ * never resolve different ones. `config` answers everything else: the shell,
+ * the limits, the environment.
+ */
 export function computer(config: ComputerConfig): AgentPlugin {
-  // Resolved per call, not memoized: `workspaceName` is a thunk precisely
-  // because the name is not knowable at construction, and a stale stub would
-  // silently route a second caller's commands into the first caller's files.
-  const nameOf = (runtime?: unknown) =>
-    workspaceNameFromRuntime(runtime) ?? config.workspaceName();
-  const host = (runtime?: unknown) =>
-    config.binding.get(config.binding.idFromName(nameOf(runtime)));
-
-  const tools = (runtime?: unknown) =>
-    buildComputerTools(
-      () => openWorkspace(host(runtime)),
-      config,
-      // No try/catch here: `buildComputerTools` fails the gate open itself, so
-      // wrapping again would only make it look like the guarantee lives in two
-      // places.
-      () => host(runtime).advisories(),
-      () => openWorkspaceFs(host(runtime)),
-      () => nameOf(runtime)
-    );
-
   return definePlugin({
-    key: "computer",
+    name: "computer",
 
-    mainAgentTools: () => tools(),
+    tools: (ctx) => {
+      // Here, not in `execute`: the start check builds every plugin's tools,
+      // so a missing workspace fails the start rather than a turn.
+      const route = workspaceRoute(ctx.workspace());
+      if (!route)
+        throw new PluginSetupError(
+          `plugin "computer" runs \`bash\` in a container, but ${ctx.agentName}'s ` +
+            "workspace is not that container's, so Think's `read` and `write` " +
+            "would work on a different tree. Set it on the agent class: " +
+            "`override workspace = computerWorkspace(config, () => this.pluginContext().runtime())`."
+        );
 
-    // `ctx.runtime` is what makes a delegated subtask land in the workspace its
-    // parent prepared — see {@link WORKSPACE_RUNTIME_KEY}. Without it the
-    // fallback thunk runs, and on a subagent that throws.
-    toolFamilies: {
-      [SANDBOX_FAMILY]: (ctx) => ({ tools: tools(ctx.runtime) })
+      // Resolved per call, not memoized: the name belongs to the turn — a
+      // sub-agent's comes from `runtime()`, see {@link WORKSPACE_RUNTIME_KEY} —
+      // and a stale stub would silently route a second caller's commands into
+      // the first caller's files.
+      const host = () => route.host(route.name());
+
+      return buildComputerTools(
+        () => openWorkspace(host()),
+        config,
+        // No try/catch here: `buildComputerTools` fails the gate open itself,
+        // so wrapping again would only make it look like the guarantee lives in
+        // two places.
+        () => host().advisories(),
+        () => openWorkspaceFs(host()),
+        route.name
+      );
     },
 
-    capability: [
-      "You have a Linux container with a shell, a package manager and network access:",
-      "- `sb_exec` runs any shell command — builds, tests, installs, git.",
-      "- `sb_read` / `sb_write` / `sb_edit` work on files; `sb_edit` replaces an exact unique string and is the right tool for a small change.",
-      "- `sb_grep` searches file contents; `sb_ls` lists a directory, or finds files by glob with `pattern`; `sb_exists` checks a path.",
-      // The reason to prefer them is the one thing the model cannot infer from a
-      // tool description: these read the durable workspace directly, so they are
-      // the only tools that still answer while the container is unavailable.
-      "Search with `sb_grep` and `sb_ls` rather than running `grep` or `find` through `sb_exec`. They read the workspace directly, so they keep working while the container is restarting or an install is still running, and they come back with line numbers and a bounded result instead of a wall of text.",
-      "Command output is truncated from the middle when large, so run targeted commands and read specific files rather than printing everything.",
-      // Both halves of this matter and they pull in opposite directions, which
-      // is why they are stated together rather than left for the model to work
-      // out from a confusing result.
-      "The checkout is durable: it survives between tasks and is still there after the container restarts, so it may already contain work from an earlier task — check before assuming it is empty.",
-      "`node_modules` is not durable: it lives on the container's disk, so a new container reinstalls it, and the file tools cannot see inside it — use `sb_exec` there. It is a mount point, so `rm -rf node_modules` fails; `npm ci` clears it itself.",
-      // Stated up front rather than left to a refusal, so the model does not spend
-      // a turn discovering it. The destination matters as much as the rule: a
-      // prohibition with nowhere to go gets worked around.
-      "`.git` is off limits to these tools, and searches and recursive listings skip it. It is git's internal state — reading it tells you less than the repository tools do, and writing it corrupts the checkout. Repository work goes through the repo tools (`repo_status`, `repo_diff`, `repo_commit`, `repo_push`), which the main agent holds; if a task needs git state beyond what you can see in the working tree, say so in your result rather than reaching into `.git` yourself."
-    ].join("\n")
+    context: [{ provider: { get: async () => CONTEXT } }]
   });
 }
 
@@ -520,7 +418,7 @@ export function computer(config: ComputerConfig): AgentPlugin {
  * `./host/` is a directory rather than a subpath of its own, and that is the
  * point: one capability is one import path, so a consumer cannot install the
  * tools and miss the object they address. The two halves have opposite bundle
- * costs — an agent that only calls `sb_exec` carries no container backend and no
+ * costs — an agent that only calls `bash` carries no container backend and no
  * isomorphic-git — and `"sideEffects": false` is what keeps that true, since
  * nothing here references the host unless the consumer does.
  *

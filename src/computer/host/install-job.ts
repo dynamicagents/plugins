@@ -1,7 +1,7 @@
 import { shellQuote, type Workspace } from "@cloudflare/computer";
 import type { WorkspaceRuntimeExecHandle } from "@cloudflare/computer";
-import type { Scheduler } from "@dynamicagents/core/alarm";
-import { JobLifecycle, type JobContext } from "@dynamicagents/core/job";
+import type { Scheduler } from "./alarm/index.js";
+import { JobLifecycle, type JobContext } from "./job/index.js";
 // Leaf modules rather than `../index.js`, and that is structural: the barrel
 // re-exports this directory, so reaching it from here would be a cycle — through
 // a module that builds a class at import time, where initialisation order
@@ -38,7 +38,7 @@ function execWasLost(err: unknown): boolean {
  * ## The rule every guard here serves
  *
  * `running` is the one install state that **blocks work**: the plugin's gate
- * waits on it and then refuses to run. Every other state is a fact a subagent
+ * waits on it and then refuses to run. Every other state is a fact an agent
  * can act on. So a `running` record must never outlive the command it describes,
  * and the ways it can are not all reachable from one place — the spawn can fail
  * before a drain is attached, a drain can be cut short by an eviction, `getExec`
@@ -321,7 +321,7 @@ export class InstallJob {
    *
    * Called from `repo_clone` through the repo plugin's `afterCheckout` hook, so
    * it runs inside a model turn and must not block on the install — 225 seconds
-   * for slack-gatekeeper, against a chunk step that dies at ten minutes.
+   * for slack-gatekeeper, against a turn that is cut at fifteen minutes.
    *
    * That caller is a model turn, which lives long enough to hold the drain handed
    * to `ctx.waitUntil` below. **A short-lived caller cannot**, which is why an
@@ -375,7 +375,7 @@ export class InstallJob {
     /**
      * One install at a time — the hazard is displacement.
      *
-     * `repo_clone` calls this and a retried chunk calls it again. Every call
+     * `repo_clone` calls this and a recovered turn calls it again. Every call
      * spawns with the same {@link INSTALL_EXEC_ID}, so without this each would
      * displace the last while the displaced command's drain stayed attached
      * through `ctx.waitUntil` — then wrote *its* outcome over a record
@@ -547,14 +547,14 @@ export class InstallJob {
     } catch (err) {
       // The command never started, so nothing will ever drain it and no
       // re-attach can find it. Close the record here: a `failed` install is
-      // recoverable — the subagent is told what happened and can run the command
+      // recoverable — the agent is told what happened and can run the command
       // itself — where a `running` one that nobody owns is not.
       //
       // Which sentence, though, depends on why. The default advice — run it
-      // yourself with `sb_exec` — is good for a container that is merely
+      // yourself with `bash` — is good for a container that is merely
       // unreachable, and useless for a deployment fault: the same container is
-      // what `sb_exec` would have to reach. Under one of those, say what an
-      // operator has to do and do not send the subagent after a command that
+      // what `bash` would have to reach. Under one of those, say what an
+      // operator has to do and do not send the agent after a command that
       // cannot run either.
       const fault = deploymentFault(err);
       console.error(
@@ -573,7 +573,7 @@ export class InstallJob {
         error: fault
           ? `the install could not be started: ${fault.remedy}`
           : `the install could not be started (${String(err)}). The container ` +
-            "was most likely unreachable. Run the command yourself with sb_exec, " +
+            "was most likely unreachable. Run the command yourself with bash, " +
             "or clone again to retry it."
       };
       await this.#job.write(failed);
@@ -635,7 +635,7 @@ export class InstallJob {
         error:
           `the install has been running for ${minutes} minutes without ` +
           "reporting, which is past its timeout — it is not going to finish. " +
-          "Run the command yourself with sb_exec if you still need it."
+          "Run the command yourself with bash if you still need it."
       };
       await this.#job.write(failed);
       await this.#job.clearWatch();
@@ -694,7 +694,7 @@ export class InstallJob {
      * command it was watching — `ctx.waitUntil` keeps running after the RPC
      * returns — and the damage a late one does is silent: it writes a verdict
      * about a finished command over a record describing a live one, and every
-     * `sb_exec` then reads a result that belongs to nothing.
+     * `bash` then reads a result that belongs to nothing.
      *
      * `startedAt` is the generation marker. `#beginInstall` rewrites the context
      * before it spawns, so a drain whose stamp no longer matches has been
@@ -759,7 +759,7 @@ export class InstallJob {
         // Logged, and this line is not optional. This is the *ordinary* way an
         // install fails — the other paths are all exceptional — and it used to
         // write the record and say nothing, so an operator looking at why the
-        // subagent was complaining found the complaint and no cause. The tail
+        // agent was complaining found the complaint and no cause. The tail
         // is the install's own last words; without it the only copy is inside a
         // Durable Object nobody can query.
         console.error(`[${this.deps.tag()}] install failed`, {
@@ -817,7 +817,7 @@ export class InstallJob {
    * `getExec` with `resume: "tail"` re-opens the stream of a command that is
    * still running in the container — or replays the end of one that finished
    * while nobody was listening, which is the case that would otherwise leave the
-   * record stuck at `running` and every `sb_exec` blocked behind it.
+   * record stuck at `running` and every `bash` blocked behind it.
    */
   async #reattachInstall(): Promise<void> {
     if (this.#draining) return;
@@ -832,7 +832,7 @@ export class InstallJob {
     } catch (err) {
       // The exec is gone entirely — the container was replaced under it. Say so
       // rather than leaving the gate closed forever; the next checkout starts a
-      // new install, and `sb_exec` can run in the meantime.
+      // new install, and `bash` can run in the meantime.
       if (execWasLost(err)) await this.deps.containerGone();
       // Same split as the spawn path: a replaced container is worth re-running
       // into, a deployment fault is not, and only one of them is the container's
@@ -860,7 +860,7 @@ export class InstallJob {
         error: fault
           ? `the install stopped without reporting: ${fault.remedy}`
           : "the install stopped without reporting — its container was most " +
-            "likely replaced. Re-run it with sb_exec, or clone again to restart it."
+            "likely replaced. Re-run it with bash, or clone again to restart it."
       });
       await this.#job.clearWatch();
     }

@@ -17,19 +17,18 @@ import {
 } from "./run.js";
 import { DEFAULT_PERMISSION_MODE } from "./config.js";
 
-const EXEC = execIdFor(7);
+const EXEC = execIdFor("run-7");
 const FRESH = freshCursor(EXEC);
 
 /**
- * Launching and draining, and the two failures that are invisible until
- * production.
- *
- * A drain that returns as soon as it has nothing to read burns
- * `MAX_CHUNKS_PER_BRANCH` in seconds and the subtask dies having done nothing
- * wrong. A cursor that does not carry loses whichever line the window happened
+ * Launching and draining, and the failure that is invisible until production:
+ * a cursor that does not carry loses whichever line a stopped drain happened
  * to cut in half — which for a stream of one-JSON-object-per-line is a whole
  * event, silently.
  */
+
+/** A drain that stops itself after `ms`, as a cancelled turn's would. */
+const stopAfter = (ms: number) => ({ signal: AbortSignal.timeout(ms) });
 
 type Event = WorkspaceRuntimeEvent<"utf8">;
 
@@ -83,10 +82,10 @@ function fakeHandle(
  * A handle whose stream stays open until the test closes it.
  *
  * {@link fakeHandle} enqueues a fixed script, so a drain over it either ends
- * immediately or waits out its whole window — neither of which lets a test look
+ * immediately or waits until it is stopped — neither of which lets a test look
  * at a drain *while it is running*. This one can be ended on demand, which is
  * what makes the mid-flight assertions below deterministic rather than a race
- * against a short window.
+ * against a short timer.
  */
 function liveHandle(script: readonly Event[]): {
   handle: WorkspaceRuntimeExecHandle<"utf8">;
@@ -422,8 +421,6 @@ describe("buildLaunch", () => {
 });
 
 describe("drainRun", () => {
-  const window = { windowMs: 5_000 };
-
   it("reports the run done on the exit event, with its result", async () => {
     const handle = fakeHandle([
       stdout(1, assistant("working")),
@@ -431,7 +428,7 @@ describe("drainRun", () => {
       exit(3, 0)
     ]);
 
-    const outcome = await drainRun(handle, FRESH, window);
+    const outcome = await drainRun(handle, FRESH);
 
     expect(outcome.done).toBe(true);
     if (!outcome.done) throw new Error("unreachable");
@@ -442,38 +439,14 @@ describe("drainRun", () => {
   });
 
   /**
-   * A drain that ends early must not leave the window armed: a pending timer
-   * holds the facet's `executeChunk` open until the window runs out, so a
-   * session that finished in seconds still cost the whole window.
+   * A session with nothing to say yet is still running: the drain waits on it
+   * rather than reporting it finished, until it ends or is stopped.
    */
-  it("leaves no timer behind when the session ends inside the window", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    try {
-      const handle = fakeHandle([
-        stdout(1, assistant("working")),
-        stdout(2, RESULT_LINE),
-        exit(3, 0)
-      ]);
-
-      const outcome = await drainRun(handle, FRESH, { windowMs: 20 * 60_000 });
-
-      expect(outcome.done).toBe(true);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  /**
-   * The pacing rule. A session legitimately runs longer than one chunk, and a
-   * drain that returned the moment it had nothing to read would exhaust the
-   * branch's forty chunks in seconds without the run ever failing.
-   */
-  it("blocks until the window expires while the session is still going", async () => {
+  it("reads until it is stopped while the session is still going", async () => {
     const handle = fakeHandle([stdout(1, assistant("thinking"))], true);
     const started = Date.now();
 
-    const outcome = await drainRun(handle, FRESH, { windowMs: 60 });
+    const outcome = await drainRun(handle, FRESH, stopAfter(60));
 
     expect(outcome.done).toBe(false);
     expect(Date.now() - started).toBeGreaterThanOrEqual(50);
@@ -482,18 +455,18 @@ describe("drainRun", () => {
   });
 
   /**
-   * The window routinely cuts a line in half, and for a stream of one JSON
+   * A stopped drain can cut a line in half, and for a stream of one JSON
    * object per line that is a whole event. The carry is what makes the next
-   * chunk able to finish it.
+   * drain able to finish it.
    */
-  it("carries a half-read line into the next window", async () => {
+  it("carries a half-read line into the next drain", async () => {
     const whole = assistant("a complete thought");
     const cut = Math.floor(whole.length / 2);
 
     const first = await drainRun(
       fakeHandle([stdout(1, whole.slice(0, cut))], true),
       FRESH,
-      { windowMs: 40 }
+      stopAfter(40)
     );
     expect(first.progress).toHaveLength(0);
     expect(first.cursor.carry).toBe(whole.slice(0, cut));
@@ -501,42 +474,40 @@ describe("drainRun", () => {
     const second = await drainRun(
       fakeHandle([stdout(2, whole.slice(cut))], true),
       first.cursor,
-      { windowMs: 40 }
+      stopAfter(40)
     );
     expect(second.progress.map((p) => p.text)).toEqual(["a complete thought"]);
   });
 
   /**
-   * Progress keys are positional, so the count has to survive the chunk boundary
-   * or the second chunk restarts at `claude:0` and the gatekeeper drops every note
-   * as a duplicate of one it already showed.
+   * Note keys are positional, so the count has to survive a resumed drain or
+   * the second restarts at `claude:0` and the transcript drops every note as a
+   * duplicate of one it already has.
    */
-  it("continues the progress numbering across chunks", async () => {
+  it("continues the note numbering across drains", async () => {
     const first = await drainRun(
       fakeHandle([stdout(1, assistant("one") + assistant("two"))], true),
       FRESH,
-      { windowMs: 40 }
+      stopAfter(40)
     );
     expect(first.cursor.emitted).toBe(2);
 
     const second = await drainRun(
       fakeHandle([stdout(2, assistant("three")), exit(3, 0)]),
-      first.cursor,
-      window
+      first.cursor
     );
     expect(second.progress.map((p) => p.key)).toEqual(["claude:2"]);
   });
 
   /**
    * The stream ending with no `exit` means the container went away under the
-   * run. Reporting it as still-running would make the caller wait out its entire
-   * chunk budget on a dead process.
+   * run. Reporting it as still-running would make the caller wait on a dead
+   * process.
    */
   it("treats a stream that ends without an exit event as a failure", async () => {
     const outcome = await drainRun(
       fakeHandle([stdout(1, assistant("half a job"))]),
-      FRESH,
-      window
+      FRESH
     );
 
     expect(outcome.done).toBe(true);
@@ -545,7 +516,7 @@ describe("drainRun", () => {
     expect(outcome.result).toBeUndefined();
   });
 
-  it("resumes from a cursor without re-emitting what the last chunk showed", async () => {
+  it("resumes from a cursor without re-emitting what the last drain showed", async () => {
     const cursor: DrainCursor = {
       execId: EXEC,
       seq: 9,
@@ -554,8 +525,7 @@ describe("drainRun", () => {
     };
     const outcome = await drainRun(
       fakeHandle([stdout(10, assistant("next")), exit(11, 0)]),
-      cursor,
-      window
+      cursor
     );
 
     expect(outcome.progress.map((p) => p.key)).toEqual(["claude:3"]);
@@ -565,8 +535,7 @@ describe("drainRun", () => {
   it("reports a non-zero exit without a result line", async () => {
     const outcome = await drainRun(
       fakeHandle([stdout(1, "some stderr-ish noise\n"), exit(2, 143)]),
-      FRESH,
-      window
+      FRESH
     );
 
     expect(outcome.done).toBe(true);
@@ -584,8 +553,7 @@ describe("drainRun", () => {
   it("keeps stderr when the process dies before reporting anything", async () => {
     const outcome = await drainRun(
       fakeHandle([stderrOut(1, "cannot be used with root/sudo\n"), exit(2, 1)]),
-      FRESH,
-      window
+      FRESH
     );
 
     expect(outcome.done).toBe(true);
@@ -606,8 +574,7 @@ describe("drainRun", () => {
         stdout(2, RESULT_LINE),
         exit(3, 0)
       ]),
-      FRESH,
-      window
+      FRESH
     );
 
     expect(outcome.done).toBe(true);
@@ -617,22 +584,21 @@ describe("drainRun", () => {
   });
 
   /**
-   * The death and the exit can land in different windows, so the tail rides on
-   * the cursor rather than living in one drain's locals.
+   * The death and the exit can land either side of a stopped drain, so the
+   * tail rides on the cursor rather than living in one drain's locals.
    */
-  it("carries stderr across a window boundary", async () => {
+  it("carries stderr across a stopped drain", async () => {
     const first = await drainRun(
       fakeHandle([stderrOut(1, "first half ")], true),
       FRESH,
-      { windowMs: 40 }
+      stopAfter(40)
     );
     expect(first.done).toBe(false);
     expect(first.cursor.stderr).toBe("first half ");
 
     const outcome = await drainRun(
       fakeHandle([stderrOut(2, "second half"), exit(3, 1)]),
-      first.cursor,
-      window
+      first.cursor
     );
 
     if (!outcome.done) throw new Error("unreachable");
@@ -649,8 +615,7 @@ describe("drainRun", () => {
         [stderrOut(1, `HEAD${"x".repeat(50_000)}TAIL`), exit(2, 1)],
         false
       ),
-      FRESH,
-      window
+      FRESH
     );
 
     if (!outcome.done) throw new Error("unreachable");
@@ -685,7 +650,7 @@ function handleWithPostPull(script: readonly Event[], open = false) {
       }
       // `open` models a session still thinking: the source has nothing more yet,
       // so `pull` never settles and the consumer's read stays pending until the
-      // window expires. Closing here instead would end the run.
+      // drain is stopped. Closing here instead would end the run.
       if (open) return await new Promise<void>(() => {});
       state.synced = true;
       controller.close();
@@ -719,46 +684,44 @@ describe("the filesystem sync", () => {
       exit(3, 0)
     ]);
 
-    const outcome = await drainRun(handle, FRESH, { windowMs: 5_000 });
+    const outcome = await drainRun(handle, FRESH);
 
     expect(outcome.done).toBe(true);
     expect(state.synced).toBe(true);
   });
 
   /**
-   * A window that ends mid-session must *not* trigger the pull — there is
+   * A drain stopped mid-session must *not* trigger the pull — there is
    * nothing to sync yet — but it must cancel, because merely releasing the
    * reader lock leaves the attachment and its pending read alive on the far
-   * side, one per chunk.
+   * side, where the next drain finds it still subscribed.
    */
-  it("cancels the attachment when the window expires, without syncing", async () => {
+  it("cancels the attachment when it is stopped, without syncing", async () => {
     const { handle, state } = handleWithPostPull(
       [stdout(1, assistant("still working"))],
       true
     );
 
-    const outcome = await drainRun(handle, FRESH, { windowMs: 50 });
+    const outcome = await drainRun(handle, FRESH, stopAfter(50));
 
     expect(outcome.done).toBe(false);
     // Cancelled, because merely releasing the reader lock leaves the attachment
-    // and its pending read alive on the far side — one stranded per chunk.
+    // and its pending read alive on the far side.
     expect(state.cancelled).toBe(true);
     // And not synced: there is nothing to pull back until the session ends.
     expect(state.synced).toBe(false);
   });
 
   /**
-   * **Cancelled before the window's progress posts are settled, not after.**
+   * **Cancelled before the drain's notes are settled, not after.**
    *
    * Asserting cancellation once `drainRun` has resolved proves nothing about
-   * the order: a drain that settled every queued post first and cancelled on
-   * the way out passes that check identically. Each post is a signed round trip
-   * to the gatekeeper, so that order held the attachment open across all of
-   * them and handed the next chunk a subscriber still live for no reason but
-   * sequencing. So the sink is pinned open here and the cancellation asserted
-   * while it is still pending.
+   * the order: a drain that settled every queued note first and cancelled on
+   * the way out passes that check identically, while holding the attachment
+   * open across all of them. So the sink is pinned open here and the
+   * cancellation asserted while it is still pending.
    */
-  it("cancels before waiting on the window's progress posts", async () => {
+  it("cancels before waiting on the drain's notes", async () => {
     const { handle, state } = handleWithPostPull(
       [stdout(1, assistant("still working"))],
       true
@@ -771,11 +734,11 @@ describe("the filesystem sync", () => {
     });
 
     const drained = drainRun(handle, FRESH, {
-      windowMs: 50,
+      ...stopAfter(50),
       onProgress: () => posted
     });
 
-    // The window expires, the drain cancels — with the sink still unresolved.
+    // The drain is stopped and cancels — with the sink still unresolved.
     await vi.waitFor(() => expect(state.cancelled).toBe(true));
 
     release();
@@ -783,19 +746,19 @@ describe("the filesystem sync", () => {
   });
 });
 
-describe("one exec id per subtask", () => {
+describe("one exec id per run", () => {
   /**
-   * Subtasks are a flat concurrent fan-out, and a workspace is one container. A
-   * shared exec id would let two sessions spawn over each other, each drain
-   * attach to whichever won, and `stop` kill somebody else's run.
+   * Runs are concurrent, and a workspace is one container. A shared exec id
+   * would let two sessions spawn over each other, each drain attach to
+   * whichever won, and `stop` kill somebody else's run.
    */
-  it("namespaces the id so two subtasks cannot collide", () => {
-    expect(execIdFor(7)).not.toBe(execIdFor(8));
-    expect(execIdFor(7)).toContain("7");
+  it("namespaces the id so two runs cannot collide", () => {
+    expect(execIdFor("run-7")).not.toBe(execIdFor("run-8"));
+    expect(execIdFor("run-7")).toContain("run-7");
   });
 
   it("carries the id in the cursor rather than re-deriving it", () => {
-    expect(freshCursor(execIdFor(7)).execId).toBe(execIdFor(7));
+    expect(freshCursor(execIdFor("run-7")).execId).toBe(execIdFor("run-7"));
   });
 });
 
@@ -820,10 +783,10 @@ describe("startRun", () => {
   }
 
   /**
-   * `start` spawns and then drains for minutes, so a chunk that fails anywhere
-   * after the spawn is retried with no cursor to resume from — and the runtime
-   * refuses to reuse a live id. Without the fallback the retry throws, every
-   * later retry throws identically, and a healthy session becomes unreachable.
+   * `start` spawns and then drains for minutes, so a turn cut anywhere after
+   * the spawn is recovered with no cursor to resume from — and the runtime
+   * refuses to reuse a live id. Without the fallback the recovery throws, every
+   * later one throws identically, and a healthy session becomes unreachable.
    */
   it("attaches instead of failing when the id is already live", async () => {
     const runtime = runtimeThatIsBusy();
@@ -838,9 +801,8 @@ describe("startRun", () => {
     expect(handle.id).toBe(EXEC);
   });
 
-  it("stops waiting on a busy id's subscriber once its chunk is replaced", async () => {
-    // The retry that replaced it is waiting on this call to unwind, and on the
-    // subscriber this would otherwise hold for the rest of the attach budget.
+  it("stops waiting on a busy id's subscriber once its turn is stopped", async () => {
+    // Nobody is left to read the session this would attach to.
     let looks = 0;
     const replaced = new AbortController();
     replaced.abort();
@@ -896,14 +858,14 @@ describe("startRun", () => {
 });
 
 /**
- * Waiting out the previous window's attachment.
+ * Waiting out the previous drain's attachment.
  *
- * A chunk boundary asks for the exec's stream within milliseconds of the last
- * window returning it, and the release on the far side is asynchronous — so the
- * container answers "already has a live subscriber" and the condition clears on
- * its own. Left to the Workflow it costs a retry each time, out of the budget a
- * deploy, a severed stub and a network drop also have to come from — which is
- * what `attachRun` in `./run.ts` exists to stop, and where that reasoning lives.
+ * A resumed drain can ask for the exec's stream while the last one's is still
+ * being released on the far side — so the container answers "already has a
+ * live subscriber" and the condition clears on its own. Left to recovery it
+ * costs a retry each time, out of the budget a deploy, a severed stub and a
+ * network drop also have to come from — which is what `attachRun` in
+ * `./run.ts` exists to stop, and where that reasoning lives.
  *
  * The clock and the wait are injected, so these assert the bound rather than
  * sit through it.
@@ -930,7 +892,7 @@ describe("attachRun", () => {
     } as SessionRuntime & { looks: number };
   }
 
-  it("waits for the release rather than failing the chunk", async () => {
+  it("waits for the release rather than failing the turn", async () => {
     const runtime = releasesAfter(3);
     const handle = await attachRun(runtime, FRESH, { wait: async () => {} });
 
@@ -966,8 +928,8 @@ describe("attachRun", () => {
 
   /**
    * The bound is what keeps this an optimisation rather than a hang: a
-   * subscriber that is never released has to reach the Workflow, which retries
-   * the step on a fresh isolate.
+   * subscriber that is never released has to fail the turn, which recovery
+   * retries on a fresh isolate.
    */
   it("gives up once the budget is gone, and not a millisecond past it", async () => {
     const runtime = releasesAfter(Number.POSITIVE_INFINITY);
@@ -993,21 +955,16 @@ describe("attachRun", () => {
 });
 
 /**
- * A chunk replaced by a retry of itself, asked to let go of the session.
- *
- * Only this chunk ends: the session goes on running, and the retry resumes from
- * the cursor returned here. Holding on instead is what kept a retry off the
- * session's one subscriber until the step ran out of attempts.
+ * A drain asked to stop: it returns the cursor at once and lets go of the
+ * session's one subscriber. Stopping the session itself is the caller's.
  */
-describe("drainRun, asked for its window back", () => {
-  const long = { windowMs: 20 * 60_000 };
+describe("drainRun, when stopped", () => {
   const settleReads = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-  it("yields at once, with a cursor the retry resumes from", async () => {
+  it("stops at once, with a cursor a resumed drain starts from", async () => {
     const { handle } = liveHandle([stdout(1, assistant("working"))]);
     const replaced = new AbortController();
     const draining = drainRun(handle, FRESH, {
-      ...long,
       signal: replaced.signal
     });
     await settleReads();
@@ -1019,13 +976,12 @@ describe("drainRun, asked for its window back", () => {
     expect(outcome.progress.map((p) => p.key)).toEqual(["claude:0"]);
   });
 
-  it("does not start a window it was already asked to give back", async () => {
+  it("does not start reading when it was stopped before it began", async () => {
     const { handle } = liveHandle([stdout(1, assistant("working"))]);
     const replaced = new AbortController();
     replaced.abort();
 
     const outcome = await drainRun(handle, FRESH, {
-      ...long,
       signal: replaced.signal
     });
     expect(outcome.done).toBe(false);
@@ -1033,7 +989,7 @@ describe("drainRun, asked for its window back", () => {
   });
 
   it("reads to the end once the process has exited", async () => {
-    // The read to the end is what runs the filesystem sync, so a yield that
+    // The read to the end is what runs the filesystem sync, so a stop that
     // cut it short would report a session whose edits never land.
     let controller!: ReadableStreamDefaultController<Event>;
     const stream = new ReadableStream<Event>({
@@ -1055,7 +1011,6 @@ describe("drainRun, asked for its window back", () => {
     const replaced = new AbortController();
     let settled = false;
     const draining = drainRun(handle, FRESH, {
-      ...long,
       signal: replaced.signal
     }).finally(() => {
       settled = true;
@@ -1074,9 +1029,9 @@ describe("drainRun, asked for its window back", () => {
   });
 });
 
-describe("attachRun, for a chunk that has been replaced", () => {
+describe("attachRun, when stopped", () => {
   it("stops waiting for the subscriber", async () => {
-    // The retry that replaced it is what the subscriber is being freed for.
+    // Nobody is left to read the session it would attach to.
     let looks = 0;
     const runtime: SessionRuntime = {
       exec: async () => {
@@ -1131,26 +1086,24 @@ describe("the reserved credential key", () => {
   });
 });
 
-describe("the result across a chunk boundary", () => {
+describe("the result across a stopped drain", () => {
   /**
-   * The `result` line and the `exit` event are two events, and a window can end
-   * between them. Losing the result means a successful session reports a
-   * terminal outcome with nothing in it — and `persistResult` turns an empty
-   * report into a failure.
+   * The `result` line and the `exit` event are two events, and a drain can be
+   * cut between them. Losing the result means a successful session reports a
+   * terminal outcome with nothing in it — one that reads as having died
+   * without a word.
    */
-  it("carries a result seen in one window into the next", async () => {
+  it("carries a result seen in one drain into the next", async () => {
     const first = await drainRun(
       fakeHandle([stdout(1, RESULT_LINE)], true),
       FRESH,
-      { windowMs: 40 }
+      stopAfter(40)
     );
 
     expect(first.done).toBe(false);
     expect(first.cursor.result?.costUsd).toBe(1.25);
 
-    const second = await drainRun(fakeHandle([exit(2, 0)]), first.cursor, {
-      windowMs: 5_000
-    });
+    const second = await drainRun(fakeHandle([exit(2, 0)]), first.cursor);
 
     expect(second.done).toBe(true);
     if (!second.done) throw new Error("unreachable");
@@ -1186,8 +1139,6 @@ describe("drainRun, reporting as it goes", () => {
     ]);
 
     const drain = drainRun(session.handle, FRESH, {
-      // Long, so nothing can end the window while the assertion below runs.
-      windowMs: 60_000,
       onProgress: (event) => {
         seen.push(event.text);
         if (seen.length === 2) sawBoth();
@@ -1199,8 +1150,8 @@ describe("drainRun, reporting as it goes", () => {
 
     await bothSeen;
     expect(seen).toEqual(["reading the tree", "running the suite"]);
-    // The session has not exited and the window has not expired, so the drain
-    // cannot have returned — these notes were delivered mid-flight.
+    // The session has not exited and nothing stopped the drain, so it cannot
+    // have returned — these notes were delivered mid-flight.
     await Promise.resolve();
     expect(settled).toBe(false);
 
@@ -1212,30 +1163,29 @@ describe("drainRun, reporting as it goes", () => {
     expect(outcome.progress.map((p) => p.text)).toEqual(seen);
   });
 
-  it("numbers notes across a window boundary exactly as one drain would", async () => {
+  it("numbers notes across a resumed drain exactly as one drain would", async () => {
     const first = await drainRun(
-      fakeHandle([stdout(1, assistant("one"))]),
+      fakeHandle([stdout(1, assistant("one"))], true),
       FRESH,
-      { windowMs: 50 }
+      stopAfter(50)
     );
     const second = await drainRun(
       fakeHandle([stdout(2, assistant("two")), exit(3, 0)]),
-      first.cursor,
-      { windowMs: 50 }
+      first.cursor
     );
 
-    // Positional keys are what make a replayed chunk dedupe rather than repost,
-    // so the count has to survive the boundary the notes were split across.
+    // Positional keys are what make a replayed stretch dedupe rather than
+    // repost, so the count has to survive the stop the notes were split across.
     expect(first.progress.map((p) => p.key)).toEqual(["claude:0"]);
     expect(second.progress.map((p) => p.key)).toEqual(["claude:1"]);
   });
 
   it("re-emits identical keys when a retry replays the same stream", async () => {
-    // A chunk that died before committing its cursor is retried from whatever
-    // was last written. The same lines are parsed twice, and the second pass has
-    // to produce keys the gatekeeper already knows or the whole tail is reposted.
+    // A drain that died before its cursor was stored resumes from whatever was
+    // last stored. The same lines are parsed twice, and the second pass has to
+    // produce keys the transcript already has or the whole tail is filed again.
     const script = [stdout(1, assistant("one")), stdout(2, assistant("two"))];
-    const attempt = () => drainRun(fakeHandle(script), FRESH, { windowMs: 50 });
+    const attempt = () => drainRun(fakeHandle(script), FRESH);
 
     const died = await attempt();
     const retried = await attempt();
@@ -1244,17 +1194,16 @@ describe("drainRun, reporting as it goes", () => {
 
   it("settles the sink before returning an outcome that names its notes", async () => {
     /**
-     * A caller commits the returned cursor, and the cursor claims those notes
-     * were emitted. If the drain returned first, an isolate unwinding its RPC
-     * could drop a post the cursor had already counted — and the retry would
-     * skip it, because its key is behind the committed position.
+     * A caller stores the returned cursor, and the cursor claims those notes
+     * were filed. If the drain returned first, an isolate unwinding could drop
+     * a note the cursor had already counted — and a resumed drain would skip
+     * it, because its key is behind the stored position.
      */
     let delivered = 0;
     await drainRun(
       fakeHandle([stdout(1, assistant("one")), exit(2, 0)]),
       FRESH,
       {
-        windowMs: 50,
         onProgress: async () => {
           await new Promise((r) => setTimeout(r, 5));
           delivered++;
@@ -1275,7 +1224,6 @@ describe("drainRun, reporting as it goes", () => {
       ]),
       FRESH,
       {
-        windowMs: 5 * 60_000,
         now: () => clock,
         onProgress: () => {
           // Each stdout event advances the clock past the floor, so the second
@@ -1290,43 +1238,44 @@ describe("drainRun, reporting as it goes", () => {
 
     expect(checkpoints).toHaveLength(1);
     // A checkpoint names a position whose notes are already on the sink's queue —
-    // that is the only reason it is safe to resume from mid-window.
+    // that is the only reason it is safe to resume from mid-stream.
     expect(checkpoints[0]!.emitted).toBe(2);
     expect(checkpoints[0]!.seq).toBe(2);
   });
 
-  it("reports a bucket reading only to the window that saw it", async () => {
+  it("reports a bucket reading only to the drain that saw it", async () => {
     const rateLine = line({
       type: "rate_limit_event",
       rate_limit_info: { status: "allowed", resetsAt: 1789587600 }
     });
-    const first = await drainRun(fakeHandle([stdout(1, rateLine)]), FRESH, {
-      windowMs: 50
-    });
+    const first = await drainRun(
+      fakeHandle([stdout(1, rateLine)], true),
+      FRESH,
+      stopAfter(50)
+    );
     expect(first.rateLimit?.resetsAt).toBe(1789587600);
 
     /**
      * **Not carried forward, unlike the result line**, and the asymmetry is the
      * point. A caller acts on this against whichever credential is leading when
-     * it reads it, so a reading repeated on every later chunk would let one
-     * window's observation retire a credential that was not in use when it was
-     * taken. A window that learned nothing says nothing.
+     * it reads it, so a reading repeated on every resumed drain would let one
+     * old observation retire a credential that was not in use when it was
+     * taken. A drain that learned nothing says nothing.
      */
     const second = await drainRun(
       fakeHandle([stdout(2, assistant("on we go")), exit(3, 0)]),
-      first.cursor,
-      { windowMs: 50 }
+      first.cursor
     );
     expect(second.rateLimit).toBeUndefined();
   });
 
-  it("refuses to checkpoint for a caller that posts nothing", async () => {
+  it("refuses to checkpoint for a caller that files nothing", async () => {
     /**
      * The unsafe combination, made unreachable rather than only documented.
      *
-     * A checkpoint is safe because the notes behind it are already posted.
+     * A checkpoint is safe because the notes behind it are already filed.
      * Offered to a caller with no `onProgress`, it advances a cursor past notes
-     * nobody ever saw, and a chunk dying after it loses them for good.
+     * nobody ever saw, and a drain dying after it loses them for good.
      */
     const checkpoints: DrainCursor[] = [];
     let clock = 0;
@@ -1338,7 +1287,6 @@ describe("drainRun, reporting as it goes", () => {
       ]),
       FRESH,
       {
-        windowMs: 5 * 60_000,
         now: () => {
           clock += 40_000;
           return clock;

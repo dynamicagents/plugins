@@ -45,15 +45,40 @@ name another repository: a thread id is a global node id, not a path segment
 derived from the checkout. It asks which pull request the id belongs to and
 refuses a mismatch, which is the same reach `forgeRepo` denies everywhere else.
 
+## The two writes a recovered turn must not repeat
+
+`repo_pr_comment` and `repo_pr_thread_reply` are Think **actions**, in the plugin's
+`actions`, rather than tools. A turn cut by an eviction or a deploy is recovered by
+running it again, and a comment that had already landed would land twice. An
+action's result is kept under an idempotency key, and a call with a settled key
+replays that result instead of calling the forge.
+
+The key is the task, the checkout and the pull request, and the write itself —
+the body's SHA-256, and for a reply the thread and whether to resolve it. The task
+is in it because a settled key replays for as long as Think keeps the row: without
+it, the same comment in a later task would never post. A turn with no task id
+refuses to key one at all.
+
+Every failure is **thrown**, not returned: what an action returns is kept and
+replayed, so a refusal returned as a sentence would answer every retry in the
+task. A throw releases the key. The one outcome returned short of success is a
+reply that landed on a thread that did not resolve — that reply must never be
+sent again, and the resolve-only call it asks for is a different key.
+
+`repo_open_pr` stays a tool: it looks for an open pull request on the branch before
+it creates one, so a repeat finds the first. The rest are reads, or git
+operations that are already safe to run twice.
+
 ## Worktrees a host keeps
 
-A host whose writing subtasks each commit in a checkout of their own can hand the
-main agent a way between them: `worktrees: { list, use, release }`. The main agent
-then gets `repo_worktrees`, to see each worktree's branch and state and to release
+A host whose writing sub-agents each commit in a checkout of their own can hand the
+parent a way between them: `worktrees: { list, use, release }`. The plugin then
+offers `repo_worktrees`, to see each worktree's branch and state and to release
 one, and `repo_worktree`, which asks the host to point every repo tool at the
-worktree holding a branch — or back at the main checkout. Delegated subtasks never
-get them, because a switch moves the main agent's own tools. The host renders every
-answer; this plugin checks a branch's shape and passes the sentence through.
+worktree holding a branch — or back at the main checkout. A switch moves the
+installing agent's own tools, so a host passes `worktrees` to the parent's install
+and never to a sub-agent's. The host renders every answer; this plugin checks a
+branch's shape and passes the sentence through.
 
 Two hooks go with it. `beforeWrite` is asked before `repo_commit` or `repo_push`
 changes anything, with the origin a push would use, and a string it returns refuses
@@ -63,15 +88,13 @@ landed.
 
 ## Nothing is held for approval
 
-No tool here declares a `mainAgentToolApproval` rule, opening a pull request
-included. A pull request is the point of the work, it lands on a branch, and it is
-reviewable after the fact — so stopping a round to ask about one buys nothing that
-the review itself does not.
+No tool or action here asks for approval, opening a pull request included. A pull
+request is the point of the work, it lands on a branch, and it is reviewable after
+the fact — so stopping a turn to ask about one buys nothing that the review itself
+does not.
 
 That is a judgement about these calls, not a limitation of the plugin contract. A
-fork that wants a gate declares a rule on the tools it cares about; a host that
-wants one dropped without touching this package wraps the plugin in core's
-`withoutToolApproval`.
+fork that wants a gate sets `approval` on the actions it cares about.
 
 Two injected dependencies, and the line between them is the trust boundary rather
 than a matter of taste. `exec` is anything that runs a command in the container —
@@ -161,7 +184,7 @@ model can talk itself out of is not a guardrail:
 
 It then refuses a fourth thing, after switching to the branch: **a branch with no
 commits the default branch does not already have.** Pushing one succeeds,
-`repo_open_pr` opens an empty pull request on it, and the round reports a URL as
+`repo_open_pr` opens an empty pull request on it, and the turn reports a URL as
 if the work had landed — the one outcome worse than an error.
 
 `repo_push` **switches to** an existing branch and only creates a missing one —
@@ -206,7 +229,7 @@ clone` at a checkout that is already there.
 
 Every tool truncates from the middle at `maxOutputChars` (16,000 characters by
 default), the
-same way `sb_exec` does. `repo_diff` also takes `stat: true` for a per-file
+same way `/computer`'s `bash` does. `repo_diff` also takes `stat: true` for a per-file
 changed-line summary — the right first call on a large change, and the only
 practical one for an agent whose entire view of the work is the diff.
 

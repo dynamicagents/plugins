@@ -10,7 +10,7 @@
  *
  * ## Why this exists at all
  *
- * The alternative is a sentence in the subagent's soul — "install dependencies
+ * The alternative is a sentence in the sub-agent's soul — "install dependencies
  * before you do anything else" — and a standard with no command attached is one a
  * model satisfies with whichever check is cheapest: edit a README, run
  * `prettier --check` on that one file, report the change verified, and never run
@@ -27,7 +27,7 @@
  * `packageManager` pin, then lockfiles in the order the plan lists them.
  */
 
-import type { JobState } from "@dynamicagents/core/job";
+import type { JobState } from "./host/job/index.js";
 
 /** Just enough of a workspace filesystem to inspect a checkout. */
 export interface InstallProbe {
@@ -39,14 +39,14 @@ export interface InstallProbe {
  * Where the install has got to, as the host reports it and the tools read it.
  *
  * Declared here rather than in the host because both sides depend on it and
- * neither owns the other: the Durable Object runs the job, and `sb_exec` refuses
+ * neither owns the other: the Durable Object runs the job, and `bash` refuses
  * to run against a tree that is still being built. A shape they agreed on
  * informally would drift, and the drift would show up as a shell command running
  * halfway through an `npm ci`.
  *
- * ## Why it is core's `JobState` with one field intersected in
+ * ## Why it is the host's `JobState` with one field intersected in
  *
- * Core owns the *choreography* around a job a Durable Object drives through its
+ * `./host/job/` owns the *choreography* around a job a Durable Object drives through its
  * alarm — arming, the single-flight guard, the staleness bound, the generation
  * marker a drain checks before it writes. This package owns what an install
  * specifically **is**: which package manager, which lockfile, what counts as
@@ -334,7 +334,7 @@ async function firstPresent(
  * from `pnpm@9` to `pnpm@10`, or add a dependency without regenerating the lock,
  * and every one of those changes what an install produces while leaving the
  * lockfile byte-identical. Hashing the lockfile alone calls that a match, skips
- * the install, and hands the subagent a `node_modules` that is quietly wrong —
+ * the install, and hands the agent a `node_modules` that is quietly wrong —
  * which surfaces as a missing module in a build, three tool calls later, with
  * nothing pointing back at the install that never ran.
  *

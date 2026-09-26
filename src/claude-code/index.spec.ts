@@ -1,15 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { claudeCode, claudeCodeRead, claudeCodeSession } from "./index.js";
-import { DEFAULT_PERMISSION_MODE } from "./config.js";
 import {
-  CLAUDE_CODE_READ_TYPE,
-  CLAUDE_CODE_SPEC,
-  CLAUDE_CODE_TYPE,
-  WORKSPACE_RUNTIME_KEY
-} from "./recipe.js";
-// The one cross-realm import in this folder, and it exists to hold two
-// declarations of the same string together — see the assertion below.
-import { WORKSPACE_RUNTIME_KEY as COMPUTER_KEY } from "../computer/index.js";
+  CLAUDE_CODE_AGENT,
+  CLAUDE_CODE_READER_AGENT,
+  claudeCodeModel,
+  claudeCodeSession
+} from "./index.js";
+import { DEFAULT_PERMISSION_MODE, type ClaudeCodeConfig } from "./config.js";
 import type { CredentialState, CredentialStore } from "./credentials.js";
 
 const CREDENTIAL = "sk-ant-oat01-REAL";
@@ -24,175 +20,56 @@ function memoryStore(): CredentialStore {
   };
 }
 
-/** What a spec's seams were asked, in order. */
-const seamCalls: string[] = [];
-
-const config = (over: Partial<Parameters<typeof claudeCode>[0]> = {}) => ({
+const config = (over: Partial<ClaudeCodeConfig> = {}): ClaudeCodeConfig => ({
   credentials: () => [CREDENTIAL],
-  workspaceName: () => "caller|acme/api",
-  // What a host does with these is its own — see the config's doc. What a spec
-  // needs is that the ids reach them, and that the name is the same twice.
-  subtaskWorkspace: async (ctx: {
-    taskId: string;
-    subtaskId: number;
-    continue?: string;
-  }) =>
-    `caller|<subtask:${ctx.taskId}:${ctx.subtaskId}${ctx.continue ? `:${ctx.continue}` : ""}>`,
-  releaseSubtaskWorkspace: async (ctx: {
-    taskId: string;
-    subtaskId: number;
-  }) => {
-    seamCalls.push(`release ${ctx.taskId}:${ctx.subtaskId}`);
-  },
-  abortSubtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) => {
-    seamCalls.push(`abort ${ctx.taskId}:${ctx.subtaskId}`);
-  },
-  failSubtaskWorkspace: async (ctx: { taskId: string; subtaskId: number }) => {
-    seamCalls.push(`fail ${ctx.taskId}:${ctx.subtaskId}`);
-    return "kept on its branch";
-  },
   ...over
 });
 
-/** The shape core passes; only `type` is read here. */
-const context = {
-  taskId: "task-1",
-  subtaskId: 3,
-  type: CLAUDE_CODE_TYPE,
-  params: {},
-  toolFamilies: [] as readonly string[]
-};
-
 /**
- * The hook this plugin exists to have, and without which its own reference host
- * cannot use it.
- *
- * Core dispatches `resolveRuntime` to the plugin that **declared** the subtask
- * type. `claude-code` is declared here, so if this plugin does not carry the
- * hook, nothing else can: a facet receives `{}`, and has no way to address the
- * Durable Object holding the checkout it was told to work in.
+ * The two specs, as the parent's model sees them. `prepare` and `settle` are
+ * the host's, so a spec here carries neither.
  */
-describe("resolveRuntime", () => {
-  it("hands a writing subtask a workspace of its own", async () => {
-    const plugin = claudeCode(config());
-    await expect(plugin.resolveRuntime?.(context)).resolves.toEqual({
-      [WORKSPACE_RUNTIME_KEY]: "caller|<subtask:task-1:3>"
+describe("the sub-agent specs", () => {
+  it("offers the writer and the reader under their own names", () => {
+    expect(CLAUDE_CODE_AGENT.name).toBe("claude_code");
+    expect(CLAUDE_CODE_READER_AGENT.name).toBe("claude_code_read");
+  });
+
+  /** A session runs for up to its `timeoutMs`, past a parent's turn. */
+  it("runs both detached", () => {
+    expect(CLAUDE_CODE_AGENT.detached).toBe(true);
+    expect(CLAUDE_CODE_READER_AGENT.detached).toBe(true);
+  });
+
+  it("lets the writer name a branch to continue, and the reader not", () => {
+    const write = CLAUDE_CODE_AGENT.inputSchema as unknown as {
+      parse: (v: unknown) => unknown;
+    };
+    const read = CLAUDE_CODE_READER_AGENT.inputSchema as unknown as {
+      shape: Record<string, unknown>;
+    };
+    expect(write.parse({ task: "t" })).toEqual({ task: "t" });
+    expect(write.parse({ task: "t", continue: "claude-coder/t/1" })).toEqual({
+      task: "t",
+      continue: "claude-coder/t/1"
     });
+    expect(Object.keys(read.shape)).toEqual(["task"]);
   });
 
-  it("gives one subtask the same workspace on every chunk", async () => {
-    const plugin = claudeCode(config());
-
-    // Core calls this once per **chunk**, not once per run. A name that moved
-    // between chunks would hand chunk two a different container than chunk one
-    // and strand the work in the first.
-    const first = await plugin.resolveRuntime?.(context);
-    const second = await plugin.resolveRuntime?.(context);
-    expect(second).toEqual(first);
-  });
-
-  it("passes the branch a subtask continues, and nothing for the default", async () => {
-    const plugin = claudeCode(config());
-
-    await expect(
-      plugin.resolveRuntime?.({
-        ...context,
-        params: { continue: "claude-coder/task-0/2" }
-      })
-    ).resolves.toEqual({
-      [WORKSPACE_RUNTIME_KEY]: "caller|<subtask:task-1:3:claude-coder/task-0/2>"
-    });
-    // The schema's default for an omitted param.
-    await expect(
-      plugin.resolveRuntime?.({ ...context, params: { continue: "" } })
-    ).resolves.toEqual({
-      [WORKSPACE_RUNTIME_KEY]: "caller|<subtask:task-1:3>"
-    });
-  });
-
-  it("gives two subtasks of one task different workspaces", async () => {
-    const plugin = claudeCode(config());
-
-    const three = await plugin.resolveRuntime?.(context);
-    const four = await plugin.resolveRuntime?.({ ...context, subtaskId: 4 });
-    expect(three).not.toEqual(four);
-  });
-
-  it("hands a reading subtask the parent's workspace, to share its container", async () => {
-    const plugin = claudeCodeRead(config());
-    await expect(
-      plugin.resolveRuntime?.({ ...context, type: CLAUDE_CODE_READ_TYPE })
-    ).resolves.toEqual({ [WORKSPACE_RUNTIME_KEY]: "caller|acme/api" });
-  });
-
-  /**
-   * Called per subtask rather than captured once, because the parent's active
-   * repository changes mid-task: `repo_clone` picks it, and the workspace name
-   * is derived from it. A memoised thunk would send every later subtask to the
-   * first repository's container.
-   */
-  it("reads the thunk each time, so a repository switch is picked up", async () => {
-    let repo = "acme/api";
-    const plugin = claudeCodeRead(
-      config({ workspaceName: () => `caller|${repo}` })
-    );
-
-    await plugin.resolveRuntime?.(context);
-    repo = "acme/cli";
-
-    await expect(plugin.resolveRuntime?.(context)).resolves.toEqual({
-      [WORKSPACE_RUNTIME_KEY]: "caller|acme/cli"
-    });
-  });
-});
-
-describe("onAbort and onSettled", () => {
-  it("releases the writing subtask's workspace, keyed on its ids", async () => {
-    seamCalls.length = 0;
-    const plugin = claudeCode(config());
-
-    await plugin.onSettled?.({ ...context, subtaskId: 7 });
-    expect(seamCalls).toEqual(["release task-1:7"]);
-  });
-
-  it("aborts the writing subtask's work, keyed on its ids", async () => {
-    seamCalls.length = 0;
-    const plugin = claudeCode(config());
-
-    await plugin.onAbort?.({ ...context, subtaskId: 7 });
-    expect(seamCalls).toEqual(["abort task-1:7"]);
-  });
-
-  it("keeps a failed subtask's work, and hands core where it is", async () => {
-    // The only channel back to the delegating model: without it a model that
-    // sees the failure re-delegates the work from nothing.
-    seamCalls.length = 0;
-    const plugin = claudeCode(config());
-
-    await expect(plugin.onFail?.({ ...context, subtaskId: 7 })).resolves.toBe(
-      "kept on its branch"
-    );
-    expect(seamCalls).toEqual(["fail task-1:7"]);
-  });
-
-  /**
-   * The reading type shares the **parent's** workspace, which outlives every
-   * subtask that read in it, and its copy is the session driver's to delete.
-   */
-  it("is absent on the reading plugin, which owns no workspace", () => {
-    const plugin = claudeCodeRead(config());
-    expect(plugin.onSettled).toBeUndefined();
-    expect(plugin.onAbort).toBeUndefined();
-    expect(plugin.onFail).toBeUndefined();
-  });
-});
-
-describe("the writing type's params", () => {
-  it("defaults continue to empty, so a delegation may omit it", () => {
-    expect(CLAUDE_CODE_SPEC.params?.parse({})).toEqual({ continue: "" });
+  /** The session reads the task; the branch is the host's `prepare`'s. */
+  it("hands the session the task alone", () => {
     expect(
-      CLAUDE_CODE_SPEC.params?.parse({ continue: "claude-coder/t/1" })
-    ).toEqual({ continue: "claude-coder/t/1" });
+      CLAUDE_CODE_AGENT.formatInput!({ task: "add the flag", continue: "b" })
+    ).toBe("add the flag");
+    expect(CLAUDE_CODE_READER_AGENT.formatInput!({ task: "why?" })).toBe(
+      "why?"
+    );
+  });
+
+  it("tells the parent a reader's edits are discarded", () => {
+    expect(CLAUDE_CODE_READER_AGENT.description).toContain(
+      "Nothing it changes reaches your"
+    );
   });
 });
 
@@ -263,7 +140,7 @@ describe("where a session runs", () => {
     const session = claudeCodeSession(config());
 
     await session
-      .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
+      .start(runtime, "1", "read", "look at this", "/workspace/r")
       .catch(() => {});
 
     expect(calls.map((c) => c.options.id)).toEqual([
@@ -288,7 +165,7 @@ describe("where a session runs", () => {
     const { calls, runtime } = launchRecorder();
 
     await claudeCodeSession(config())
-      .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
+      .start(runtime, "1", "read", "look at this", "/workspace/r")
       .catch(() => {});
 
     expect(calls[1]?.command).toMatch(
@@ -301,7 +178,7 @@ describe("where a session runs", () => {
     const { calls, runtime } = launchRecorder(false);
 
     await claudeCodeSession(config())
-      .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
+      .start(runtime, "1", "read", "look at this", "/workspace/r")
       .catch(() => {});
 
     expect(calls[1]?.command).toMatch(
@@ -321,7 +198,7 @@ describe("where a session runs", () => {
     const session = claudeCodeSession(config());
 
     await session
-      .start(runtime, 1, CLAUDE_CODE_READ_TYPE, "look at this", "/workspace/r")
+      .start(runtime, "1", "read", "look at this", "/workspace/r")
       .catch(() => {});
 
     expect(calls[1]?.command).toContain(
@@ -334,7 +211,7 @@ describe("where a session runs", () => {
     const session = claudeCodeSession(config());
 
     await session
-      .start(runtime, 1, CLAUDE_CODE_TYPE, "change this", "/workspace/r")
+      .start(runtime, "1", "write", "change this", "/workspace/r")
       .catch(() => {});
 
     expect(calls).toHaveLength(1);
@@ -347,9 +224,8 @@ describe("where a session runs", () => {
   });
 
   /**
-   * A chunk replaced by a retry, caught in `startRun`'s fallback to an exec that
-   * is already live. Both launches reach it, and both must give up the wait:
-   * core runs the retry only once this call has unwound.
+   * A cancelled turn, caught in `startRun`'s fallback to an exec that is
+   * already live. Both launches reach it, and both must give up the wait.
    */
   it("hands both launches the signal that stops a busy id's wait", async () => {
     let looks = 0;
@@ -371,12 +247,12 @@ describe("where a session runs", () => {
     try {
       const session = claudeCodeSession(config());
       await expect(
-        session.start(runtime, 1, CLAUDE_CODE_TYPE, "work", "/workspace/r", {
+        session.start(runtime, "1", "write", "work", "/workspace/r", {
           signal: replaced.signal
         })
       ).rejects.toThrow(/live subscriber/);
       await expect(
-        session.followUp(runtime, 1, "session-1", "more", "/workspace/r", {
+        session.followUp(runtime, "1", "session-1", "more", "/workspace/r", {
           signal: replaced.signal
         })
       ).rejects.toThrow(/live subscriber/);
@@ -403,8 +279,8 @@ describe("where a session runs", () => {
     await expect(
       claudeCodeSession(config()).start(
         runtime,
-        1,
-        CLAUDE_CODE_READ_TYPE,
+        "1",
+        "read",
         "look",
         "/workspace/r"
       )
@@ -460,7 +336,7 @@ describe("where a session runs", () => {
     const { calls, runtime } = launchRecorder();
 
     await claudeCodeSession(config())
-      .followUp(runtime, 1, "sess-1", "one more thing", "/workspace/r")
+      .followUp(runtime, "1", "sess-1", "one more thing", "/workspace/r")
       .catch(() => {});
 
     expect(calls.map((c) => c.options.id)).toEqual([
@@ -477,7 +353,7 @@ describe("where a session runs", () => {
     await expect(
       claudeCodeSession(config()).followUp(
         runtime,
-        1,
+        "1",
         "",
         "more",
         "/workspace/r"
@@ -490,7 +366,7 @@ describe("where a session runs", () => {
   it("deletes the copy when a session is stopped", async () => {
     const { calls, killed, runtime } = launchRecorder();
 
-    await claudeCodeSession(config()).stop(runtime, 1);
+    await claudeCodeSession(config()).stop(runtime, "1");
 
     // A follow-up turn runs under its own id, and is stopped with the session.
     expect(killed).toEqual([
@@ -501,56 +377,43 @@ describe("where a session runs", () => {
       "claude-code-run:1:uncopy"
     ]);
   });
-
-  /**
-   * `WORKSPACE_RUNTIME_KEY` is declared twice on purpose — see `./recipe.ts` —
-   * and the two must stay equal. A spec is the one place a cross-realm import
-   * costs nothing, so the drift is caught here.
-   */
-  it("writes under the same key `/computer` reads", () => {
-    expect(WORKSPACE_RUNTIME_KEY).toBe(COMPUTER_KEY);
-  });
 });
 
 /**
- * Fail at Durable Object start, with a sentence naming this plugin — not at the
- * first model call, inside a subtask somebody is already waiting on.
+ * Fail when the model is built, with a sentence naming this plugin — not at
+ * the first model call, inside a run somebody is already waiting on.
  *
  * Not `requires: { secrets: [...] }`: pool entries are host-named, so there is
  * no name this package could declare — and checking the value is stronger than
  * checking that a name is set.
  */
 describe("construction", () => {
+  const model = (over: Partial<ClaudeCodeConfig>) => () =>
+    claudeCodeModel({
+      config: config(over),
+      workspace: async () => {
+        throw new Error("not opened");
+      },
+      storage: {} as DurableObjectStorage,
+      runId: "r",
+      kind: "write",
+      dir: "/workspace/r",
+      note: async () => {},
+      report: async () => ""
+    });
+
   it("refuses a pool with no credentials in it", () => {
-    expect(() => claudeCode(config({ credentials: () => [] }))).toThrow(
-      /no credentials/
-    );
+    expect(model({ credentials: () => [] })).toThrow(/no credentials/);
   });
 
   it("refuses a pool of empty strings", () => {
     // `[env.TOKEN_1, env.TOKEN_2]` with neither secret set. The array is not
     // empty, and every entry in it is useless.
-    expect(() => claudeCode(config({ credentials: () => ["", ""] }))).toThrow(
-      /no credentials/
-    );
+    expect(model({ credentials: () => ["", ""] })).toThrow(/no credentials/);
   });
 
   it("accepts a single credential, which is the ordinary deployment", () => {
-    expect(() => claudeCode(config())).not.toThrow();
-  });
-
-  /**
-   * A plugin that declares a subtask type puts its capability block on the
-   * *type*. Declaring both makes the main agent read the same advice twice per
-   * round — the exact failure the type's own prompt fields were introduced to
-   * end.
-   */
-  it("declares one subtask type, no tool families and no capability", () => {
-    const plugin = claudeCode(config());
-    expect(plugin.subtaskType?.key).toBe(CLAUDE_CODE_TYPE);
-    expect(plugin.subtaskType?.recipe.toolFamilies).toEqual([]);
-    expect(plugin.toolFamilies).toBeUndefined();
-    expect(plugin.capability).toBeUndefined();
+    expect(model({})).not.toThrow();
   });
 });
 
@@ -558,8 +421,8 @@ describe("the session's egress", () => {
   /**
    * `store` is an argument rather than a config field because the pool's state
    * belongs to whichever object has storage. The same config is also held by the
-   * parent's plugin list and by the subagent facet, and neither has any — making
-   * it a field would force both of them to invent one.
+   * agents that run sessions, which have none of their own for it — making it a
+   * field would force them to invent one.
    */
   it("takes the store at the point storage actually exists", () => {
     const session = claudeCodeSession(config());
@@ -572,11 +435,11 @@ describe("the session's egress", () => {
  * eviction, a relaunch the runtime decided on — and the attachment is the first
  * thing to find out.
  *
- * The caller is a chunk loop holding a cursor it will keep presenting, so a
- * throw here is retried against the same dead id until the chunk allowance runs
- * out, ending the run on a stack trace that names neither the session nor the
- * cause. Reported as a terminal outcome, it ends at the first attempt with
- * something the subtask can act on.
+ * The caller is a recovered turn holding a cursor it will keep presenting, so a
+ * throw here is retried against the same dead id until the recoveries run out,
+ * ending the run on a stack trace that names neither the session nor the cause.
+ * Reported as a terminal outcome, it ends at the first attempt with something
+ * the run's report can say.
  */
 describe("a session whose container was replaced", () => {
   const lost = () =>
@@ -628,8 +491,8 @@ describe("a session whose container was replaced", () => {
   /**
    * Only that one code. Every other failure to attach — a transport that
    * dropped, a runtime that is simply unreachable — is transient, and a retry is
-   * the right answer to it. Swallowing those would turn a recoverable chunk into
-   * a subtask that reports itself finished having done nothing.
+   * the right answer to it. Swallowing those would turn a recoverable turn into
+   * a run that reports itself finished having done nothing.
    */
   it("still throws anything that is not a lost execution", async () => {
     const session = claudeCodeSession(config());

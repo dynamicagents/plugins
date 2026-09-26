@@ -18,21 +18,31 @@ npm install @dynamicagents/plugins
 
 ## The one file you edit
 
+An agent installs plugins by listing them in `getPlugins()`, on an `A2AAgent` from
+`@dynamicagents/core/agent` or a `SubAgent` from `@dynamicagents/core/subagent`:
+
 ```ts
-// src/plugins.ts
+// src/agents/coder/agent.ts
+import { A2AAgent } from "@dynamicagents/core/agent";
 import { browser } from "@dynamicagents/plugins/browser";
-import { recall } from "@dynamicagents/plugins/recall";
+import { computer, computerWorkspace } from "@dynamicagents/plugins/computer";
+import { repo } from "@dynamicagents/plugins/repo";
 
-export interface PluginHost {
-  env: Env;
-  /** The verified caller this Durable Object belongs to. See below. */
-  callerKey: () => string;
+export class Coder extends A2AAgent<Env> {
+  // `computer` runs commands in a container, so the agent's own workspace —
+  // what Think's `read` and `write` work on — has to be that container's.
+  override workspace = computerWorkspace(workspaceConfig(this.env), () =>
+    this.pluginContext().runtime()
+  );
+
+  override getPlugins() {
+    return [
+      browser({ binding: this.env.BROWSER }),
+      computer(workspaceConfig(this.env)),
+      repo(repoConfig(this.env))
+    ];
+  }
 }
-
-export const plugins = ({ env, callerKey }: PluginHost) => [
-  browser({ binding: env.BROWSER }),
-  recall({ ai: env.AI, index: env.VECTORIZE, namespace: callerKey })
-];
 ```
 
 Delete a line and that module leaves your bundle entirely. Nothing in core imports a plugin,
@@ -40,37 +50,14 @@ and there is **no root barrel** — `@dynamicagents/plugins` on its own does not
 guarantee is structural rather than a tree-shaker's opinion. `npm run verify:exports` asserts
 it on the built graph before every publish.
 
-`plugins` is a function, not a module-level array: on Workers `env` does not exist at module
-scope, and core's registry is built per Durable Object instance in `onStart()`.
+`getPlugins()` is a method, not a module-level array: on Workers `env` does not exist at
+module scope. Core checks the list when the agent starts — every declared binding present,
+every tool name offered once — so a wiring fault fails the start with a sentence naming the
+plugin, not the first turn.
 
-```ts
-export class MyAgent extends Agent<Env> {
-  /** Set on the first verified request; constant thereafter. See below. */
-  private identity?: string;
-
-  async onStart() {
-    this.runtime = createAgentRuntime({
-      config,
-      plugins: plugins({
-        env: this.env,
-        // A thunk, not a value: `onStart` runs before any request, so the caller
-        // is not known yet. The DO is keyed 1:1 by that caller, so it is constant
-        // once it is — this just defers reading it until it exists.
-        callerKey: () => this.identity ?? ""
-      }),
-      env: this.env // verify every plugin's declared bindings exist, at startup
-    });
-  }
-
-  async onTurn(turn: AgentTurn, identity: GatekeeperIdentity) {
-    this.identity ??= identity.key!;
-    // …
-  }
-}
-```
-
-That deferral is the whole reason `/recall` takes `namespace` as a function. Anything else
-needing per-caller state takes it the same way.
+A plugin's tools are the same wherever it is installed, so what a sub-agent must not have is
+left out of its own `getPlugins()`, and `restrictTools` from `@dynamicagents/core` narrows a
+plugin to the tools an install names.
 
 ---
 
@@ -79,12 +66,10 @@ needing per-caller state takes it the same way.
 | Subpath                            | What it adds                                                                                                        | Needs                                              |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                                                  | `BROWSER` (paid plan)                              |
-| [`/claude-code`](src/claude-code/) | Delegate a coding task to a Claude Code session in the workspace container                                          | one or more `claude setup-token` credentials       |
+| [`/claude-code`](src/claude-code/) | Sub-agents whose model is a Claude Code session in the workspace container                                          | one or more `claude setup-token` credentials       |
 | [`/computer`](src/computer/)       | A Linux container whose filesystem outlives it — shell, package manager, network, and the Durable Object it runs in | `@cloudflare/computer`, `@platformatic/vfs` (paid) |
-| [`/recall`](src/recall/)           | Episodic memory over Vectorize — search history that compaction folded away                                         | `VECTORIZE` (1024-dim/cosine)                      |
 | [`/repo`](src/repo/)               | Clone, commit, push a branch, open a pull request — over any container                                              | `GITHUB_TOKEN`                                     |
 | [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout                          | —                                                  |
-| [`/workspace`](src/workspace/)     | A durable file store for long subagent runs, plus tools over it                                                     | `@cloudflare/shell`                                |
 
 Each directory has its own README with the config shape and a paste-ready `wrangler.jsonc`
 snippet — a plugin cannot add its own binding, which is why it declares what it needs.
@@ -95,18 +80,21 @@ snippet — a plugin cannot add its own binding, which is why it declares what i
 
 ```ts
 import { definePlugin, type AgentPlugin } from "@dynamicagents/core";
+import { tool } from "ai";
 
-export function scraper(config: { apiKey: string }): AgentPlugin {
+export function scraper(config: { apiKey: () => string }): AgentPlugin {
   return definePlugin({
-    key: "scraper",
-    mainAgentTools: () => ({ fetchPage: /* … */ }),
-    capability: "You can fetch and summarize a page.",
+    name: "scraper",
+    tools: (ctx) => ({ fetch_page: tool({/* … */}) }),
+    context: [
+      { provider: { get: async () => "You can fetch and summarize a page." } }
+    ],
     requires: { secrets: ["SCRAPER_API_KEY"] }
   });
 }
 ```
 
-Three rules the whole design rests on:
+The rules the whole design rests on:
 
 - **Never name a consumer's `Env`.** It is an ambient interface `wrangler types` generates
   into _their_ app. Take bindings and secrets as config, which is also the only thing that
@@ -114,8 +102,17 @@ Three rules the whole design rests on:
 - **`definePlugin` sets `contractVersion`** from the core you compiled against. Never write
   that number as a literal — the point is that it moves, so a version train that leaves one
   repo behind fails at startup with a sentence instead of a structural-type error.
-- **Declare a capability block in exactly one place.** If your plugin has a `subtaskType`, put
-  it there; otherwise on the plugin. Both are rendered, by different call sites.
+- **Give a context block a get-only provider.** A block with no provider is wired as a
+  writable one, which the model can overwrite with `set_context`.
+- **Read `ctx.runtime()` inside `execute`, never while building tools.** It is what a
+  sub-agent's spec prepared for the running dispatch, and it belongs to the turn.
+
+A write that must not happen twice — a comment, a reply — is a Think `action()` in
+`actions(ctx)`, with an idempotency key, so a recovered turn replays it rather than
+repeating it. [`/repo`](src/repo/) has two.
+
+A plugin that owns a domain some work is delegated into exports a `SubAgentSpec` as data,
+and the agent binds it to a `SubAgent` class — see [`/claude-code`](src/claude-code/).
 
 ## Testing
 
@@ -148,4 +145,4 @@ Nothing is written to `package.json`, so CI never builds against a local checkou
 
 ## License
 
-GPL-3.0-only
+Apache-2.0

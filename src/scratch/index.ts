@@ -74,7 +74,7 @@ export type ScratchExec = (
     env?: Record<string, string | undefined>;
     timeout?: number;
     /**
-     * The executing subtask's runtime state, forwarded **opaquely** — the same
+     * The running sub-agent's `runtime()`, forwarded **opaquely** — the same
      * pass-through `/repo` does, for the same reason. This plugin never looks
      * inside it.
      */
@@ -203,11 +203,11 @@ interface Ran {
   unreachable?: true;
 }
 
-/** The tool name, exported so a host restricting its main agent can name it. */
+/** The tool name, exported so a host restricting the plugin can name it. */
 export const SCRATCH_OPEN_TOOL = "scratch_open";
 
 /**
- * What the delegating agent is told.
+ * What the model is told.
  *
  * The mixing rule at the end is the line worth its tokens. A host that keys one
  * workspace selection per caller — which is what makes a scratchpad routable at
@@ -464,20 +464,22 @@ export function scratch(config: ScratchConfig): AgentPlugin {
     );
   };
 
+  const context = capabilityFor(dir);
+
   return definePlugin({
-    key: "scratch",
+    name: "scratch",
 
     /**
-     * The main agent's, and no tool family — which is a decision rather than an
-     * omission.
+     * For a parent, never a sub-agent — which the host decides by installing it
+     * on one and not the other.
      *
      * Opening a scratchpad *selects a workspace*, exactly as `repo_clone` does.
-     * A subagent holding this could re-point the workspace its parent prepared
+     * A sub-agent holding this could re-point the workspace its parent prepared
      * half-way through its own run, which is the hazard a host's per-caller
-     * selection already has to document. A delegated run works in whatever it
-     * was given.
+     * selection already has to document. A sub-agent works in whatever it was
+     * given.
      */
-    mainAgentTools: () => ({
+    tools: (ctx) => ({
       [SCRATCH_OPEN_TOOL]: tool({
         description:
           "Open a scratchpad: a git repository with no remote, in your container, " +
@@ -492,10 +494,10 @@ export function scratch(config: ScratchConfig): AgentPlugin {
               "Discard everything in the scratchpad first, including files an earlier task left"
             )
         }),
-        execute: ({ reset }) => open(reset, undefined)
+        execute: ({ reset }) => open(reset, ctx.runtime())
       })
     }),
 
-    capability: capabilityFor(dir)
+    context: [{ provider: { get: async () => context } }]
   });
 }
