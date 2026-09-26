@@ -169,15 +169,15 @@ Three fields have no safe default:
 Part of the contract, not an implementation detail: these persist on a deployed
 object, so renaming one is a storage migration rather than a refactor.
 
-| key                                                      | what it holds                                                |
-| -------------------------------------------------------- | ------------------------------------------------------------ |
-| `install`                                                | the install record — the state the gate above reads          |
-| `install:armed`, `install:last-armed`, `install:context` | the `JobLifecycle` bookkeeping, derived from the id above    |
-| `install:tree`                                           | the tree the running container holds, by directory and lock  |
-| `deps:purged`                                            | synced `node_modules` trees have been deleted from storage   |
-| `checkout`                                               | where the work is, and whether it is a clone or a scratchpad |
-| `lastUsedAt`                                             | what the idle clock measures                                 |
-| `idle-reclaim-id`, `container-idle-id`, `sync-drain-id`  | the schedule row each deadline currently stands as           |
+| key                                                                          | what it holds                                                |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `install`                                                                    | the install record — the state the gate above reads          |
+| `install:armed`, `install:last-armed`, `install:context`, `install:watch-id` | core `/job`'s bookkeeping, derived from the id above         |
+| `install:tree`                                                               | the tree the running container holds, by directory and lock  |
+| `deps:purged`                                                                | synced `node_modules` trees have been deleted from storage   |
+| `checkout`                                                                   | where the work is, and whether it is a clone or a scratchpad |
+| `lastUsedAt`                                                                 | what the idle clock measures                                 |
+| `idle-reclaim-id`, `container-idle-id`, `sync-drain-id`                      | the schedule row each deadline currently stands as           |
 
 The scheduler owns its own tables beneath these. A subclass may store whatever it
 likes alongside, and one does: a credential pool's state, per workspace.
@@ -188,7 +188,7 @@ The one install state that holds a command back. So a `running` record must neve
 outlive the command it describes, and the ways it can are not reachable from one
 place: a spawn can fail before a drain is attached, a drain can be cut short by an
 eviction, an exec can be handed back for a container that never answers, and two
-installs can displace each other. `host/install-job.ts` closes each and names which.
+installs can displace each other. `install-job.ts` closes each and names which.
 
 ## wrangler.jsonc
 

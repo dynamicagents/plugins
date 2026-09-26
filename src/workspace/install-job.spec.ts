@@ -83,8 +83,7 @@ async function seedFinishedInstall(
   await storage.put("install:context", {
     dir: "/workspace/probe",
     fingerprint: "the-lockfile",
-    command: "npm ci --no-audit --no-fund",
-    startedAt: Date.now() - 140_000
+    command: "npm ci --no-audit --no-fund"
   });
   if (options.tree)
     await storage.put("install:tree", {
@@ -189,5 +188,103 @@ describe("what an install says when the container cannot be reached", () => {
     const state = await failedInstall(UNREACHABLE, "install-unreachable");
     expect(state.state).toBe("failed");
     expect(state.state === "failed" && state.error).toMatch(/bash/);
+  });
+});
+
+describe("one install at a time", () => {
+  /**
+   * A checkout whose probes take a moment, as a container's do, and whose
+   * container counts the installs it is asked to spawn. The command never
+   * finishes: what is pinned is how many start.
+   */
+  function countingWorkspace(read?: () => Promise<void>) {
+    const present = new Set([
+      "/workspace/repo/package.json",
+      "/workspace/repo/package-lock.json"
+    ]);
+    const spawned: string[] = [];
+    const running = () => ({
+      result: () => new Promise(() => {}),
+      [Symbol.dispose]: () => {}
+    });
+    const workspace = {
+      fs: {
+        exists: async (path: string) => {
+          await (read?.() ?? new Promise((r) => setTimeout(r, 5)));
+          return present.has(path);
+        },
+        readFile: async () => "{}"
+      },
+      runtime: {
+        exec: async (command: string) => {
+          spawned.push(command);
+          return running();
+        },
+        // A re-attach finds the exec still going.
+        getExec: async () => running()
+      }
+    } as unknown as Workspace;
+    return { workspace, spawned };
+  }
+
+  it("spawns once for two overlapping starts", async () => {
+    // Both callers are inside the probe window at once — which a check that
+    // wrote nothing until after the probes let both through.
+    const stub = freshWorkspace("install-overlap");
+    const { workspace, spawned } = countingWorkspace();
+    const states = await runInDurableObject(stub, async (_instance, s) => {
+      const job = jobOn(s.storage, workspace);
+      return await Promise.all([
+        job.start({ dir: "/workspace/repo" }),
+        job.start({ dir: "/workspace/repo" })
+      ]);
+    });
+    expect(spawned).toHaveLength(1);
+    expect(states.map((state) => state.state)).toEqual(["running", "running"]);
+  });
+
+  it("hands the record back when the install cannot be prepared", async () => {
+    const stub = freshWorkspace("install-unprepared");
+    const { workspace, spawned } = countingWorkspace(async () => {
+      throw new Error("Network connection lost.");
+    });
+    const after = await runInDurableObject(stub, async (_instance, s) => {
+      await seedFinishedInstall(s.storage, { tree: false });
+      const job = jobOn(s.storage, workspace);
+      await expect(job.start({ dir: "/workspace/repo" })).rejects.toThrow(
+        "Network connection lost."
+      );
+      return await job.read();
+    });
+    expect(spawned).toHaveLength(0);
+    // As it was, not the reservation's placeholder: a `running` record nothing
+    // will finish shuts the gate until the staleness bound.
+    expect(after.state).toBe("done");
+  });
+
+  it("fails the alarm's placeholder rather than restoring it", async () => {
+    // The armed install's own placeholder is `running` with no alarm left to
+    // run it, so putting it back would shut the gate just the same.
+    const stub = freshWorkspace("install-unprepared-armed");
+    const { workspace } = countingWorkspace(async () => {
+      throw new Error("Network connection lost.");
+    });
+    const after = await runInDurableObject(stub, async (_instance, s) => {
+      await seedFinishedInstall(s.storage, { tree: false });
+      const armedAt = Date.now();
+      await s.storage.put("install", {
+        state: "running",
+        command: "npm ci --no-audit --no-fund",
+        startedAt: armedAt
+      } satisfies InstallState);
+      await s.storage.put("install:armed", armedAt);
+      const job = jobOn(s.storage, workspace);
+      await expect(job.onRun()).rejects.toThrow("Network connection lost.");
+      return await job.read();
+    });
+    expect(after.state).toBe("failed");
+    expect(after.state === "failed" && after.error).toMatch(
+      /could not be prepared/
+    );
   });
 });

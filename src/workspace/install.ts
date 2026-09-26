@@ -27,7 +27,7 @@
  * `packageManager` pin, then lockfiles in the order the plan lists them.
  */
 
-import type { JobState } from "./job/index.js";
+import type { JobState } from "@dynamicagents/core/job";
 
 /** Just enough of a workspace filesystem to inspect a checkout. */
 export interface InstallProbe {
@@ -46,9 +46,9 @@ export interface InstallProbe {
  *
  * ## Why it is the host's `JobState` with one field intersected in
  *
- * `./job/` owns the *choreography* around a job a Durable Object drives through its
- * alarm — arming, the single-flight guard, the staleness bound, the generation
- * marker a drain checks before it writes. This package owns what an install
+ * Core's `/job` owns the *choreography* around a job a Durable Object drives
+ * through its alarm — arming, the single-flight guard, the staleness bound, the
+ * generation a drain writes under. This package owns what an install
  * specifically **is**: which package manager, which lockfile, what counts as
  * skippable. Splitting them along that line is what lets a second job on the
  * same object — a coding-agent run, say — reuse every rule without inheriting

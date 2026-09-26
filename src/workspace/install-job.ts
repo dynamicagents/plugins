@@ -1,7 +1,7 @@
 import { shellQuote, type Workspace } from "@cloudflare/computer";
 import type { WorkspaceRuntimeExecHandle } from "@cloudflare/computer";
-import type { Scheduler } from "./alarm/index.js";
-import { JobLifecycle, type JobContext } from "./job/index.js";
+import type { Scheduler } from "@dynamicagents/core/alarm";
+import { JobLifecycle } from "@dynamicagents/core/job";
 // Leaf modules rather than `./index.ts`, and that is structural: the barrel
 // re-exports this directory, so reaching it from here would be a cycle — through
 // a module that builds a class at import time, where initialisation order
@@ -88,22 +88,33 @@ const INSTALL_WATCH_MS = 60_000;
 const INSTALL_STALE_MS = 5 * 60_000;
 
 /**
- * What the install records about itself, alongside the state record.
- *
- * `startedAt` is core's, and it is the generation marker: a drain compares the
- * stamp it captured against the stamp on disk, and a mismatch means it has been
- * superseded. The rest is this install's own — `dir` because the alarm that
- * re-runs an install has no caller to ask, `repo` so a repository with an
- * `INSTALL_PLAN` override
- * resolves the same command the second time, `fingerprint` for the skip
- * condition, and `command` so a re-attach can name what it is waiting on.
+ * What the install records about itself, alongside the state record: `dir`
+ * because the alarm that re-runs an install has no caller to ask, `repo` so a
+ * repository with an `INSTALL_PLAN` override resolves the same command the
+ * second time, `fingerprint` for the skip condition, and `command` so a
+ * re-attach can name what it is waiting on.
  */
-interface InstallContext extends JobContext {
+interface InstallContext {
   dir: string;
   repo?: string;
   fingerprint: string | null;
   command: string;
 }
+
+/** What `#prepare` leaves: a run it settled, or one ready to spawn. */
+type Prepared =
+  | { kind: "settled"; state: InstallState }
+  | {
+      kind: "spawn";
+      resolution: { command: string };
+      fingerprint: string | null;
+      state: InstallState;
+    };
+
+/** One install's hold on the record — see core's `/job` `generation`. */
+type InstallRun = ReturnType<
+  JobLifecycle<{ command: string }, InstallContext>["generation"]
+>;
 
 /**
  * What the running container holds: the tree a host install finished, for which
@@ -119,6 +130,12 @@ interface ContainerTree {
   fingerprint: string | null;
   at: number;
 }
+
+/**
+ * The command a reservation's placeholder names, until the install's own is
+ * resolved. The gate renders it while it waits.
+ */
+const RESOLVING = "(being resolved)";
 
 /**
  * The exec id an install runs under.
@@ -171,8 +188,12 @@ export class InstallJob {
    *
    * **Arming writes `running` before anything is running**, which holds the gate
    * shut in the moments before the alarm fires. The alarm then presents the stamp
-   * arming wrote to `claim`, which recognises its own placeholder and nothing
+   * arming wrote to `reserve`, which recognises its own placeholder and nothing
    * else — taking over any `running` record instead would be displacement again.
+   *
+   * Every write a run makes goes through the lifecycle's `generation`, under
+   * the `startedAt` its reservation returned, so a run that has been displaced
+   * writes nothing.
    */
   readonly #job: JobLifecycle<
     { command: string },
@@ -254,7 +275,7 @@ export class InstallJob {
     );
 
     // Everything the arming handshake needs — the placeholder write, the stamp
-    // the alarm presents to `claim`, the cooldown floor and the run intent — in
+    // the alarm presents to `reserve`, the cooldown floor and the run intent — in
     // one call, and unwound as a unit if the intent cannot be scheduled.
     await this.#job.arm({ command: state.command });
   }
@@ -372,39 +393,10 @@ export class InstallJob {
     await this.deps.touch();
     await this.deps.ready();
 
-    /**
-     * One install at a time — the hazard is displacement.
-     *
-     * `repo_clone` calls this and a recovered turn calls it again. Every call
-     * spawns with the same {@link INSTALL_EXEC_ID}, so without this each would
-     * displace the last while the displaced command's drain stayed attached
-     * through `ctx.waitUntil` — then wrote *its* outcome over a record
-     * describing an install still running perfectly well.
-     *
-     * {@link state} rather than the lifecycle's raw `read()`, so a `running`
-     * record left by a dead isolate is resolved here rather than blocking a
-     * legitimate retry forever.
-     *
-     * `takeOverArmedAt` is the one exemption, narrow on purpose: the alarm's
-     * placeholder is a `running` record for an install that has not started, so
-     * the alarm must pass its own guard and only its own. Matching the exact
-     * `startedAt` it wrote is what stops that becoming "take over any running
-     * install", which is displacement again in a new hat.
-     */
+    // {@link state} rather than the lifecycle's raw `read()`: a `running` record
+    // left by a dead isolate is repaired on the way past, and one nobody is
+    // draining is re-attached.
     const current = await this.state();
-    const claim = this.#job.claim(
-      current,
-      this.deps.timeoutMs(),
-      opts?.takeOverArmedAt
-    );
-    if (!claim.ok) {
-      console.info(`[${this.deps.tag()}] an install is already in flight`, {
-        id: this.deps.id(),
-        command: claim.current.command,
-        seconds: Math.round((Date.now() - claim.current.startedAt) / 1000)
-      });
-      return claim.current;
-    }
 
     /**
      * A full workspace refuses the install and **writes nothing**.
@@ -433,103 +425,56 @@ export class InstallJob {
       return current;
     }
 
+    /**
+     * One install at a time — the hazard is displacement.
+     *
+     * `repo_clone` calls this and a recovered turn calls it again. Every call
+     * spawns with the same {@link INSTALL_EXEC_ID}, so without this each would
+     * displace the last while the displaced command's drain stayed attached
+     * through `ctx.waitUntil` — then wrote *its* outcome over a record
+     * describing an install still running perfectly well.
+     *
+     * Reserved rather than checked: everything between here and the spawn —
+     * probing the checkout, hashing the lockfile — awaits the container, and a
+     * check that wrote nothing would let a second caller through in that time.
+     *
+     * `takeOverArmedAt` is the one exemption, narrow on purpose: the alarm's
+     * placeholder is a `running` record for an install that has not started, so
+     * the alarm must pass its own guard and only its own. Matching the exact
+     * `startedAt` it wrote is what stops that becoming "take over any running
+     * install", which is displacement again in a new hat.
+     */
+    const reserved = await this.#job.reserve(
+      { command: RESOLVING },
+      this.deps.timeoutMs(),
+      opts?.takeOverArmedAt
+    );
+    if (!reserved.ok) {
+      console.info(`[${this.deps.tag()}] an install is already in flight`, {
+        id: this.deps.id(),
+        command: reserved.current.command,
+        seconds: Math.round((Date.now() - reserved.current.startedAt) / 1000)
+      });
+      return reserved.current;
+    }
+    const { startedAt } = reserved;
+    const run = this.#job.generation(startedAt);
+
     // Nothing trusts the interception CA here, deliberately: the workspace's own
     // `ready` does it, above every early return in this method. An install
     // already in flight and a full workspace both return before this line, and
     // neither of them means the container cannot speak TLS — the full workspace
     // least of all, since egress is what the agent needs to dig itself out.
 
-    const probe = this.#probe();
-    const resolution = await resolveInstallCommand(
-      probe,
-      req.dir,
-      this.deps.plan(),
-      req.repo
-    );
-
-    if (resolution.kind === "skip") {
-      const state: InstallState = {
-        state: "skipped",
-        reason: resolution.reason
-      };
-      await this.#job.write(state);
-      /**
-       * The common branch, and the one whose absence is indistinguishable from
-       * never having been called.
-       *
-       * Every other outcome here leaves a line — an install in flight, a full
-       * workspace, a spawn that failed, each end of the drain — so a workspace
-       * that skipped and a workspace that never installed read identically in the
-       * logs, and any checkout without a `package.json` takes this path. A skip
-       * is routine; establishing that one happened should not require an argument
-       * from silence.
-       */
-      console.info(`[${this.deps.tag()}] install skipped`, {
-        id: this.deps.id(),
-        dir: req.dir,
-        ...(req.repo ? { repo: req.repo } : {}),
-        reason: resolution.reason
-      });
-      return state;
+    let prepared: Prepared;
+    try {
+      prepared = await this.#prepare(req, run, startedAt);
+    } catch (err) {
+      await this.#release(run, reserved.previous, err);
+      throw err;
     }
-
-    const fingerprint = await installFingerprint(probe, req.dir, resolution);
-
-    // Skipped only for this container's own tree, for this lockfile.
-    const tree = await this.#tree();
-    if (
-      fingerprint &&
-      tree?.dir === req.dir &&
-      tree.fingerprint === fingerprint
-    ) {
-      const state: InstallState = {
-        state: "done",
-        command: resolution.command,
-        exitCode: 0,
-        finishedAt: Date.now(),
-        ms: 0,
-        tail: "dependencies already installed in this container for this lockfile"
-      };
-      await this.#job.write(state);
-      return state;
-    }
-
-    // The tree is rebuilt from here, so nothing vouches for it until exit 0.
-    await this.deps.storage.delete([CONTAINER_TREE_KEY, ...RETIRED_KEYS]);
-
-    const startedAt = Date.now();
-    const state: InstallState = {
-      state: "running",
-      command: resolution.command,
-      startedAt
-    };
-    await this.#job.write(state);
-    await this.#job.putContext({
-      dir: req.dir,
-      // Kept so a reinstall the alarm drives — which has no caller to ask —
-      // resolves the same command this one did. Without it a repository
-      // with an `INSTALL_PLAN` override would silently fall back to the default
-      // on every later run, installing a different tree than the first time.
-      ...(req.repo ? { repo: req.repo } : {}),
-      fingerprint,
-      command: resolution.command,
-      startedAt
-    });
-
-    /**
-     * Armed **before** the spawn — the hazard is an isolate that dies between
-     * the two.
-     *
-     * The record above already says `running`, so from here until something
-     * writes a terminal state the gate is shut and the alarm is the only thing
-     * that can open it. Arming afterwards leaves a window with nothing scheduled
-     * to recover: a `runtime.exec` that threw on the container's WebSocket left
-     * a workspace `running` for half an hour, refusing every command.
-     *
-     * Arming early is free — the handler clears the intent if the record is not
-     * `running`, so finishing first costs one wake-up.
-     */
-    await this.#job.armWatch();
+    if (prepared.kind === "settled") return prepared.state;
+    const { resolution, fingerprint, state } = prepared;
 
     let handle: WorkspaceRuntimeExecHandle<"utf8">;
     try {
@@ -576,14 +521,152 @@ export class InstallJob {
             "was most likely unreachable. Run the command yourself with bash, " +
             "or clone again to retry it."
       };
-      await this.#job.write(failed);
-      await this.#job.clearWatch();
-      return failed;
+      return await this.#settle(run, failed);
     }
 
     await own(handle, startedAt);
 
     return state;
+  }
+
+  /**
+   * Everything between a reservation and the spawn: resolve the command, and
+   * settle the run here when there is nothing to install or the tree is already
+   * this lockfile's. Otherwise write this install's own `running` record and
+   * context, and arm the watchdog.
+   */
+  async #prepare(
+    req: { dir: string; repo?: string },
+    run: InstallRun,
+    startedAt: number
+  ): Promise<Prepared> {
+    const probe = this.#probe();
+    const resolution = await resolveInstallCommand(
+      probe,
+      req.dir,
+      this.deps.plan(),
+      req.repo
+    );
+
+    if (resolution.kind === "skip") {
+      const state: InstallState = {
+        state: "skipped",
+        reason: resolution.reason
+      };
+      /**
+       * The common branch, and the one whose absence is indistinguishable from
+       * never having been called.
+       *
+       * Every other outcome here leaves a line — an install in flight, a full
+       * workspace, a spawn that failed, each end of the drain — so a workspace
+       * that skipped and a workspace that never installed read identically in the
+       * logs, and any checkout without a `package.json` takes this path. A skip
+       * is routine; establishing that one happened should not require an argument
+       * from silence.
+       */
+      console.info(`[${this.deps.tag()}] install skipped`, {
+        id: this.deps.id(),
+        dir: req.dir,
+        ...(req.repo ? { repo: req.repo } : {}),
+        reason: resolution.reason
+      });
+      return { kind: "settled", state: await this.#settle(run, state) };
+    }
+
+    const fingerprint = await installFingerprint(probe, req.dir, resolution);
+
+    // Skipped only for this container's own tree, for this lockfile.
+    const tree = await this.#tree();
+    if (
+      fingerprint &&
+      tree?.dir === req.dir &&
+      tree.fingerprint === fingerprint
+    ) {
+      const state: InstallState = {
+        state: "done",
+        command: resolution.command,
+        exitCode: 0,
+        finishedAt: Date.now(),
+        ms: 0,
+        tail: "dependencies already installed in this container for this lockfile"
+      };
+      return { kind: "settled", state: await this.#settle(run, state) };
+    }
+
+    // The tree is rebuilt from here, so nothing vouches for it until exit 0.
+    await this.deps.storage.delete([CONTAINER_TREE_KEY, ...RETIRED_KEYS]);
+
+    const state: InstallState = {
+      state: "running",
+      command: resolution.command,
+      startedAt
+    };
+    if (!(await run.write(state))) {
+      return { kind: "settled", state: await this.#job.read() };
+    }
+    await this.#job.putContext({
+      dir: req.dir,
+      // Kept so a reinstall the alarm drives — which has no caller to ask —
+      // resolves the same command this one did. Without it a repository
+      // with an `INSTALL_PLAN` override would silently fall back to the default
+      // on every later run, installing a different tree than the first time.
+      ...(req.repo ? { repo: req.repo } : {}),
+      fingerprint,
+      command: resolution.command
+    });
+
+    /**
+     * Armed **before** the spawn — the hazard is an isolate that dies between
+     * the two.
+     *
+     * The record above already says `running`, so from here until something
+     * writes a terminal state the gate is shut and the alarm is the only thing
+     * that can open it. Arming afterwards leaves a window with nothing scheduled
+     * to recover: a `runtime.exec` that threw on the container's WebSocket left
+     * a workspace `running` for half an hour, refusing every command.
+     *
+     * Arming early is free — the handler clears the intent if the record is not
+     * `running`, so finishing first costs one wake-up.
+     */
+    await this.#job.armWatch();
+
+    return { kind: "spawn", resolution, fingerprint, state };
+  }
+
+  /** Settle `run` with `state`, or say what stands if it was displaced. */
+  async #settle(run: InstallRun, state: InstallState): Promise<InstallState> {
+    return (await run.write(state)) ? state : await this.#job.read();
+  }
+
+  /**
+   * Hand a reservation back when nothing was spawned under it: the record as it
+   * was, unless that was a run of its own — the alarm's placeholder — which
+   * nothing would now finish, so `failed`.
+   */
+  async #release(
+    run: InstallRun,
+    previous: InstallState,
+    err: unknown
+  ): Promise<void> {
+    const back: InstallState =
+      previous.state === "running"
+        ? {
+            state: "failed",
+            command: previous.command,
+            finishedAt: Date.now(),
+            error:
+              `the install could not be prepared (${String(err)}). Run the ` +
+              "command yourself with bash, or clone again to retry it."
+          }
+        : previous;
+    try {
+      await run.write(back);
+    } catch (rollback) {
+      throw new AggregateError(
+        [err, rollback],
+        "the install could not be prepared, and its reservation could not be released"
+      );
+    }
   }
 
   /**
@@ -637,13 +720,16 @@ export class InstallJob {
           "reporting, which is past its timeout — it is not going to finish. " +
           "Run the command yourself with bash if you still need it."
       };
-      await this.#job.write(failed);
-      await this.#job.clearWatch();
-      return failed;
+      // Under the record's own generation, so a reservation that took the record
+      // since it was read is not overwritten.
+      const repaired = await this.#job
+        .generation(state.startedAt)
+        .write(failed);
+      return repaired ? failed : await this.#job.read();
     }
 
     if (!this.#draining) {
-      await this.#reattachInstall();
+      await this.#reattachInstall(state.startedAt);
       return await this.#job.read();
     }
     return state;
@@ -666,62 +752,61 @@ export class InstallJob {
   async #drainInstall(
     handle: WorkspaceRuntimeExecHandle<"utf8">,
     /**
-     * The stamp the install this drain was handed belongs to.
+     * The generation this drain writes under: the `startedAt` its reservation
+     * returned, or — re-attached — the running record's.
      *
-     * Passed in rather than read below, and that is the whole of the fix: this
-     * method's first `await` is reached long after `#beginInstall` returned, so a
-     * second install that claimed in between has already rewritten the context.
-     * A drain reading it then adopts the *other* install's generation, passes
-     * every `stillMine()` check, and writes its own verdict over a command that
-     * is still running.
-     *
-     * Absent only for {@link InstallJob.#reattachInstall}, which by definition
-     * did not start what it is picking up and has nothing but the record to go
-     * on.
+     * Passed in rather than read below: this method's first `await` is reached
+     * long after `#beginInstall` returned, and a record read then may already be
+     * a later install's, whose generation this drain would adopt.
      */
-    ownedAt?: number
+    startedAt: number
   ): Promise<void> {
     this.#draining = true;
     const context = await this.#job.context();
     const command = context?.command ?? "(unknown)";
-    const startedAt = ownedAt ?? context?.startedAt ?? Date.now();
 
     /**
      * Whether this drain still owns the record.
      *
-     * The guard in `startInstall` stops two installs overlapping in the first
-     * place; this makes it harmless if one ever does. A drain can outlive the
-     * command it was watching — `ctx.waitUntil` keeps running after the RPC
+     * The reservation in `#beginInstall` stops two installs overlapping in the
+     * first place; this makes it harmless if one ever does. A drain can outlive
+     * the command it was watching — `ctx.waitUntil` keeps running after the RPC
      * returns — and the damage a late one does is silent: it writes a verdict
      * about a finished command over a record describing a live one, and every
      * `bash` then reads a result that belongs to nothing.
      *
-     * `startedAt` is the generation marker. `#beginInstall` rewrites the context
-     * before it spawns, so a drain whose stamp no longer matches has been
-     * superseded and has nothing useful left to say. The marker also **latches**:
-     * ownership is not recoverable, so a stamp that happens to match again does
-     * not hand the record back.
-     *
-     * Wrapped rather than used bare only to log the transition, and only once —
-     * a superseded drain asks this on both the success and the error path.
+     * Every write goes through `run.write`, which checks and writes in one step
+     * and clears the watchdog with a verdict. `stillMine` is asked only before
+     * this drain's own side effects. The superseded line is logged once — a
+     * superseded drain can be refused on both the success and the error path.
      */
-    const generation = this.#job.generation(startedAt);
+    const run = this.#job.generation(startedAt);
     let logged = false;
+    const superseded = async (): Promise<void> => {
+      if (logged) return;
+      logged = true;
+      const current = await this.#job.read();
+      console.warn(
+        `[${this.deps.tag()}] discarding a superseded install drain`,
+        {
+          id: this.deps.id(),
+          command,
+          startedAt,
+          current:
+            current.state === "running" ? current.startedAt : current.state
+        }
+      );
+    };
     const stillMine = async (): Promise<boolean> => {
-      if (await generation.stillMine()) return true;
-      if (!logged) {
-        logged = true;
-        console.warn(
-          `[${this.deps.tag()}] discarding a superseded install drain`,
-          {
-            id: this.deps.id(),
-            command,
-            startedAt,
-            current: (await this.#job.context())?.startedAt
-          }
-        );
-      }
+      if (await run.stillMine()) return true;
+      await superseded();
       return false;
+    };
+    const settle = async (
+      verdict: InstallState,
+      also?: Record<string, unknown>
+    ): Promise<void> => {
+      if (!(await run.write(verdict, also))) await superseded();
     };
 
     try {
@@ -734,27 +819,31 @@ export class InstallJob {
       if (!(await stillMine())) return;
 
       if (result.exitCode === 0) {
-        if (context?.dir) {
-          const tree: ContainerTree = {
-            dir: context.dir,
-            fingerprint: context.fingerprint,
-            at: Date.now()
-          };
-          await this.deps.storage.put(CONTAINER_TREE_KEY, tree);
-        }
+        // With the verdict, in the same write: the tree is this install's only if
+        // the verdict is.
+        const tree: ContainerTree | undefined = context?.dir
+          ? {
+              dir: context.dir,
+              fingerprint: context.fingerprint,
+              at: Date.now()
+            }
+          : undefined;
         console.info(`[${this.deps.tag()}] install finished`, {
           id: this.deps.id(),
           command,
           seconds: Math.round((Date.now() - startedAt) / 1000)
         });
-        await this.#job.write({
-          state: "done",
-          command,
-          exitCode: 0,
-          finishedAt: Date.now(),
-          ms: Date.now() - startedAt,
-          tail
-        });
+        await settle(
+          {
+            state: "done",
+            command,
+            exitCode: 0,
+            finishedAt: Date.now(),
+            ms: Date.now() - startedAt,
+            tail
+          },
+          tree ? { [CONTAINER_TREE_KEY]: tree } : undefined
+        );
       } else {
         // Logged, and this line is not optional. This is the *ordinary* way an
         // install fails — the other paths are all exceptional — and it used to
@@ -769,7 +858,7 @@ export class InstallJob {
           seconds: Math.round((Date.now() - startedAt) / 1000),
           tail: truncateOutput(tail, 1000)
         });
-        await this.#job.write({
+        await settle({
           state: "failed",
           command,
           finishedAt: Date.now(),
@@ -795,7 +884,7 @@ export class InstallJob {
         seconds: Math.round((Date.now() - startedAt) / 1000),
         err: String(err)
       });
-      await this.#job.write({
+      await settle({
         state: "failed",
         command,
         finishedAt: Date.now(),
@@ -804,10 +893,6 @@ export class InstallJob {
     } finally {
       this.#draining = false;
       handle[Symbol.dispose]();
-      // Not if this drain was superseded: the watchdog belongs to whichever
-      // install owns the record now, and clearing it here would disarm the one
-      // recovery path the *live* install has.
-      if (!generation.superseded()) await this.#job.clearWatch();
     }
   }
 
@@ -819,7 +904,10 @@ export class InstallJob {
    * while nobody was listening, which is the case that would otherwise leave the
    * record stuck at `running` and every `bash` blocked behind it.
    */
-  async #reattachInstall(): Promise<void> {
+  async #reattachInstall(
+    /** The running record's `startedAt`: the generation it picks up. */
+    startedAt: number
+  ): Promise<void> {
     if (this.#draining) return;
     try {
       const handle = await this.deps
@@ -828,7 +916,7 @@ export class InstallJob {
           encoding: "utf8",
           resume: "tail"
         });
-      this.deps.waitUntil(this.#drainInstall(handle));
+      this.deps.waitUntil(this.#drainInstall(handle, startedAt));
     } catch (err) {
       // The exec is gone entirely — the container was replaced under it. Say so
       // rather than leaving the gate closed forever; the next checkout starts a
@@ -853,7 +941,7 @@ export class InstallJob {
           }
         );
       const context = await this.#job.context();
-      await this.#job.write({
+      await this.#job.generation(startedAt).write({
         state: "failed",
         command: context?.command ?? "(unknown)",
         finishedAt: Date.now(),
@@ -862,7 +950,6 @@ export class InstallJob {
           : "the install stopped without reporting — its container was most " +
             "likely replaced. Re-run it with bash, or clone again to restart it."
       });
-      await this.#job.clearWatch();
     }
   }
 
@@ -871,7 +958,7 @@ export class InstallJob {
    *
    * `clearArmed` first and unconditionally: this handler runs for minutes, and
    * the stamp left in place is what a second arming would recognise as its own.
-   * `startInstall`'s in-flight guard would catch a double, but the cheaper
+   * The reservation in `#beginInstall` would catch a double, but the cheaper
    * answer is not to schedule one.
    */
   async onRun(): Promise<void> {
@@ -900,7 +987,7 @@ export class InstallJob {
     if (state.state !== "running") return;
     // Still running and nobody draining it: this isolate is new since the
     // command started. Re-attach, and come back if it is still going.
-    await this.#reattachInstall();
+    await this.#reattachInstall(state.startedAt);
     await this.#job.armWatch();
   }
 }

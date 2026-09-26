@@ -6,7 +6,7 @@ import {
   installScheduler,
   namedDeadline,
   type ScheduledHost
-} from "./alarm/index.js";
+} from "@dynamicagents/core/alarm";
 import {
   Workspace,
   type DurableObjectStorageLike,
