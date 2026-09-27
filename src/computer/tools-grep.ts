@@ -24,6 +24,15 @@ import type { ComputerContext } from "./context.js";
  */
 const DEFAULT_MAX_MATCHES = 200;
 
+/**
+ * The most `context` lines one `grep` shows around each match.
+ *
+ * Clamped rather than refused, since a refusal costs the model a step to retry.
+ * The bound is {@link file://./render.ts packBlocks}: it ships the first match's
+ * block whole, so a block has to stay well inside the output budget.
+ */
+const MAX_CONTEXT_LINES = 10;
+
 export function grepTools(ctx: ComputerContext): ToolSet {
   const { cwd, maxChars, inWorkspace } = ctx;
 
@@ -74,9 +83,10 @@ export function grepTools(ctx: ComputerContext): ToolSet {
           .number()
           .int()
           .min(0)
-          .max(3)
           .optional()
-          .describe("Lines of surrounding context to include with each match"),
+          .describe(
+            `Lines of surrounding context to include with each match, at most ${MAX_CONTEXT_LINES}`
+          ),
         offset: z
           .number()
           .int()
@@ -97,6 +107,10 @@ export function grepTools(ctx: ComputerContext): ToolSet {
         const refusal = guardPath(target, "grep");
         if (refusal) return refusal;
         const from = offset ?? 0;
+        const around =
+          context === undefined
+            ? undefined
+            : Math.min(context, MAX_CONTEXT_LINES);
         return inWorkspace("searching", target, async (fs) => {
           // Two rounds, because a `grep` retry re-reads and re-scans every file
           // it already looked at. `.git` rarely floods a page here — its bulk is
@@ -109,7 +123,7 @@ export function grepTools(ctx: ComputerContext): ToolSet {
                 include,
                 regex,
                 ignoreCase,
-                context,
+                context: around,
                 limit,
                 offset: at
               }),
@@ -135,6 +149,9 @@ export function grepTools(ctx: ComputerContext): ToolSet {
             listingNote(page, shown, "matches", "`include`") +
             (capped
               ? `\n(Some lines were shortened. Read one in full with \`read\`, passing its line number as \`offset\`.)`
+              : "") +
+            (around !== context
+              ? `\n(\`context\` is at most ${MAX_CONTEXT_LINES}, so ${context} was clamped to ${MAX_CONTEXT_LINES}. Read a wider region with \`read\`.)`
               : "")
           );
         });

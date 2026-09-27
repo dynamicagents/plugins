@@ -1191,6 +1191,10 @@ export abstract class WorkspaceObjectBase<
       reason,
       running: this.ctx.container?.running ?? false
     });
+    // Hang up the session to computerd first: a destroy that cuts it live
+    // surfaces as an uncaught `Network connection lost`. The workspace
+    // reconnects on its next use, and `close()` swallows its own failures.
+    await this.#workspaceMemo?.close();
     try {
       await this.ctx.container?.destroy();
     } catch (err) {

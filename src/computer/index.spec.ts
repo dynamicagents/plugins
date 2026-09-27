@@ -470,6 +470,31 @@ describe("grep", () => {
     });
   });
 
+  /** Why it clamps: {@link file://./tools-grep.ts MAX_CONTEXT_LINES}. */
+  it("clamps a context over the ceiling rather than refusing it", async () => {
+    const { workspace, greps } = stub(seed);
+    const tools = buildComputerTools(workspace, config);
+    const schema = tools.grep!.inputSchema as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+
+    expect(schema.safeParse({ query: "const", context: 50 }).success).toBe(
+      true
+    );
+    const out = await run(tools, "grep", { query: "const", context: 50 });
+    expect(greps[0]?.context).toBe(10);
+    expect(out).toContain("50 was clamped to 10");
+  });
+
+  it("says nothing of the ceiling for a context within it", async () => {
+    const { workspace, greps } = stub(seed);
+    const tools = buildComputerTools(workspace, config);
+
+    const out = await run(tools, "grep", { query: "const", context: 10 });
+    expect(greps[0]?.context).toBe(10);
+    expect(out).not.toContain("at most");
+  });
+
   it("says it found nothing, and what it looked for", async () => {
     const { workspace } = stub(seed);
     const tools = buildComputerTools(workspace, config);
