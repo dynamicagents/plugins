@@ -470,11 +470,7 @@ describe("grep", () => {
     });
   });
 
-  /**
-   * A refusal at the schema costs the model a step to ask again, so a context
-   * over the ceiling is clamped — and said, since the result is narrower than
-   * what was asked for.
-   */
+  /** Why it clamps: {@link file://./tools-grep.ts MAX_CONTEXT_LINES}. */
   it("clamps a context over the ceiling rather than refusing it", async () => {
     const { workspace, greps } = stub(seed);
     const tools = buildComputerTools(workspace, config);
@@ -487,7 +483,7 @@ describe("grep", () => {
     );
     const out = await run(tools, "grep", { query: "const", context: 50 });
     expect(greps[0]?.context).toBe(10);
-    expect(out).toContain("`context` is at most 10");
+    expect(out).toContain("50 was clamped to 10");
   });
 
   it("says nothing of the ceiling for a context within it", async () => {

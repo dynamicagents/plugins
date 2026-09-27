@@ -1237,9 +1237,9 @@ describe("releasing a container", () => {
   });
 
   /**
-   * A destroy that cuts computerd's session live surfaces as an uncaught
-   * `Network connection lost`. The pool has no container, so a stand-in records
-   * the order; the errors themselves only show against a real one.
+   * Why the order matters: `#stopContainer` in {@link file://./object.ts}. The
+   * pool has no container, so a stand-in records the order; the errors it
+   * prevents only show against a real one.
    */
   it("hangs up the container session before it stops the container", async () => {
     const stub = freshWorkspace("release-hangs-up");

@@ -151,7 +151,7 @@ export function grepTools(ctx: ComputerContext): ToolSet {
               ? `\n(Some lines were shortened. Read one in full with \`read\`, passing its line number as \`offset\`.)`
               : "") +
             (around !== context
-              ? `\n(\`context\` is at most ${MAX_CONTEXT_LINES}, so ${MAX_CONTEXT_LINES} lines either side were shown. Read a wider region with \`read\`.)`
+              ? `\n(\`context\` is at most ${MAX_CONTEXT_LINES}, so ${context} was clamped to ${MAX_CONTEXT_LINES}. Read a wider region with \`read\`.)`
               : "")
           );
         });
