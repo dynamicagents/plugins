@@ -259,6 +259,56 @@ describe("what a fetch resolves against the remote", () => {
   });
 });
 
+/** Why, on {@link file://./git-host.ts CONTAINER_CORE_CONFIG}. */
+describe("what a clone leaves for the container's git", () => {
+  /** A client that records each call's name, and each config write's key. */
+  function recording(): { git: GitClient; calls: string[] } {
+    const calls: string[] = [];
+    const record = (name: string) =>
+      vi.fn(async (req: { path?: string; value?: unknown }) => {
+        calls.push(
+          name === "configSet" ? `${req.path}=${String(req.value)}` : name
+        );
+        return name === "fetch"
+          ? { defaultBranch: "refs/heads/main" }
+          : undefined;
+      });
+    const git = {
+      init: record("init"),
+      remoteAdd: record("remoteAdd"),
+      fetch: record("fetch"),
+      checkout: record("checkout"),
+      configSet: record("configSet")
+    } as unknown as GitClient;
+    return { git, calls };
+  }
+
+  it("keeps symlinks, the executable bit and case, from init onwards", async () => {
+    const { git, calls } = recording();
+
+    const result = await hostWith(git, TOKEN).clone({
+      url: "https://github.com/acme/widget.git",
+      dir: "/workspace/widget",
+      allowedHosts: ALLOWED
+    });
+
+    expect(result).toEqual({ ok: true, detail: "main" });
+    expect(calls.slice(0, 4)).toEqual([
+      "init",
+      "core.symlinks=true",
+      "core.filemode=true",
+      "core.ignorecase=false"
+    ]);
+    expect(calls.slice(4)).toEqual([
+      "remoteAdd",
+      "fetch",
+      "checkout",
+      "branch.main.remote=origin",
+      "branch.main.merge=refs/heads/main"
+    ]);
+  });
+});
+
 describe("describeGitError", () => {
   it("is the message alone when there is no cause", () => {
     expect(describeGitError(new Error("push rejected"))).toBe("push rejected");

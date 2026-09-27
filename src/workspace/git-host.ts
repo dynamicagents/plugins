@@ -34,6 +34,22 @@ export interface GitHostDeps {
   tag: () => string;
 }
 
+/**
+ * What the container's own `git init` would write, over isomorphic-git's.
+ *
+ * isomorphic-git's `init` writes `core.*` for a filesystem without symlinks or
+ * an executable bit that ignores case, and the container's git obeys it. With
+ * `symlinks = false`, a command there that rewrites the tree — starter puts a
+ * worktree on its branch with `checkout -f` — writes each link as a file holding
+ * its target, and `status` calls that clean. With `filemode = false`, a script
+ * made executable is committed as 100644. The store models all three.
+ */
+const CONTAINER_CORE_CONFIG = {
+  "core.symlinks": true,
+  "core.filemode": true,
+  "core.ignorecase": false
+};
+
 export class WorkspaceGitHost {
   constructor(private readonly deps: GitHostDeps) {}
 
@@ -60,6 +76,10 @@ export class WorkspaceGitHost {
       // checked at the moment the token would be handed over. The cost is four
       // calls instead of one; `clone` is these four.
       await git.init({ dir: req.dir });
+      // Straight after `init`, so a clone that fails part-way leaves nothing
+      // behind that the container's git would misread.
+      for (const [path, value] of Object.entries(CONTAINER_CORE_CONFIG))
+        await git.configSet({ dir: req.dir, path, value });
       await git.remoteAdd({
         dir: req.dir,
         name: "origin",
