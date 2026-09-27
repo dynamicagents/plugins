@@ -369,7 +369,7 @@ export function repo(config: RepoConfig): AgentPlugin {
     "- `repo_fetch` brings a checkout's remote branches in without touching its tree — how you review a branch someone else pushed, as `origin/<branch>` with `repo_diff`.",
     "- `repo_status` and `repo_diff` show what you have changed — read the diff before committing. On a large change call `repo_diff` with `stat: true` first to see which files moved, then read the ones that matter; output is truncated from the middle when it is large.",
     "- `repo_commit` stages everything and commits.",
-    "- `repo_push` pushes a work branch. It refuses the default branch and other protected names, and it refuses a branch carrying no commits the default branch does not already have — that is not negotiable.",
+    "- `repo_push` pushes a branch the checkout holds, or creates one at the current commit. It refuses the default branch and other protected names, and it refuses a branch that adds no commit the remote does not already have — that is not negotiable.",
     "- `repo_open_pr` opens the pull request and returns its URL.",
     "- `repo_issue_view` reads an issue or pull request with its comments, `repo_pr_view` shows a pull request's state and the files it touches, and `repo_pr_comment` leaves a comment. All three act on the repository you have checked out — read the issue a task refers to before guessing what it asks for.",
     "- `repo_pr_review_status` says whether a reviewer has finished. Ask it before reading a review: one that has not landed has left nothing, so an empty list of threads means nothing yet rather than nothing to do.",

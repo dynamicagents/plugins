@@ -182,10 +182,14 @@ model can talk itself out of is not a guardrail:
 3. **The repository's own default branch**, read from the remote. A repo whose
    trunk is `release` deserves the same protection, and only the remote can say.
 
-It then refuses a fourth thing, after switching to the branch: **a branch with no
-commits the default branch does not already have.** Pushing one succeeds,
-`repo_open_pr` opens an empty pull request on it, and the turn reports a URL as
-if the work had landed — the one outcome worse than an error.
+It then refuses a fourth thing: **a branch that adds no commit the remote does not
+already have.** Pushing one succeeds, `repo_open_pr` fails or opens an empty pull
+request, and the work looks delivered — the one outcome worse than an error. It
+is measured against every branch on the remote, not the default one, because a
+pull request's base need not be the default: a branch level with `next` is empty
+against `next` and still ahead of `main`. It is checked before a missing branch
+is created, and when the host keeps worktrees the refusal carries its list, which
+is where a writing sub-agent's work is.
 
 `repo_push` **switches to** an existing branch and only creates a missing one —
 `checkout -b`, never `-B`. `-B` is create-or-_reset_, so on a branch that already

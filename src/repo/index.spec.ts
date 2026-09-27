@@ -61,11 +61,16 @@ const GIT_DEFAULTS: Stubbed = {
   "rev-parse --git-dir": { success: false },
   "remote get-url origin": { stdout: "https://github.com/o/r" },
   "symbolic-ref": { stdout: "origin/main" },
-  // The commit `repo_push` resolves in the checkout before anything credentialed
-  // runs. Distinct from the `--quiet` probe that asks whether the branch exists
-  // at all, which tests stub separately.
-  'rev-parse --verify "refs/heads/': { stdout: "1f0cd15e0f7c8b" }
+  // The commit `repo_push` would publish, and how many commits it adds to the
+  // remote. Whether the branch exists at all is the `--quiet` probe, which tests
+  // stub separately.
+  "log -1 --format": { stdout: "1f0cd15e0f7c8b\nAdd a JSON flag" },
+  "rev-list --count": { stdout: "1" }
 };
+
+/** What `repo_push` answers when {@link GIT_DEFAULTS} describe the checkout. */
+const pushed = (branch: string) =>
+  `pushed ${branch} at 1f0cd15 "Add a JSON flag", 1 commit no other branch on the remote has`;
 
 function recorder(results: Stubbed = {}): {
   exec: RepoExec;
@@ -469,7 +474,7 @@ describe("guardrails", () => {
       branch: "coder/add-json-flag"
     });
 
-    expect(result).toBe("pushed coder/add-json-flag");
+    expect(result).toBe(pushed("coder/add-json-flag"));
     expect(gitCalls.map((c) => c.op)).toEqual(["push"]);
     expect(gitCalls[0]!.req["branch"]).toBe("coder/add-json-flag");
   });
@@ -495,8 +500,9 @@ describe("guardrails", () => {
 
     // Order of the two facts matters: the branch is on the remote, and that is
     // the sentence the model acts on. What failed is local convenience.
-    expect(result).toContain("pushed coder/x");
-    expect(result).toContain("could not record what it tracks");
+    expect(result).toContain(
+      `${pushed("coder/x")}, but could not record what it tracks`
+    );
     expect(result).toContain("could not lock config file");
     // Actionable rather than merely reported: the only thing that breaks is a
     // bare `git push` from a sub-agent's shell, and this is its one-line fix.
@@ -515,15 +521,14 @@ describe("guardrails", () => {
    */
   it("switches to an existing branch instead of resetting it to HEAD", async () => {
     const { exec, calls } = recorder({
-      "rev-parse --verify --quiet": { success: true },
-      "rev-list --count": { stdout: "1" }
+      "rev-parse --verify --quiet": { success: true }
     });
     const result = await run(tools(exec), "repo_push", {
       dir: "/w/r",
       branch: "coder/x"
     });
 
-    expect(result).toBe("pushed coder/x");
+    expect(result).toBe(pushed("coder/x"));
     expect(calls.some((c) => c.command.includes("checkout -B"))).toBe(false);
     expect(calls.some((c) => c.command.includes("checkout -b"))).toBe(false);
     expect(calls.some((c) => /checkout "\$REPO_BRANCH"/.test(c.command))).toBe(
@@ -533,25 +538,93 @@ describe("guardrails", () => {
 
   it("creates the branch when it does not exist yet", async () => {
     const { exec, calls } = recorder({
-      "rev-parse --verify --quiet": { success: false },
-      "rev-list --count": { stdout: "1" }
+      "rev-parse --verify --quiet": { success: false }
     });
     const result = await run(tools(exec), "repo_push", {
       dir: "/w/r",
       branch: "coder/x"
     });
 
-    expect(result).toBe("pushed coder/x");
+    expect(result).toBe(pushed("coder/x"));
     expect(calls.some((c) => c.command.includes("checkout -b"))).toBe(true);
+  });
+
+  /**
+   * The commit measured is the one the push would publish: the branch's own, or
+   * HEAD for a branch `checkout -b` would create there.
+   */
+  it("measures the branch's commit, or HEAD for a branch it creates", async () => {
+    const tipOf = async (exists: boolean) => {
+      const { exec, calls } = recorder({
+        "rev-parse --verify --quiet": { success: exists }
+      });
+      await run(tools(exec), "repo_push", { dir: "/w/r", branch: "coder/x" });
+      return calls.find((c) => c.command.startsWith("git log -1"))?.options
+        ?.env?.["REPO_REF"];
+    };
+
+    expect(await tipOf(true)).toBe("refs/heads/coder/x");
+    expect(await tipOf(false)).toBe("HEAD");
+  });
+
+  it("says what it pushed", async () => {
+    const { exec } = recorder({
+      "rev-parse --verify --quiet": { success: true },
+      "rev-list --count": { stdout: "3" }
+    });
+    const result = await run(tools(exec), "repo_push", {
+      dir: "/w/r",
+      branch: "coder/x"
+    });
+
+    expect(result).toBe(
+      'pushed coder/x at 1f0cd15 "Add a JSON flag", 3 commits no other branch on the remote has'
+    );
   });
 
   /**
    * An empty branch pushed successfully is worse than a failed push: the turn
    * goes on to open a pull request and report a URL, so the work looks
-   * delivered. This is the guard that turns the `checkout -B` class of bug into
-   * a message instead of a silent loss.
+   * delivered.
+   *
+   * A name the checkout does not hold would be created at HEAD. With HEAD on
+   * `next` in a repository whose default is `main`, it is still ahead of the
+   * default and adds nothing to the remote, so it is refused.
    */
-  it("refuses a branch with no commits the default branch lacks", async () => {
+  it("refuses a missing branch at a commit the remote already has, creating nothing", async () => {
+    const { exec, calls } = recorder({
+      "rev-parse --verify --quiet": { success: false },
+      "rev-list --count": { stdout: "0" }
+    });
+    const { git, gitCalls } = gitRecorder();
+    const result = await run(tools(exec, { git }), "repo_push", {
+      dir: "/w/r",
+      branch: "docs/readme"
+    });
+
+    expect(result).toMatch(/refusing to push "docs\/readme"/);
+    expect(result).toContain("it is not a branch in /w/r");
+    expect(result).toContain(
+      "1f0cd15 adds no commit the remote does not already have"
+    );
+    expect(result).toContain("check repo_status and repo_diff");
+    expect(calls.some((c) => c.command.includes("checkout"))).toBe(false);
+    expect(gitCalls).toHaveLength(0);
+
+    // Every remote branch but the one being pushed: a retry of a push that
+    // landed still goes. `--exclude` takes the ref without `refs/remotes/`, and
+    // with that prefix silently excludes nothing.
+    const measured = calls.find((c) => c.command.includes("rev-list --count"));
+    expect(measured?.command).toBe(
+      'git rev-list --count "$REPO_TIP" --not --exclude="origin/$REPO_BRANCH" --remotes=origin'
+    );
+    expect(measured?.options?.env).toMatchObject({
+      REPO_TIP: "1f0cd15e0f7c8b",
+      REPO_BRANCH: "docs/readme"
+    });
+  });
+
+  it("refuses an existing branch that adds nothing to the remote", async () => {
     const { exec, calls } = recorder({
       "rev-parse --verify --quiet": { success: true },
       "rev-list --count": { stdout: "0" }
@@ -561,18 +634,18 @@ describe("guardrails", () => {
       branch: "coder/x"
     });
 
-    expect(result).toMatch(/no commits that origin\/main/i);
+    expect(result).toMatch(
+      /refusing to push "coder\/x" — 1f0cd15 adds no commit/
+    );
+    expect(result).not.toContain("not a branch in");
     expect(calls.some((c) => c.command.includes("push"))).toBe(false);
   });
 
   /**
    * A comparison that fails has not established anything, and this is the only
-   * probe in `repo_push` that could read that as permission.
-   *
-   * The guard is skipped when there is no baseline at all — the case below — but
-   * once `origin/HEAD` has resolved, a `rev-list` that then fails leaves the
-   * empty-pull-request question open. Pushing anyway is how an empty branch
-   * reaches `repo_open_pr` and gets reported as delivered work.
+   * probe in `repo_push` that could read that as permission. Pushing anyway is
+   * how an empty branch reaches `repo_open_pr` and gets reported as delivered
+   * work.
    */
   it("refuses to push when the empty-branch comparison fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -610,17 +683,18 @@ describe("guardrails", () => {
       branch: "coder/x"
     });
 
-    // The same distinction the three probes around it draw: a container that
+    // The same distinction the probes around it draw: a container that
     // vanished is not an answer about the branch.
     expect(result).toMatch(/container was replaced/i);
     expect(gitCalls).toHaveLength(0);
   });
 
-  /** A repo with no resolvable default branch is unusual, not a reason to block. */
-  it("skips the empty-branch guard when the baseline cannot be resolved", async () => {
+  /** The guard needs no default branch, so a repository without one keeps it. */
+  it("guards a push when the default branch cannot be resolved", async () => {
     const { exec } = recorder({
       symbolic: { success: false },
-      "rev-parse --verify --quiet": { success: true }
+      "rev-parse --verify --quiet": { success: true },
+      "rev-list --count": { stdout: "0" }
     });
     const { git, gitCalls } = gitRecorder();
     const result = await run(tools(exec, { git }), "repo_push", {
@@ -628,8 +702,8 @@ describe("guardrails", () => {
       branch: "coder/x"
     });
 
-    expect(result).toBe("pushed coder/x");
-    expect(gitCalls.map((c) => c.op)).toEqual(["push"]);
+    expect(result).toMatch(/adds no commit the remote does not already have/);
+    expect(gitCalls).toHaveLength(0);
   });
 
   it("reports a clean tree rather than failing the turn", async () => {
@@ -1501,8 +1575,7 @@ describe("failure logging", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const { exec } = recorder({
-        "rev-parse --verify --quiet": { success: true },
-        "rev-list --count": { stdout: "1" }
+        "rev-parse --verify --quiet": { success: true }
       });
       const { git } = gitRecorder({
         push: { ok: false, message: "fatal: Authentication failed" }
@@ -2773,19 +2846,19 @@ describe("a host that keeps worktrees", () => {
 
   it("tells the host what a landed push put on the remote", async () => {
     const { exec } = recorder();
-    const pushed: unknown[] = [];
+    const landed: unknown[] = [];
     const result = await run(
       tools(exec, {
         afterPush: async (push) => {
-          pushed.push(push);
+          landed.push(push);
         }
       }),
       "repo_push",
       { dir: "/w/r", branch: "coder/x" }
     );
 
-    expect(result).toBe("pushed coder/x");
-    expect(pushed).toEqual([
+    expect(result).toBe(pushed("coder/x"));
+    expect(landed).toEqual([
       { dir: "/w/r", branch: "coder/x", commit: "1f0cd15e0f7c8b" }
     ]);
   });
@@ -2804,6 +2877,49 @@ describe("a host that keeps worktrees", () => {
     );
     warn.mockRestore();
 
-    expect(result).toBe("pushed coder/x");
+    expect(result).toBe(pushed("coder/x"));
+  });
+
+  /**
+   * The model on its own checkout, pushing a name it made up while the work sits
+   * on a writing sub-agent's branch: the refusal shows where that is.
+   */
+  it("puts the host's worktrees in a refusal to push nothing", async () => {
+    const { exec } = recorder({
+      "rev-parse --verify --quiet": { success: false },
+      "rev-list --count": { stdout: "0" }
+    });
+    const { asked, seam } = worktrees();
+    const result = await run(tools(exec, { worktrees: seam }), "repo_push", {
+      dir: "/w/r",
+      branch: "docs/readme"
+    });
+
+    expect(result).toMatch(/committed on a different branch\.\n\nlisted$/);
+    expect(result).not.toContain("repo_status");
+    expect(asked).toEqual(["list"]);
+  });
+
+  it("still refuses when the host cannot list its worktrees", async () => {
+    const { exec } = recorder({
+      "rev-list --count": { stdout: "0" }
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await run(
+      tools(exec, {
+        worktrees: {
+          ...worktrees().seam,
+          list: async () => {
+            throw new Error("storage gone");
+          }
+        }
+      }),
+      "repo_push",
+      { dir: "/w/r", branch: "coder/x" }
+    );
+    warn.mockRestore();
+
+    expect(result).toMatch(/refusing to push "coder\/x"/);
+    expect(result).toContain("check repo_status and repo_diff");
   });
 });

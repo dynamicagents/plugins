@@ -204,13 +204,13 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
 
     repo_push: tool({
       description:
-        "Push a branch to the remote. Refuses to push to a protected branch and refuses to force-push — open a pull request instead.",
+        "Push a branch to the remote: one this checkout holds, or a new one created at its current commit. Refuses a protected branch, a force-push, and a branch that adds no commit the remote does not already have — open a pull request instead.",
       inputSchema: z.object({
         dir: z.string().describe("Checkout directory"),
         branch: z
           .string()
           .describe(
-            "Branch name to create and push, e.g. 'coder/add-json-flag'"
+            "The branch your commits are on, or a new name to create at the current commit, e.g. 'coder/add-json-flag'"
           )
       }),
       execute: async ({ dir, branch }) => {
@@ -228,7 +228,7 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         // The repository's *own* default, which is often none of the four names
         // above: a repo whose trunk is `release` deserves the same protection.
         // A command that never ran stops here rather than standing the guards
-        // down — the same rule as the two probes further down, and the reason
+        // down — the same rule as the probes further down, and the reason
         // {@link resolveDefaultBranch} reports the two separately.
         const head = await resolveDefaultBranch(plain, dir);
         if (head.unreachable)
@@ -251,13 +251,6 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         });
         if (refused) return refused;
 
-        // Switch to the branch, or create it — but never *reset* it.
-        //
-        // `-b`, never `-B`: `-B` is create-or-reset, so on a branch that already
-        // holds the commit it force-moves it to wherever HEAD is now. The commit
-        // survives only as an unreferenced object, and what gets pushed is an
-        // empty branch with a pull request opened on it — a complete loss
-        // dressed up as success.
         const exists = await plain(
           `rev-parse --verify --quiet "refs/heads/$REPO_BRANCH"`,
           dir,
@@ -267,6 +260,76 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         // branch, create it" only when git was there to say so.
         if (exists.unreachable)
           return bounded(`could not push "${branch}": ${exists.stderr}`);
+
+        // The commit the push would publish: the branch's own, or HEAD for a
+        // branch this creates, which is where `checkout -b` puts it.
+        const tip = await plain(`log -1 --format=%H%n%s "$REPO_REF" --`, dir, {
+          REPO_REF: exists.success ? `refs/heads/${branch}` : "HEAD"
+        });
+        if (tip.unreachable)
+          return bounded(`could not push "${branch}": ${tip.stderr}`);
+        const [commit = "", subject = ""] = tip.stdout.trim().split("\n");
+        if (!tip.success || !commit) {
+          logFailure("repo_push", tip);
+          return bounded(
+            `could not resolve "${branch}" to a commit: ${tip.stderr || tip.stdout}`
+          );
+        }
+        const short = commit.slice(0, 7);
+
+        // Nothing to push is refused — the README's "Guardrails" says why — and
+        // measured against every remote branch, since a pull request's base need
+        // not be the default. The branch's own remote ref is left out so a landed
+        // push can be retried: `--exclude` wants it without `refs/remotes/`, and
+        // with that prefix excludes nothing. Checked before the branch is
+        // created, so a refusal leaves none behind for a retry to find.
+        const fresh = await plain(
+          `rev-list --count "$REPO_TIP" --not --exclude="origin/$REPO_BRANCH" --remotes=origin`,
+          dir,
+          { REPO_TIP: commit, REPO_BRANCH: branch }
+        );
+        if (fresh.unreachable)
+          return bounded(`could not push "${branch}": ${fresh.stderr}`);
+        const count = fresh.stdout.trim();
+        // A comparison with no answer is not a pass, and an empty one is not 0.
+        if (!fresh.success || !/^\d+$/.test(count)) {
+          logFailure("repo_push", fresh);
+          return bounded(
+            `could not tell whether "${branch}" has anything to push: comparing it ` +
+              `against the remote's branches failed with ` +
+              `${fresh.stderr || fresh.stdout || "no output"}\n` +
+              `Nothing was pushed. Pushing without that answer risks an empty pull ` +
+              `request reported as success, so check repo_status and repo_diff first.`
+          );
+        }
+        if (count === "0") {
+          // Where the work went is the host's to say, when it keeps worktrees:
+          // a writing sub-agent's commits are on its worktree's branch.
+          let held: string | undefined;
+          try {
+            held = await config.worktrees?.list();
+          } catch (err) {
+            console.warn("[repo] worktrees.list failed", { err: String(err) });
+          }
+          return bounded(
+            `refusing to push "${branch}" — ` +
+              (exists.success
+                ? ""
+                : `it is not a branch in ${dir}, so it would be created at the current commit, and `) +
+              `${short} adds no commit the remote does not already have, so the pull ` +
+              `request would be empty. Either the change was never committed, or it was ` +
+              `committed on a different branch` +
+              (held ? `.\n\n${held}` : ` — check repo_status and repo_diff.`)
+          );
+        }
+
+        // Switch to the branch, or create it — but never *reset* it.
+        //
+        // `-b`, never `-B`: `-B` is create-or-reset, so on a branch that already
+        // holds the commit it force-moves it to wherever HEAD is now. The commit
+        // survives only as an unreferenced object, and what gets pushed is an
+        // empty branch with a pull request opened on it — a complete loss
+        // dressed up as success.
         const checkout = await plain(
           exists.success
             ? `checkout "$REPO_BRANCH"`
@@ -281,72 +344,13 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
           );
         }
 
-        // Nothing to push is a bug upstream of here, not a no-op.
-        //
-        // A branch level with the default branch means the commit went
-        // somewhere else, or was never made. Pushing it succeeds, `repo_open_pr`
-        // opens an empty pull request, and the turn reports a URL as if the
-        // work had landed — the one outcome worse than an error.
-        //
-        // The guard is skipped only when there is no baseline to compare
-        // against: a repository with no `origin/HEAD` is unusual but legitimate,
-        // and guessing is worse than not guarding. Once there *is* one, a
-        // comparison that fails is an unanswered question rather than a pass —
-        // the same rule the three probes around this one follow.
-        if (defaultBranch) {
-          const ahead = await plain(
-            `rev-list --count "origin/$REPO_BASE..HEAD"`,
-            dir,
-            {
-              REPO_BASE: defaultBranch
-            }
-          );
-          if (ahead.unreachable)
-            return bounded(`could not push "${branch}": ${ahead.stderr}`);
-          if (!ahead.success) {
-            logFailure("repo_push", ahead);
-            return bounded(
-              `could not tell whether "${branch}" has anything to push: comparing it ` +
-                `against origin/${defaultBranch} failed with ` +
-                `${ahead.stderr || ahead.stdout || "no output"}\n` +
-                `Nothing was pushed. Pushing without that answer risks an empty pull ` +
-                `request reported as success, so check repo_status and repo_diff first.`
-            );
-          }
-          if (ahead.stdout.trim() === "0") {
-            return (
-              `refusing to push "${branch}" — it has no commits that origin/${defaultBranch} ` +
-              `does not already have, so the pull request would be empty. Check repo_status ` +
-              `and repo_diff: either the change was never committed, or it was committed on ` +
-              `a different branch.`
-            );
-          }
-        }
-
-        // A pre-flight check, not a value anyone downstream consumes: `push`
-        // takes the branch *name* and resolves it itself, against the same
-        // files. What this buys is the failure arriving here, where the sentence
-        // can name the branch and the checkout, instead of surfacing as a push
-        // that rejects a ref nobody can see.
-        const tip = await plain(
-          `rev-parse --verify "refs/heads/$REPO_BRANCH"`,
-          dir,
-          { REPO_BRANCH: branch }
-        );
-        if (!tip.success || !tip.stdout.trim()) {
-          logFailure("repo_push", tip);
-          return bounded(
-            `could not resolve "${branch}" to a commit: ${tip.stderr || tip.stdout}`
-          );
-        }
-
         const result = await pushBranch(dir, remote.url, branch);
         if (!result.success) {
           logFailure("repo_push", result);
           return bounded(`push failed: ${result.stderr || result.stdout}`);
         }
         try {
-          await config.afterPush?.({ dir, branch, commit: tip.stdout.trim() });
+          await config.afterPush?.({ dir, branch, commit });
         } catch (err) {
           console.warn("[repo] afterPush failed", {
             dir,
@@ -354,6 +358,9 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
             err: String(err)
           });
         }
+        const pushed =
+          `pushed ${branch} at ${short} "${subject}", ${count} ` +
+          `${count === "1" ? "commit" : "commits"} no other branch on the remote has`;
 
         // What `--set-upstream` would do as a side effect of the push, written
         // here because the push happens on the host's side: a sub-agent reaching
@@ -381,14 +388,14 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
           // than no log line.
           logFailure("repo_push (upstream tracking)", untracked);
           return bounded(
-            `pushed ${branch}, but could not record what it tracks: ` +
+            `${pushed}, but could not record what it tracks: ` +
               `${untracked.stderr || untracked.stdout}\n` +
               `The push itself landed. The only consequence is local: a bare ` +
               `\`git push\` from the shell will not know where to send this ` +
               `branch, and needs \`git push -u origin ${branch}\` once.`
           );
         }
-        return `pushed ${branch}`;
+        return bounded(pushed);
       }
     })
   };
