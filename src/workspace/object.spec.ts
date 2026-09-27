@@ -1,5 +1,6 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
+import { Workspace } from "@cloudflare/computer";
 import type { TestWorkspaceDO } from "../../test/worker.js";
 import { freshWorkspace, workspaceNamespace } from "../../test/workspace/do.js";
 import { DEFAULT_INSTALL_PLAN, type InstallState } from "./install.js";
@@ -1233,6 +1234,36 @@ describe("releasing a container", () => {
     );
 
     expect(await stub.releaseContainer()).toEqual({ released: false });
+  });
+
+  /**
+   * A destroy that cuts computerd's session live surfaces as an uncaught
+   * `Network connection lost`. The pool has no container, so a stand-in records
+   * the order; the errors themselves only show against a real one.
+   */
+  it("hangs up the container session before it stops the container", async () => {
+    const stub = freshWorkspace("release-hangs-up");
+    await seedGitCheckout(stub, "/workspace/api");
+
+    await runInDurableObject(stub, async (instance, state) => {
+      const calls: string[] = [];
+      const close = vi
+        .spyOn(Workspace.prototype, "close")
+        .mockImplementation(async () => {
+          calls.push("close");
+        });
+      // Not running, so there is nothing to drain and the release goes ahead.
+      Object.defineProperty(state, "container", {
+        configurable: true,
+        value: { running: false, destroy: async () => calls.push("destroy") }
+      });
+      try {
+        expect(await instance.releaseContainer()).toEqual({ released: true });
+      } finally {
+        close.mockRestore();
+      }
+      expect(calls).toEqual(["close", "destroy"]);
+    });
   });
 
   it("is safe on a workspace nothing has ever opened", async () => {
