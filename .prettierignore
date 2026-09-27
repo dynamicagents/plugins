@@ -9,3 +9,9 @@ worker-configuration.d.ts
 # than hand-edited, so formatting them makes `npm run check` fail after every
 # re-record.
 test/snapshots/
+
+# Agent config, written by tools or linked in. A checkout without symlinks
+# writes each link as a file holding its target, which --check would fail.
+# AGENTS.md, which CLAUDE.md points at, is still checked.
+CLAUDE.md
+.claude/
