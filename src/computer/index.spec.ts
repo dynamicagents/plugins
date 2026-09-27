@@ -470,6 +470,35 @@ describe("grep", () => {
     });
   });
 
+  /**
+   * A refusal at the schema costs the model a step to ask again, so a context
+   * over the ceiling is clamped — and said, since the result is narrower than
+   * what was asked for.
+   */
+  it("clamps a context over the ceiling rather than refusing it", async () => {
+    const { workspace, greps } = stub(seed);
+    const tools = buildComputerTools(workspace, config);
+    const schema = tools.grep!.inputSchema as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+
+    expect(schema.safeParse({ query: "const", context: 50 }).success).toBe(
+      true
+    );
+    const out = await run(tools, "grep", { query: "const", context: 50 });
+    expect(greps[0]?.context).toBe(10);
+    expect(out).toContain("`context` is at most 10");
+  });
+
+  it("says nothing of the ceiling for a context within it", async () => {
+    const { workspace, greps } = stub(seed);
+    const tools = buildComputerTools(workspace, config);
+
+    const out = await run(tools, "grep", { query: "const", context: 10 });
+    expect(greps[0]?.context).toBe(10);
+    expect(out).not.toContain("at most");
+  });
+
   it("says it found nothing, and what it looked for", async () => {
     const { workspace } = stub(seed);
     const tools = buildComputerTools(workspace, config);
