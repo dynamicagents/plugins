@@ -587,9 +587,9 @@ describe("guardrails", () => {
    * goes on to open a pull request and report a URL, so the work looks
    * delivered.
    *
-   * The case that found the gap: a name the checkout did not hold, created at
-   * HEAD on `next` in a repository whose default is `main`. Measured against
-   * `origin/main` it had commits; against every remote branch it has none.
+   * A name the checkout does not hold would be created at HEAD. With HEAD on
+   * `next` in a repository whose default is `main`, it is still ahead of the
+   * default and adds nothing to the remote, so it is refused.
    */
   it("refuses a missing branch at a commit the remote already has, creating nothing", async () => {
     const { exec, calls } = recorder({
