@@ -259,11 +259,7 @@ describe("what a fetch resolves against the remote", () => {
   });
 });
 
-/**
- * The container's git works in the checkout a clone leaves, and reads its
- * config — so what isomorphic-git's `init` wrote there has to be overwritten
- * before anything can check the tree out by it.
- */
+/** Why, on {@link file://./git-host.ts CONTAINER_CORE_CONFIG}. */
 describe("what a clone leaves for the container's git", () => {
   /** A client that records each call's name, and each config write's key. */
   function recording(): { git: GitClient; calls: string[] } {
@@ -297,8 +293,6 @@ describe("what a clone leaves for the container's git", () => {
     });
 
     expect(result).toEqual({ ok: true, detail: "main" });
-    // Straight after `init`, and before the checkout: a clone that fails
-    // part-way still leaves a config the container's git reads correctly.
     expect(calls.slice(0, 4)).toEqual([
       "init",
       "core.symlinks=true",
