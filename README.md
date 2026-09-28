@@ -18,18 +18,18 @@ npm install @dynamicagents/plugins
 
 ## The one file you edit
 
-An agent installs plugins by listing them in `getPlugins()`, on an `A2AAgent` from
+An agent installs plugins by listing them in `getPlugins()`, on a `StepAgent` from
 `@dynamicagents/core/agent` or a `SubAgent` from `@dynamicagents/core/subagent`:
 
 ```ts
 // src/agents/coder/agent.ts
-import { A2AAgent } from "@dynamicagents/core/agent";
+import { StepAgent } from "@dynamicagents/core/agent";
 import { browser } from "@dynamicagents/plugins/browser";
 import { computer, computerWorkspace } from "@dynamicagents/plugins/computer";
 // `workspaceConfig` names the `/workspace` object this agent works in.
 import { repo } from "@dynamicagents/plugins/repo";
 
-export class Coder extends A2AAgent<Env> {
+export class Coder extends StepAgent<Env> {
   // `computer` runs commands in a container, so the agent's own workspace —
   // what Think's `read` and `write` work on — has to be that container's.
   override workspace = computerWorkspace(workspaceConfig(this.env), () =>
