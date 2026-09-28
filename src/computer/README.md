@@ -13,7 +13,7 @@ const config = {
   shell: "bash"
 };
 
-class Coder extends A2AAgent<Env> {
+class Coder extends StepAgent<Env> {
   override workspace = computerWorkspace(config, () =>
     this.pluginContext().runtime()
   );
