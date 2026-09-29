@@ -2775,10 +2775,10 @@ describe("a host that keeps worktrees", () => {
 
     expect(await run(main, "repo_worktrees", {})).toBe("listed");
     expect(
-      await run(main, "repo_worktrees", { release: "claude-coder/t/1" })
+      await run(main, "repo_worktrees", { release: "anthropic-coding/t/1" })
     ).toBe("released");
     expect(
-      await run(main, "repo_worktree", { branch: "claude-coder/t/1" })
+      await run(main, "repo_worktree", { branch: "anthropic-coding/t/1" })
     ).toBe("switched");
     expect(await run(main, "repo_worktree", {})).toBe("switched");
     expect(await run(main, "repo_worktree", { branch: "--help" })).toMatch(
@@ -2793,8 +2793,8 @@ describe("a host that keeps worktrees", () => {
     );
     expect(asked).toEqual([
       "list",
-      "release claude-coder/t/1",
-      "use claude-coder/t/1",
+      "release anthropic-coding/t/1",
+      "use anthropic-coding/t/1",
       "use (checkout)"
     ]);
   });

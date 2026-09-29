@@ -49,9 +49,11 @@ describe("the sub-agent specs", () => {
       shape: Record<string, unknown>;
     };
     expect(write.parse({ task: "t" })).toEqual({ task: "t" });
-    expect(write.parse({ task: "t", continue: "claude-coder/t/1" })).toEqual({
+    expect(
+      write.parse({ task: "t", continue: "anthropic-coding/t/1" })
+    ).toEqual({
       task: "t",
-      continue: "claude-coder/t/1"
+      continue: "anthropic-coding/t/1"
     });
     expect(Object.keys(read.shape)).toEqual(["task"]);
   });

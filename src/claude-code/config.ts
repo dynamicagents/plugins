@@ -1,5 +1,5 @@
 /**
- * Everything one `claude-coder` deployment tunes, in one shape.
+ * Everything one `anthropic-coding` deployment tunes, in one shape.
  *
  * Config at instantiation rather than an `env` argument, for the reason the
  * whole package works this way: `Env` is the ambient interface `wrangler types`
