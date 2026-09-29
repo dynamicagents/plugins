@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { WorkspaceRuntimeEvent } from "@cloudflare/computer";
+import { shellQuote, type WorkspaceRuntimeEvent } from "@cloudflare/computer";
 import {
   claudeCodeModel,
   type ClaudeCodeModelOptions,
@@ -320,6 +320,23 @@ describe("claudeCodeModel", () => {
     ]);
     expect(reports[0]?.session.result?.text).toBe("done");
     expect(reports[0]?.followUp?.result?.text).toBe("committed");
+  });
+
+  it("launches the session with its JSON Schema", async () => {
+    const box = container({
+      [SESSION]: { events: [result(SESSION, 1), exit(SESSION, 2)] }
+    });
+    const jsonSchema = {
+      type: "object",
+      properties: { answer: { type: "string" } }
+    };
+    const { model } = harness(box, { jsonSchema });
+
+    await streamed(model);
+
+    expect(box.calls.exec[0]?.command).toContain(
+      `--json-schema ${shellQuote(JSON.stringify(jsonSchema))}`
+    );
   });
 
   it("asks for a follow-up once, and resumes it rather than asking again", async () => {

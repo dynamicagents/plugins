@@ -28,8 +28,8 @@ import { z } from "zod";
  * A branch is different: the model quotes it from an earlier report or a pull
  * request, and the host's `prepare` resolves it before anything runs.
  *
- * Exported, as the reader's is, so a host can extend it with an input of its
- * own that its `prepare` resolves.
+ * Exported so a host can extend it with an input of its own that its `prepare`
+ * resolves, as it can the reader's.
  */
 export const CLAUDE_CODE_WRITE_INPUT = z.object({
   task: z
