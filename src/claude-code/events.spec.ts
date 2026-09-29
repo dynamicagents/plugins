@@ -551,6 +551,36 @@ describe("rate_limit_event", () => {
   });
 });
 
+describe("a session launched with a JSON Schema", () => {
+  it("reads its answer as structured, beside the text that holds it as JSON", () => {
+    const answer = { title: "the plan" };
+    const { events } = parseStream(
+      line({
+        ...RESULT,
+        result: JSON.stringify(answer),
+        structured_output: answer
+      })
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        kind: "result",
+        result: expect.objectContaining({
+          text: JSON.stringify(answer),
+          structured: answer
+        })
+      })
+    ]);
+  });
+
+  it("has none when the session never answered through it", () => {
+    const { events } = parseStream(line(RESULT));
+    expect(events[0]).toMatchObject({ kind: "result" });
+    expect(
+      events[0]?.kind === "result" && "structured" in events[0].result
+    ).toBe(false);
+  });
+});
+
 /**
  * The verified version's own runs, recorded by the probe against a fake API
  * whose reply and token counts are in the capture beside them. The parser reads
@@ -571,14 +601,18 @@ describe("the verified version's recorded runs", () => {
     expect(parsed.sample).toBeUndefined();
   });
 
-  it.each(runs)("reads the %s run's result, counts included", (_, lines) => {
+  it.each(runs)("reads the %s run's result, counts included", (run, lines) => {
     const { events } = parseStream(lines.map((l) => `${l}\n`).join(""));
     const result = events.find((event) => event.kind === "result");
-    const { usage, reply } = capture.fake;
+    const { usage, reply, structured } = capture.fake;
 
     expect(result?.kind === "result" && result.result).toMatchObject({
       isError: false,
-      text: reply,
+      // The structured run answers through `StructuredOutput`, and its text is
+      // that answer as JSON.
+      ...(run === "structured"
+        ? { structured, text: JSON.stringify(structured) }
+        : { text: reply }),
       usage: {
         input: usage.input_tokens,
         output: usage.output_tokens,

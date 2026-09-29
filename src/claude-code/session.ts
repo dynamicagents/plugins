@@ -90,7 +90,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       kind: "write" | "read",
       prompt: string,
       dir: string,
-      sinks: Sinks = {}
+      sinks: Sinks = {},
+      jsonSchema?: Record<string, unknown>
     ): Promise<DrainOutcome> {
       const execId = execIdFor(runId);
       const copy =
@@ -108,6 +109,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
               ...(copy.isolated ? { readOnly: WORKSPACE_MOUNT } : {})
             }
           : launch(prompt, dir)),
+        ...(jsonSchema ? { jsonSchema } : {}),
         execId,
         timeoutMs,
         signal: sinks.signal

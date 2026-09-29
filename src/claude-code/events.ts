@@ -53,6 +53,12 @@ export interface ClaudeCodeResult {
   /** How many inner subagents the run spawned — advisory, for the logs. */
   subagentsSpawned?: number;
   permissionDenials: number;
+  /**
+   * The answer of a session launched with a JSON Schema: the input of its
+   * `StructuredOutput` call, which `text` then holds as a JSON string. Absent
+   * for any other session, and for one that never made the call.
+   */
+  structured?: unknown;
 }
 
 /**
@@ -469,7 +475,11 @@ function readResult(event: Record<string, unknown>): ClaudeCodeResult {
     costUsd: num(event.total_cost_usd),
     usage: readUsage(event.usage),
     ...(spawned === undefined ? {} : { subagentsSpawned: spawned }),
-    permissionDenials: denials
+    permissionDenials: denials,
+    ...(event.structured_output === undefined ||
+    event.structured_output === null
+      ? {}
+      : { structured: event.structured_output })
   };
 }
 

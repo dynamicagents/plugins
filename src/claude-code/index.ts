@@ -66,6 +66,8 @@ export type { ClaudeCodeSession } from "./session.js";
 export {
   CLAUDE_CODE_AGENT,
   CLAUDE_CODE_READER_AGENT,
+  CLAUDE_CODE_READ_INPUT,
+  CLAUDE_CODE_WRITE_INPUT,
   type ClaudeCodeInput,
   type ClaudeCodeReadInput
 } from "./spec.js";

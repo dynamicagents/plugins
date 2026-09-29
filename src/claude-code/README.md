@@ -391,6 +391,12 @@ on the key, so a note filed again after a restart is dropped, and two runs in on
 task never collide. Nothing else is streamed at all — Think's stall watchdog is
 off, so a silent stream is not cut.
 
+**A `jsonSchema` makes the answer data.** It becomes `--json-schema`: the CLI
+gives the model a `StructuredOutput` tool and holds the run until it is called,
+and the call's input comes back as the result's `structured`, for `report` to
+read — the text is the same answer as JSON. For a session whose answer a host
+acts on field by field rather than passing along.
+
 **The follow-up is a second exec.** `claude -p --resume` under an exec id of its
 own, so its cursor and its notes are its own. The transcript is on the container's
 disk, so it runs in the workspace the session did. `stop` ends it with the session.

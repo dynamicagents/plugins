@@ -57,6 +57,19 @@ const REPLY = "probe-ok";
 const RUN_TIMEOUT_MS = 120_000;
 /** How long a stopped run gets before it is killed outright. */
 const KILL_GRACE_MS = 5_000;
+/**
+ * A session launched with `--json-schema` answers through the CLI's
+ * `StructuredOutput` tool, which the fake calls with this.
+ */
+const SCHEMA = {
+  type: "object",
+  properties: { answer: { type: "string" } },
+  required: ["answer"],
+  additionalProperties: false
+};
+const STRUCTURED = { answer: REPLY };
+/** The tool `--json-schema` gives the model, by the name the CLI gives it. */
+const STRUCTURED_TOOL = "StructuredOutput";
 /** Carries a request's index through the gateway; removed before upstream. */
 const PROBE_ID = "x-claude-code-probe-id";
 
@@ -210,8 +223,13 @@ try {
 
   const first = await runSession(bin, proxyUrl, certs.ca);
   const second = first.result?.sessionId
-    ? await runSession(bin, proxyUrl, certs.ca, first.result.sessionId)
+    ? await runSession(bin, proxyUrl, certs.ca, {
+        resume: first.result.sessionId
+      })
     : undefined;
+  const structured = await runSession(bin, proxyUrl, certs.ca, {
+    jsonSchema: SCHEMA
+  });
   proxy.close();
 
   checkRun("first run", first);
@@ -225,6 +243,7 @@ try {
   } else {
     check("the resumed run ran", false, "the first run reported no session id");
   }
+  checkRun("structured run", structured, { structured: true });
 
   // Every intercepted request, not the ones that got through: a request the
   // gateway refused never reaches upstream, and would otherwise go unseen.
@@ -251,7 +270,7 @@ try {
   const capture = {
     version,
     // What the fake answered, so a spec reading the runs knows what to expect.
-    fake: { reply: REPLY, usage: USAGE },
+    fake: { reply: REPLY, usage: USAGE, structured: STRUCTURED },
     requests: requests.map(({ method, path, headers }) => ({
       method,
       path,
@@ -259,7 +278,8 @@ try {
     })),
     runs: {
       first: normalizeLines(first.lines),
-      resumed: normalizeLines(second?.lines ?? [])
+      resumed: normalizeLines(second?.lines ?? []),
+      structured: normalizeLines(structured.lines)
     }
   };
 
@@ -492,11 +512,12 @@ function listen(gateway, certs, requests, refused) {
 }
 
 /** One session, launched as `buildLaunch` launches it, and its stream parsed. */
-function runSession(bin, proxyUrl, ca, resume) {
+function runSession(bin, proxyUrl, ca, { resume, jsonSchema } = {}) {
   const launch = buildLaunch({
     prompt: `Reply with exactly: ${REPLY}`,
     dir: work,
-    ...(resume ? { resume } : {})
+    ...(resume ? { resume } : {}),
+    ...(jsonSchema ? { jsonSchema } : {})
   });
   if (!launch.command.startsWith("claude ")) {
     throw new Error(
@@ -562,7 +583,7 @@ function runSession(bin, proxyUrl, ca, resume) {
   });
 }
 
-function checkRun(label, run) {
+function checkRun(label, run, { structured = false } = {}) {
   check(
     `${label}: the CLI exits 0`,
     run.code === 0,
@@ -580,11 +601,19 @@ function checkRun(label, run) {
     result ? `${result.subtype}` : "none"
   );
   if (!result || live) return;
-  check(
-    `${label}: the reply is the fake's`,
-    result.text === REPLY,
-    JSON.stringify(result.text)
-  );
+  if (structured) {
+    check(
+      `${label}: the answer is read as structured`,
+      JSON.stringify(result.structured) === JSON.stringify(STRUCTURED),
+      JSON.stringify(result.structured)
+    );
+  } else {
+    check(
+      `${label}: the reply is the fake's`,
+      result.text === REPLY,
+      JSON.stringify(result.text)
+    );
+  }
   const usage = {
     input: USAGE.input_tokens,
     output: USAGE.output_tokens,
@@ -624,6 +653,58 @@ async function fake(request) {
       model: body.model,
       stop_sequence: null
     };
+    const event = (type, data) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    const stream = (content, stopReason) =>
+      new Response(
+        event("message_start", {
+          message: {
+            ...message,
+            content: [],
+            stop_reason: null,
+            usage: { ...USAGE, output_tokens: 1 }
+          }
+        }) +
+          event("content_block_start", {
+            index: 0,
+            content_block: content.start
+          }) +
+          event("content_block_delta", { index: 0, delta: content.delta }) +
+          event("content_block_stop", { index: 0 }) +
+          event("message_delta", {
+            delta: { stop_reason: stopReason, stop_sequence: null },
+            usage: { output_tokens: USAGE.output_tokens }
+          }) +
+          event("message_stop", {}),
+        {
+          headers: {
+            "content-type": "text/event-stream",
+            "request-id": "req_probe"
+          }
+        }
+      );
+    // Asked for structured output and not yet given it: answer through the tool.
+    if (
+      body.stream &&
+      body.tools?.some((tool) => tool.name === STRUCTURED_TOOL) &&
+      !JSON.stringify(body.messages).includes('"tool_result"')
+    ) {
+      return stream(
+        {
+          start: {
+            type: "tool_use",
+            id: "toolu_probe",
+            name: STRUCTURED_TOOL,
+            input: {}
+          },
+          delta: {
+            type: "input_json_delta",
+            partial_json: JSON.stringify(STRUCTURED)
+          }
+        },
+        "tool_use"
+      );
+    }
     if (!body.stream) {
       return Response.json(
         {
@@ -635,37 +716,12 @@ async function fake(request) {
         { headers: { "request-id": "req_probe" } }
       );
     }
-    const event = (type, data) =>
-      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
-    return new Response(
-      event("message_start", {
-        message: {
-          ...message,
-          content: [],
-          stop_reason: null,
-          usage: { ...USAGE, output_tokens: 1 }
-        }
-      }) +
-        event("content_block_start", {
-          index: 0,
-          content_block: { type: "text", text: "" }
-        }) +
-        event("content_block_delta", {
-          index: 0,
-          delta: { type: "text_delta", text: REPLY }
-        }) +
-        event("content_block_stop", { index: 0 }) +
-        event("message_delta", {
-          delta: { stop_reason: "end_turn", stop_sequence: null },
-          usage: { output_tokens: USAGE.output_tokens }
-        }) +
-        event("message_stop", {}),
+    return stream(
       {
-        headers: {
-          "content-type": "text/event-stream",
-          "request-id": "req_probe"
-        }
-      }
+        start: { type: "text", text: "" },
+        delta: { type: "text_delta", text: REPLY }
+      },
+      "end_turn"
     );
   }
   return Response.json(
@@ -720,7 +776,7 @@ function shape(capture) {
     requests.set(key, headers);
   }
   const lines = new Map();
-  for (const line of [...capture.runs.first, ...capture.runs.resumed]) {
+  for (const line of Object.values(capture.runs).flat()) {
     let event;
     try {
       event = JSON.parse(line);
