@@ -164,7 +164,7 @@ rotation and saves a Durable Object class, a binding and a migration.
 {
   "containers": [
     {
-      "class_name": "ClaudeCoderWorkspaceDO",
+      "class_name": "AnthropicCodingWorkspace",
       "image": "./Dockerfile",
       // A Docker build arg. One Dockerfile serves both the plain workspace and
       // this one; only the entry naming a version gets the CLI.
@@ -180,8 +180,8 @@ rotation and saves a Durable Object class, a binding and a migration.
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "ClaudeCoderWorkspaceDO",
-        "name": "CLAUDE_CODER_WORKSPACE"
+        "class_name": "AnthropicCodingWorkspace",
+        "name": "ANTHROPIC_CODING_WORKSPACE"
       }
     ]
   },
@@ -189,7 +189,7 @@ rotation and saves a Durable Object class, a binding and a migration.
   // object's SQLite. And a **new tag** — a class appended to a tag you have
   // already deployed is silently never created.
   "migrations": [
-    { "tag": "v5", "new_sqlite_classes": ["ClaudeCoderWorkspaceDO"] }
+    { "tag": "v5", "new_sqlite_classes": ["AnthropicCodingWorkspace"] }
   ],
   // The pool, in priority order — **exactly the credentials you have**.
   //
@@ -242,7 +242,7 @@ readonly #credentials: CredentialStore = {
 
 readonly backend = new CloudflareContainerBackend({
   container: () => this,
-  workspace: { binding: "CLAUDE_CODER_WORKSPACE", id: this.ctx.id.toString() },
+  workspace: { binding: "ANTHROPIC_CODING_WORKSPACE", id: this.ctx.id.toString() },
   egress: {
     mode: "http-gateway",
     gateway: this.#session.egress(this.#credentials)
@@ -341,7 +341,7 @@ and the path does not exist.
 And a sub-agent runs a session as its model:
 
 ```ts
-export class ClaudeCoderSession extends SubAgent<Env> {
+export class AnthropicCodingWriterChild extends SubAgent<Env> {
   // `prepare` claims a workspace of this run's own and returns where its
   // checkout is; `settle` releases it on every terminal. Both are the host's:
   // which object a run gets, and how it acquires a checkout, are facts about a
@@ -353,8 +353,8 @@ export class ClaudeCoderSession extends SubAgent<Env> {
       workspaceName: string;
       dir: string;
     };
-    const stub = this.env.CLAUDE_CODER_WORKSPACE.get(
-      this.env.CLAUDE_CODER_WORKSPACE.idFromName(workspaceName)
+    const stub = this.env.ANTHROPIC_CODING_WORKSPACE.get(
+      this.env.ANTHROPIC_CODING_WORKSPACE.idFromName(workspaceName)
     );
     return claudeCodeModel({
       config: CLAUDE_CODE_SESSION,
