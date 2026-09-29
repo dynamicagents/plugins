@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
 import type { CredentialState, CredentialStore } from "./credentials.js";
+import capture from "./capture.json";
 
 /**
  * The gateway is the whole of the containment, so every test here is a
@@ -80,17 +81,32 @@ const openGateway = (
     ...over
   });
 
-/** How Claude Code actually sends a model call, taken from a recorded request. */
+/**
+ * A request's headers as the verified version sent them, from `./capture.json`.
+ * The probe records a value that varies by machine or run as `*`, and those are
+ * left out along with the connection's own framing.
+ */
+function recordedHeaders(headers: Partial<Record<string, string>>): Headers {
+  const out = new Headers();
+  for (const [name, value] of Object.entries(headers)) {
+    if (value !== undefined && value !== "*" && name !== "connection") {
+      out.set(name, value);
+    }
+  }
+  return out;
+}
+
+/** The verified version's model call. */
+const RECORDED_CALL = capture.requests.find(
+  (request) =>
+    request.method === "POST" && request.path.startsWith("/v1/messages")
+)!;
+
+/** How Claude Code actually sends a model call. */
 function modelCall(): Request {
-  return new Request(`https://${ANTHROPIC_HOST}/v1/messages?beta=true`, {
+  return new Request(`https://${ANTHROPIC_HOST}${RECORDED_CALL.path}`, {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${PLACEHOLDER}`,
-      "anthropic-beta":
-        "claude-code-20250219,oauth-2025-04-20,effort-2025-11-24",
-      "user-agent": "claude-cli/2.1.238 (external, sdk-cli)",
-      "content-type": "application/json"
-    },
+    headers: recordedHeaders(RECORDED_CALL.headers),
     body: JSON.stringify({ model: "claude-opus-5" })
   });
 }
@@ -129,11 +145,33 @@ describe("the credential swap", () => {
     await gateway().fetch(modelCall());
 
     expect(sent[0]!.headers.get("anthropic-beta")).toBe(
-      "claude-code-20250219,oauth-2025-04-20,effort-2025-11-24"
+      RECORDED_CALL.headers["anthropic-beta"]
     );
     expect(sent[0]!.headers.get("user-agent")).toBe(
-      "claude-cli/2.1.238 (external, sdk-cli)"
+      RECORDED_CALL.headers["user-agent"]
     );
+  });
+
+  /**
+   * Every request the verified version made, not only its model call: the
+   * settings and policy reads carry the placeholder too, and a request shape the
+   * swap missed would send it upstream.
+   */
+  it("swaps the credential on every request the verified version makes", async () => {
+    for (const request of capture.requests) {
+      const sent = stubUpstream();
+      await openGateway().fetch(
+        new Request(`https://${ANTHROPIC_HOST}${request.path}`, {
+          method: request.method,
+          headers: recordedHeaders(request.headers)
+        })
+      );
+
+      expect(sent[0]!.headers.get("authorization")).toBe(`Bearer ${REAL}`);
+      expect([...sent[0]!.headers.values()].join(" ")).not.toContain(
+        PLACEHOLDER
+      );
+    }
   });
 
   it("keeps the method, the query string and the body", async () => {

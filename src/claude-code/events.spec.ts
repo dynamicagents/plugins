@@ -5,6 +5,7 @@ import {
   RATE_LIMIT_OK,
   type ClaudeCodeEvent
 } from "./events.js";
+import capture from "./capture.json";
 
 /**
  * The stream parser, and the three ways it can quietly ruin a run.
@@ -38,11 +39,12 @@ const assistant = (text: string, extra: Record<string, unknown> = {}) =>
   });
 
 /**
- * A `result` line with the exact field names Claude Code 2.1.238 emits.
+ * A `result` line with the field names Claude Code emits.
  *
  * Copied from a recorded run rather than invented, because every one of these
  * keys is a place a rename would break the cost accounting silently — the run
- * would still succeed and simply report spending nothing.
+ * would still succeed and simply report spending nothing. The verified
+ * version's own runs are checked below, from `./capture.json`.
  */
 const RESULT = {
   type: "result",
@@ -545,5 +547,38 @@ describe("rate_limit_event", () => {
     );
     expect(parsed.events).toEqual([]);
     expect(parsed.skipped).toBe(1);
+  });
+});
+
+/**
+ * The verified version's own runs, recorded by the probe against a fake API
+ * whose reply and token counts are in the capture beside them. The parser reads
+ * a result "total by construction" — a renamed field reads as zero rather than
+ * failing — so knowing what the counts should be is what makes a rename visible.
+ */
+describe("the verified version's recorded runs", () => {
+  const runs = Object.entries(capture.runs);
+
+  it.each(runs)("reads every line of the %s run", (_, lines) => {
+    const parsed = parseStream(lines.map((l) => `${l}\n`).join(""));
+    expect(parsed.skipped).toBe(0);
+    expect(parsed.sample).toBeUndefined();
+  });
+
+  it.each(runs)("reads the %s run's result, counts included", (_, lines) => {
+    const { events } = parseStream(lines.map((l) => `${l}\n`).join(""));
+    const result = events.find((event) => event.kind === "result");
+    const { usage, reply } = capture.fake;
+
+    expect(result?.kind === "result" && result.result).toMatchObject({
+      isError: false,
+      text: reply,
+      usage: {
+        input: usage.input_tokens,
+        output: usage.output_tokens,
+        cacheRead: usage.cache_read_input_tokens,
+        cacheWrite: usage.cache_creation_input_tokens
+      }
+    });
   });
 });

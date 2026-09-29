@@ -1,0 +1,767 @@
+#!/usr/bin/env node
+/**
+ * Does a Claude Code version work with this package's egress gateway and stream
+ * parser? The check a version bump needs, run without a container.
+ *
+ *   npm run probe:claude-code                   the registry's `latest`
+ *   npm run probe:claude-code -- <version>      a version, or any dist-tag
+ *   npm run probe:claude-code -- --record       and make it the verified one
+ *   npm run probe:claude-code -- --live         the real API, not a fake one
+ *   npm run probe:claude-code -- --keep         keep the temporary directory
+ *
+ * It stands in for the container. The CLI is installed into a temporary
+ * directory, launched with the command and environment `buildLaunch` gives a
+ * session, and pointed at an HTTPS proxy that terminates TLS for
+ * `api.anthropic.com` with a throwaway CA — the interception `http-gateway`
+ * egress does, done locally. Every request goes through the real
+ * `claudeCodeEgress`, and on to a fake Anthropic that streams a canned reply,
+ * or with `--live` to the real API on `CLAUDE_CODE_OAUTH_TOKEN`. A session is
+ * run once and then resumed, as a writer's warning turn is.
+ *
+ * A failed check exits 1. What differs from the recorded capture is reported
+ * and is not a failure: it is what a reviewer reads before taking the bump.
+ * `--record` writes the capture and the verified version, and only a passing,
+ * offline run may: a live run's traffic depends on the account it ran on.
+ *
+ * What this cannot see is the container itself — root with `IS_SANDBOX`, the
+ * read-only launch, the interception CA in the image, a real 429's rotation.
+ * The README's "Updating Claude Code" says what covers those.
+ *
+ * Needs `npm` and `openssl` on the PATH, and reads `dist/`, so the npm script
+ * builds first.
+ */
+import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import http from "node:http";
+import { register } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import tls from "node:tls";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const CAPTURE = path.join(root, "src/claude-code/capture.json");
+const VERIFIED = path.join(root, "src/claude-code/verified.ts");
+const PACKAGE = "@anthropic-ai/claude-code";
+const HOST = "api.anthropic.com";
+const REPLY = "probe-ok";
+const RUN_TIMEOUT_MS = 120_000;
+/** Carries a request's index through the gateway; removed before upstream. */
+const PROBE_ID = "x-claude-code-probe-id";
+
+/**
+ * Token counts the fake reports, each distinct and none zero. The result line
+ * is read "total by construction" — a renamed field reads as zero rather than
+ * failing — so the only way to see a rename is to know what should come back.
+ */
+const USAGE = {
+  input_tokens: 11,
+  output_tokens: 7,
+  cache_read_input_tokens: 13,
+  cache_creation_input_tokens: 17
+};
+
+/**
+ * Header values that change with the machine or the run rather than with the
+ * CLI. Recorded as `*` so a capture taken on one laptop diffs cleanly against
+ * one taken on another.
+ */
+const VOLATILE_HEADERS = new Set([
+  "content-length",
+  "host",
+  "if-none-match",
+  "x-claude-code-prompt-id",
+  "x-claude-code-session-id",
+  "x-client-request-id",
+  "x-stainless-arch",
+  "x-stainless-os",
+  "x-stainless-runtime",
+  "x-stainless-runtime-version",
+  "x-stainless-retry-count"
+]);
+
+// --- arguments ----------------------------------------------------------------
+
+const args = process.argv.slice(2);
+const flag = (name) => args.includes(name);
+const record = flag("--record");
+const live = flag("--live");
+const keep = flag("--keep");
+const spec = args.find((arg) => !arg.startsWith("--"));
+
+if (record && live) {
+  fail(
+    "--record takes an offline run: a live run's traffic depends on the account."
+  );
+}
+const credential = live
+  ? process.env.CLAUDE_CODE_OAUTH_TOKEN
+  : `sk-ant-oat01-probe-${randomBytes(12).toString("hex")}`;
+if (!credential)
+  fail("--live needs CLAUDE_CODE_OAUTH_TOKEN in the environment.");
+
+// --- the package under test, from dist/ ---------------------------------------
+
+/**
+ * `run.js` imports `@cloudflare/computer`, whose modules import
+ * `cloudflare:workers` for classes nothing here constructs. Node cannot resolve
+ * that scheme, so it resolves to empty classes. A name missing from this stub
+ * fails the import loudly, naming the export.
+ */
+const CLOUDFLARE_STUB =
+  "export class RpcTarget {} export class WorkerEntrypoint {} " +
+  "export class DurableObject {} export const env = {};";
+register(
+  "data:text/javascript," +
+    encodeURIComponent(
+      `export async function resolve(specifier, context, next) {
+        if (specifier.startsWith("cloudflare:")) {
+          return { url: "data:text/javascript," + encodeURIComponent(${JSON.stringify(CLOUDFLARE_STUB)}), shortCircuit: true };
+        }
+        return next(specifier, context);
+      }`
+    )
+);
+const dist = (file) =>
+  import(pathToFileURL(path.join(root, "dist/claude-code", file)).href);
+const { claudeCodeEgress } = await dist("egress.js");
+const { parseStream } = await dist("events.js");
+const { buildLaunch, CREDENTIAL_PLACEHOLDER } = await dist("run.js");
+const { VERIFIED_CLAUDE_CODE_VERSION } = await dist("verified.js");
+
+// --- which version ------------------------------------------------------------
+
+const version = resolveVersion(spec ?? "latest");
+if (!spec && version === VERIFIED_CLAUDE_CODE_VERSION && !record) {
+  console.log(`${PACKAGE}@latest is ${version}, already the verified version.`);
+  process.exit(0);
+}
+console.log(
+  `Probing ${PACKAGE}@${version} (verified: ${VERIFIED_CLAUDE_CODE_VERSION}, ` +
+    `upstream: ${live ? "the real API" : "a fake Anthropic"}).`
+);
+
+const tmp = realpathSync(
+  mkdtempSync(path.join(os.tmpdir(), "claude-code-probe-"))
+);
+const home = path.join(tmp, "home");
+const work = path.join(tmp, "work");
+mkdirSync(home);
+mkdirSync(work);
+
+const checks = [];
+const check = (name, ok, detail) => checks.push({ name, ok, detail });
+
+try {
+  const bin = install(version);
+  const certs = makeCerts();
+
+  const requests = [];
+  const refused = [];
+  const unanswered = [];
+  const realFetch = globalThis.fetch;
+  // The gateway's upstream is the global `fetch`, as it is in a Worker. The
+  // CLI's requests overlap, so each carries its index through the gateway.
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const id = Number(request.headers.get(PROBE_ID));
+    request.headers.delete(PROBE_ID);
+    requests[id].upstream = Object.fromEntries(request.headers);
+    if (live) return realFetch(request);
+    const answer = await fake(request);
+    if (answer.status === 404) unanswered.push(pathOf(request.url));
+    return answer;
+  };
+
+  let state = [];
+  const gateway = claudeCodeEgress({
+    credentials: () => [credential],
+    store: {
+      read: async () => state,
+      write: async (next) => {
+        state = next;
+      }
+    },
+    label: "probe"
+  });
+
+  const proxy = await listen(gateway, certs, requests, refused);
+  const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
+
+  const first = await runSession(bin, proxyUrl, certs.ca);
+  const second = first.result?.sessionId
+    ? await runSession(bin, proxyUrl, certs.ca, first.result.sessionId)
+    : undefined;
+  proxy.close();
+
+  checkRun("first run", first);
+  if (second) {
+    checkRun("resumed run", second);
+    check(
+      "the resumed run continues the same session",
+      second.result?.sessionId === first.result.sessionId,
+      `${first.result.sessionId} → ${second.result?.sessionId}`
+    );
+  } else {
+    check("the resumed run ran", false, "the first run reported no session id");
+  }
+
+  const api = requests.filter((request) => request.upstream);
+  check(
+    "every request reached Anthropic with the real credential",
+    api.length > 0 &&
+      api.every((r) => r.upstream.authorization === `Bearer ${credential}`),
+    `${api.length} request(s)`
+  );
+  check(
+    "no request left with the placeholder or an x-api-key",
+    api.every(
+      (r) =>
+        !Object.values(r.upstream).some((v) =>
+          v.includes(CREDENTIAL_PLACEHOLDER)
+        ) && !("x-api-key" in r.upstream)
+    )
+  );
+
+  const capture = {
+    version,
+    // What the fake answered, so a spec reading the runs knows what to expect.
+    fake: { reply: REPLY, usage: USAGE },
+    requests: requests.map(({ method, path, headers }) => ({
+      method,
+      path,
+      headers: normalizeHeaders(headers)
+    })),
+    runs: {
+      first: normalizeLines(first.lines),
+      resumed: normalizeLines(second?.lines ?? [])
+    }
+  };
+
+  report(capture, { refused, unanswered });
+
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length > 0) {
+    console.log(`\n✗ ${version} failed ${failed.length} check(s).`);
+    process.exitCode = 1;
+  } else if (record) {
+    writeFileSync(CAPTURE, `${JSON.stringify(capture, null, 2)}\n`);
+    writeFileSync(
+      VERIFIED,
+      readFileSync(VERIFIED, "utf8").replace(
+        /VERIFIED_CLAUDE_CODE_VERSION = "[^"]*"/,
+        `VERIFIED_CLAUDE_CODE_VERSION = "${version}"`
+      )
+    );
+    console.log(
+      `\n✓ ${version} passes, and is now the verified version. Commit ` +
+        "src/claude-code/capture.json and src/claude-code/verified.ts, then " +
+        "run `npm test`: the specs read the new capture. A deployment's image " +
+        "pin moves to it next."
+    );
+  } else {
+    console.log(
+      `\n✓ ${version} passes. \`--record\` makes it the verified version.`
+    );
+  }
+} catch (err) {
+  console.error(
+    `probe-claude-code: ${err instanceof Error ? err.message : err}`
+  );
+  process.exitCode = 1;
+} finally {
+  if (keep) console.log(`Kept ${tmp}.`);
+  else rmSync(tmp, { recursive: true, force: true });
+}
+
+// --- steps --------------------------------------------------------------------
+
+function resolveVersion(tagOrVersion) {
+  const out = execFileSync(
+    "npm",
+    ["view", `${PACKAGE}@${tagOrVersion}`, "version", "--json"],
+    { encoding: "utf8" }
+  ).trim();
+  if (!out)
+    throw new Error(`${PACKAGE}@${tagOrVersion} names no published version.`);
+  const parsed = JSON.parse(out);
+  return Array.isArray(parsed) ? parsed.at(-1) : parsed;
+}
+
+/** The CLI, in a directory of its own. The machine's `claude` is not touched. */
+function install(target) {
+  const prefix = path.join(tmp, "cli");
+  execFileSync(
+    "npm",
+    [
+      "install",
+      "--prefix",
+      prefix,
+      "--no-save",
+      "--no-package-lock",
+      "--no-fund",
+      "--no-audit",
+      "--loglevel=error",
+      `${PACKAGE}@${target}`
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] }
+  );
+  const bin = path.join(prefix, "node_modules/.bin/claude");
+  const reported = execFileSync(bin, ["--version"], { encoding: "utf8" });
+  if (!reported.startsWith(target)) {
+    throw new Error(`installed ${target}, but it reports ${reported.trim()}.`);
+  }
+  return bin;
+}
+
+/** A CA the CLI is told to trust, and a certificate for Anthropic signed by it. */
+function makeCerts() {
+  const dir = path.join(tmp, "certs");
+  mkdirSync(dir);
+  const at = (name) => path.join(dir, name);
+  const openssl = (...opts) =>
+    execFileSync("openssl", opts, { stdio: ["ignore", "ignore", "pipe"] });
+  openssl(
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-days",
+    "1",
+    "-keyout",
+    at("ca.key"),
+    "-out",
+    at("ca.pem"),
+    "-subj",
+    "/CN=claude-code probe",
+    "-addext",
+    "basicConstraints=critical,CA:TRUE",
+    "-addext",
+    "keyUsage=critical,keyCertSign,cRLSign"
+  );
+  openssl(
+    "req",
+    "-newkey",
+    "rsa:2048",
+    "-nodes",
+    "-keyout",
+    at("leaf.key"),
+    "-out",
+    at("leaf.csr"),
+    "-subj",
+    `/CN=${HOST}`
+  );
+  writeFileSync(
+    at("leaf.ext"),
+    `subjectAltName=DNS:${HOST}\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n`
+  );
+  openssl(
+    "x509",
+    "-req",
+    "-days",
+    "1",
+    "-in",
+    at("leaf.csr"),
+    "-CA",
+    at("ca.pem"),
+    "-CAkey",
+    at("ca.key"),
+    "-CAcreateserial",
+    "-out",
+    at("leaf.pem"),
+    "-extfile",
+    at("leaf.ext")
+  );
+  return {
+    ca: at("ca.pem"),
+    key: readFileSync(at("leaf.key")),
+    cert: readFileSync(at("leaf.pem"))
+  };
+}
+
+/**
+ * The container's interception, as a proxy. A `CONNECT` to Anthropic is
+ * terminated here and each request inside it handed to the gateway at its
+ * original URL; anything else is refused and named in the report, so the probe
+ * never reaches a host it does not know about.
+ */
+function listen(gateway, certs, requests, refused) {
+  const inner = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks);
+    const id =
+      requests.push({
+        method: req.method,
+        path: req.url,
+        headers: req.headers
+      }) - 1;
+    const headers = new Headers({ [PROBE_ID]: String(id) });
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (["connection", "host", "content-length"].includes(name)) continue;
+      headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+    }
+    try {
+      const response = await gateway.fetch(`https://${HOST}${req.url}`, {
+        method: req.method,
+        headers,
+        ...(body.length > 0 ? { body } : {})
+      });
+      const out = {};
+      response.headers.forEach((value, name) => {
+        // Node's fetch has already decoded the body and framed it itself.
+        if (
+          ![
+            "content-encoding",
+            "content-length",
+            "transfer-encoding",
+            "connection"
+          ].includes(name)
+        ) {
+          out[name] = value;
+        }
+      });
+      res.writeHead(response.status, out);
+      if (response.body)
+        for await (const chunk of response.body) res.write(chunk);
+      res.end();
+    } catch (err) {
+      res.writeHead(502, { "content-type": "text/plain" });
+      res.end(`probe: the gateway threw: ${err}`);
+    }
+  });
+
+  const proxy = http.createServer((req, res) => {
+    refused.push(`${req.method} ${req.url}`);
+    res.writeHead(403);
+    res.end();
+  });
+  proxy.on("connect", (req, socket) => {
+    const [host] = req.url.split(":");
+    if (host !== HOST) {
+      refused.push(`CONNECT ${req.url}`);
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+      return;
+    }
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    inner.emit(
+      "connection",
+      new tls.TLSSocket(socket, {
+        isServer: true,
+        key: certs.key,
+        cert: certs.cert
+      })
+    );
+  });
+  proxy.on("close", () => inner.close());
+  return new Promise((resolve) =>
+    proxy.listen(0, "127.0.0.1", () => resolve(proxy))
+  );
+}
+
+/** One session, launched as `buildLaunch` launches it, and its stream parsed. */
+function runSession(bin, proxyUrl, ca, resume) {
+  const launch = buildLaunch({
+    prompt: `Reply with exactly: ${REPLY}`,
+    dir: work,
+    ...(resume ? { resume } : {})
+  });
+  if (!launch.command.startsWith("claude ")) {
+    throw new Error(
+      `buildLaunch's command no longer starts with \`claude\`: ${launch.command}`
+    );
+  }
+  const command = `'${bin}' ${launch.command.slice("claude ".length)}`;
+  const env = {
+    PATH: process.env.PATH,
+    HOME: home,
+    TMPDIR: tmp,
+    ...launch.env,
+    HTTPS_PROXY: proxyUrl,
+    https_proxy: proxyUrl,
+    NODE_EXTRA_CA_CERTS: ca
+  };
+  return new Promise((resolve) => {
+    const child = spawn("sh", ["-c", command], {
+      cwd: work,
+      env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const timer = setTimeout(() => child.kill("SIGTERM"), RUN_TIMEOUT_MS);
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      const parsed = parseStream(
+        stdout.endsWith("\n") ? stdout : `${stdout}\n`
+      );
+      const result = parsed.events.find(
+        (event) => event.kind === "result"
+      )?.result;
+      resolve({
+        code,
+        stderr,
+        parsed,
+        result,
+        lines: stdout.split("\n").filter(Boolean)
+      });
+    });
+  });
+}
+
+function checkRun(label, run) {
+  check(
+    `${label}: the CLI exits 0`,
+    run.code === 0,
+    run.code === 0 ? "" : run.stderr.trim().slice(0, 500)
+  );
+  check(
+    `${label}: every line parses`,
+    run.parsed.skipped === 0,
+    run.parsed.sample ? `first unrecognised: ${run.parsed.sample}` : ""
+  );
+  const result = run.result;
+  check(
+    `${label}: a result is read`,
+    Boolean(result && !result.isError),
+    result ? `${result.subtype}` : "none"
+  );
+  if (!result || live) return;
+  check(
+    `${label}: the reply is the fake's`,
+    result.text === REPLY,
+    JSON.stringify(result.text)
+  );
+  const usage = {
+    input: USAGE.input_tokens,
+    output: USAGE.output_tokens,
+    cacheRead: USAGE.cache_read_input_tokens,
+    cacheWrite: USAGE.cache_creation_input_tokens
+  };
+  check(
+    `${label}: usage, turns, duration and cost are read`,
+    JSON.stringify(result.usage) === JSON.stringify(usage) &&
+      result.numTurns > 0 &&
+      result.durationMs > 0 &&
+      result.costUsd > 0,
+    JSON.stringify({
+      usage: result.usage,
+      turns: result.numTurns,
+      ms: result.durationMs,
+      cost: result.costUsd
+    })
+  );
+}
+
+// --- the fake Anthropic -----------------------------------------------------------
+
+/** Just enough of the API for a one-turn session, and a 404 naming the rest. */
+async function fake(request) {
+  const url = pathOf(request.url);
+  if (request.method === "HEAD") return new Response(null, { status: 200 });
+  if (url === "/v1/messages/count_tokens") {
+    return Response.json({ input_tokens: USAGE.input_tokens });
+  }
+  if (url === "/v1/messages" && request.method === "POST") {
+    const body = await request.json();
+    const message = {
+      id: "msg_probe",
+      type: "message",
+      role: "assistant",
+      model: body.model,
+      stop_sequence: null
+    };
+    if (!body.stream) {
+      return Response.json(
+        {
+          ...message,
+          content: [{ type: "text", text: REPLY }],
+          stop_reason: "end_turn",
+          usage: USAGE
+        },
+        { headers: { "request-id": "req_probe" } }
+      );
+    }
+    const event = (type, data) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    return new Response(
+      event("message_start", {
+        message: {
+          ...message,
+          content: [],
+          stop_reason: null,
+          usage: { ...USAGE, output_tokens: 1 }
+        }
+      }) +
+        event("content_block_start", {
+          index: 0,
+          content_block: { type: "text", text: "" }
+        }) +
+        event("content_block_delta", {
+          index: 0,
+          delta: { type: "text_delta", text: REPLY }
+        }) +
+        event("content_block_stop", { index: 0 }) +
+        event("message_delta", {
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: USAGE.output_tokens }
+        }) +
+        event("message_stop", {}),
+      {
+        headers: {
+          "content-type": "text/event-stream",
+          "request-id": "req_probe"
+        }
+      }
+    );
+  }
+  return Response.json(
+    {
+      type: "error",
+      error: { type: "not_found_error", message: "not in the probe's fake API" }
+    },
+    { status: 404 }
+  );
+}
+
+// --- the capture and the report ----------------------------------------------------
+
+function pathOf(url) {
+  return new URL(url, `https://${HOST}`).pathname;
+}
+
+/** Stable across machines and runs: see {@link VOLATILE_HEADERS}. */
+function normalizeHeaders(headers) {
+  const out = {};
+  for (const name of Object.keys(headers).sort()) {
+    const value = Array.isArray(headers[name])
+      ? headers[name].join(", ")
+      : headers[name];
+    out[name] = VOLATILE_HEADERS.has(name) ? "*" : value;
+  }
+  return out;
+}
+
+/** The run's lines, with this machine's temporary paths taken out. */
+function normalizeLines(lines) {
+  return lines.map((line) => line.split(tmp).join("/probe"));
+}
+
+/**
+ * What a capture says, for comparing two: each endpoint's header values, every
+ * value seen across its calls, and each kind of line's fields. The CLI's own
+ * version is taken out of the values, so a bump alone is not a difference.
+ */
+function shape(capture) {
+  const requests = new Map();
+  for (const request of capture.requests) {
+    const key = `${request.method} ${request.path}`;
+    const headers = requests.get(key) ?? new Map();
+    for (const [name, value] of Object.entries(request.headers)) {
+      const values = name === "anthropic-beta" ? value.split(",") : [value];
+      const seen = headers.get(name) ?? new Set();
+      for (const v of values)
+        seen.add(v.split(capture.version).join("<version>"));
+      headers.set(name, seen);
+    }
+    requests.set(key, headers);
+  }
+  const lines = new Map();
+  for (const line of [...capture.runs.first, ...capture.runs.resumed]) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const kind = event.subtype ? `${event.type}/${event.subtype}` : event.type;
+    const keys = new Set([...(lines.get(kind) ?? []), ...Object.keys(event)]);
+    lines.set(kind, keys);
+  }
+  return { requests, lines };
+}
+
+function report(capture, { refused, unanswered }) {
+  console.log("\nChecks:");
+  for (const c of checks) {
+    console.log(
+      `  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`
+    );
+  }
+  if (refused.length > 0) {
+    console.log(
+      `\nRefused, outside Anthropic: ${[...new Set(refused)].join(", ")}`
+    );
+  }
+  if (unanswered.length > 0) {
+    console.log(
+      `\nAnswered 404 by the fake: ${[...new Set(unanswered)].join(", ")}`
+    );
+  }
+
+  if (!existsSync(CAPTURE)) {
+    console.log("\nNo recorded capture to compare with.");
+    return;
+  }
+  const before = JSON.parse(readFileSync(CAPTURE, "utf8"));
+  const was = shape(before);
+  const now = shape(capture);
+  const changes = [];
+
+  for (const key of new Set([...was.requests.keys(), ...now.requests.keys()])) {
+    const a = was.requests.get(key);
+    const b = now.requests.get(key);
+    if (!a) changes.push(`+ request ${key}`);
+    else if (!b) changes.push(`- request ${key}`);
+    else {
+      for (const name of new Set([...a.keys(), ...b.keys()])) {
+        const x = a.get(name);
+        const y = b.get(name);
+        if (!x) changes.push(`+ ${key} header ${name}: ${[...y].join(", ")}`);
+        else if (!y) changes.push(`- ${key} header ${name}`);
+        else {
+          for (const v of y)
+            if (!x.has(v)) changes.push(`+ ${key} ${name} ${v}`);
+          for (const v of x)
+            if (!y.has(v)) changes.push(`- ${key} ${name} ${v}`);
+        }
+      }
+    }
+  }
+  for (const kind of new Set([...was.lines.keys(), ...now.lines.keys()])) {
+    const a = was.lines.get(kind);
+    const b = now.lines.get(kind);
+    if (!a) changes.push(`+ line ${kind}`);
+    else if (!b) changes.push(`- line ${kind}`);
+    else {
+      for (const key of b)
+        if (!a.has(key)) changes.push(`+ ${kind} field ${key}`);
+      for (const key of a)
+        if (!b.has(key)) changes.push(`- ${kind} field ${key}`);
+    }
+  }
+
+  console.log(`\nAgainst the capture of ${before.version}:`);
+  console.log(
+    changes.length === 0
+      ? "  no difference"
+      : changes.map((c) => `  ${c}`).join("\n")
+  );
+}
+
+function fail(message) {
+  console.error(`probe-claude-code: ${message}`);
+  process.exit(1);
+}
