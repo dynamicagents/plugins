@@ -72,6 +72,11 @@ export interface ClaudeCodeModelOptions {
   kind: "write" | "read";
   /** The checkout. */
   dir: string;
+  /**
+   * A JSON Schema the session's answer must match. Its `result` then carries
+   * the answer as `structured`, for `report` to read.
+   */
+  jsonSchema?: Record<string, unknown>;
   /** Files one note on the parent's transcript: the sub-agent's `note`. */
   note: (key: string, text: string) => Promise<void>;
   /**
@@ -183,7 +188,15 @@ export function claudeCodeModel(
       }
       const brief = prompt;
       ended = await drain(execIdFor(runId), () =>
-        session.start(runtime, runId, options.kind, brief, options.dir, sinks)
+        session.start(
+          runtime,
+          runId,
+          options.kind,
+          brief,
+          options.dir,
+          sinks,
+          options.jsonSchema
+        )
       );
       await storage.put(KEYS.session, ended);
     }

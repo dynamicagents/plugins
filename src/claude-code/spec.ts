@@ -27,8 +27,11 @@ import { z } from "zod";
  *
  * A branch is different: the model quotes it from an earlier report or a pull
  * request, and the host's `prepare` resolves it before anything runs.
+ *
+ * Exported so a host can extend it with an input of its own that its `prepare`
+ * resolves, as it can the reader's.
  */
-const WRITE_INPUT = z.object({
+export const CLAUDE_CODE_WRITE_INPUT = z.object({
   task: z
     .string()
     .describe(
@@ -43,7 +46,7 @@ const WRITE_INPUT = z.object({
 });
 
 /** The reader's input. No branch: its copy is deleted when it ends. */
-const READ_INPUT = z.object({
+export const CLAUDE_CODE_READ_INPUT = z.object({
   task: z
     .string()
     .describe(
@@ -51,8 +54,8 @@ const READ_INPUT = z.object({
     )
 });
 
-export type ClaudeCodeInput = z.infer<typeof WRITE_INPUT>;
-export type ClaudeCodeReadInput = z.infer<typeof READ_INPUT>;
+export type ClaudeCodeInput = z.infer<typeof CLAUDE_CODE_WRITE_INPUT>;
+export type ClaudeCodeReadInput = z.infer<typeof CLAUDE_CODE_READ_INPUT>;
 
 /**
  * Nothing reads it: the model is the CLI, whose system prompt is its own. It
@@ -93,7 +96,7 @@ export const CLAUDE_CODE_AGENT: SubAgentSpec<ClaudeCodeInput> = {
     "session starts a branch of its own, and changing an open pull request from",
     "there means moving commits between branches."
   ].join("\n"),
-  inputSchema: WRITE_INPUT,
+  inputSchema: CLAUDE_CODE_WRITE_INPUT,
   soul: SOUL,
   detached: true,
   formatInput: (input) => input.task
@@ -132,7 +135,7 @@ export const CLAUDE_CODE_READER_AGENT: SubAgentSpec<ClaudeCodeReadInput> = {
     "",
     "It cannot ask you anything mid-run."
   ].join("\n"),
-  inputSchema: READ_INPUT,
+  inputSchema: CLAUDE_CODE_READ_INPUT,
   soul: SOUL,
   detached: true,
   formatInput: (input) => input.task

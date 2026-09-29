@@ -193,6 +193,14 @@ export interface LaunchOptions {
   readOnly?: string;
 
   /**
+   * A JSON Schema the session's answer must match, as `--json-schema`. The CLI
+   * gives the model a `StructuredOutput` tool and holds the run until it is
+   * called, and the result line carries the call's input as
+   * `structured_output` — see {@link file://./events.ts ClaudeCodeResult}.
+   */
+  jsonSchema?: Record<string, unknown>;
+
+  /**
    * A session id to continue, from an earlier session's `result` line.
    *
    * The transcript lives on the container's disk, so this only resumes a session
@@ -331,6 +339,9 @@ export function buildLaunch(options: LaunchOptions): Launch {
   argv.push("--permission-mode", permissionMode);
   if (options.model) argv.push("--model", shellQuote(options.model));
   if (options.effort) argv.push("--effort", options.effort);
+  if (options.jsonSchema) {
+    argv.push("--json-schema", shellQuote(JSON.stringify(options.jsonSchema)));
+  }
 
   const env: Record<string, string> = {
     // Pinned image; an autoupdate would move the wire shape the gateway and the

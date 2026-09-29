@@ -94,7 +94,7 @@ the fact — so stopping a turn to ask about one buys nothing that the review it
 does not.
 
 That is a judgement about these calls, not a limitation of the plugin contract. A
-fork that wants a gate sets `approval` on the actions it cares about.
+fork that wants a gate has its agent ask first, through core's `ask_user`.
 
 Two injected dependencies, and the line between them is the trust boundary rather
 than a matter of taste. `exec` is anything that runs a command in the container —

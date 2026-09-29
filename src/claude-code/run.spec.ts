@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { shellQuote } from "@cloudflare/computer";
 import type {
   WorkspaceRuntimeEvent,
   WorkspaceRuntimeExecHandle
@@ -168,6 +169,18 @@ describe("buildLaunch", () => {
     // Without `--verbose`, stream-json emits only the final result — which would
     // make every progress note in this package arrive at once, at the end.
     expect(launch().command).toContain("--output-format stream-json --verbose");
+  });
+
+  it("passes a JSON Schema as one quoted argument, and nothing without one", () => {
+    // A quote in the schema is the case the quoting exists for.
+    const schema = {
+      type: "object",
+      properties: { "it's": { type: "string" } }
+    };
+    expect(launch({ jsonSchema: schema }).command).toContain(
+      `--json-schema ${shellQuote(JSON.stringify(schema))}`
+    );
+    expect(launch().command).not.toContain("--json-schema");
   });
 
   /**
