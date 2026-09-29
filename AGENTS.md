@@ -78,3 +78,78 @@ unreleased `main` still carries the last released version number, so while a git
 is in place the installed core is that version plus whatever has landed since. That
 is the cost of batching releases, and it is why the range is checked against the tree
 rather than against the manifest.
+
+---
+
+## Updating Claude Code
+
+The `claude-code` plugin's egress gateway (`src/claude-code/egress.ts`) and stream
+parser (`src/claude-code/events.ts`) are written against one CLI version's traffic:
+its auth header, its `anthropic-beta` list, the endpoints it calls, the fields of its
+`stream-json` lines. A newer CLI can move any of it, and a deployment would find out
+only in a running container. So the version is pinned. `VERIFIED_CLAUDE_CODE_VERSION`
+(`src/claude-code/verified.ts`) is the one this package was last checked against, and
+a deployment's image pins the same one. It moves only after the probe passes on the
+new version, and the workspace's weekly dependency round runs it.
+
+```bash
+npm run probe:claude-code                  # the registry's latest; stops if already verified
+npm run probe:claude-code -- <version>     # a version, or any dist-tag
+npm run probe:claude-code -- --record      # and make it the verified version
+npm run probe:claude-code -- --live        # the real API, on CLAUDE_CODE_OAUTH_TOKEN
+npm run probe:claude-code -- --keep        # keep the temporary directory
+```
+
+**What it runs.** It stands in for the container. The CLI is installed into a
+temporary directory, never over the machine's own `claude`, and launched with the
+command and environment `buildLaunch` gives a session. Its HTTPS goes through a proxy
+that terminates TLS for Anthropic with a throwaway CA, the way `http-gateway` egress
+does. Every request then goes through the real `claudeCodeEgress`, and on to a fake
+Anthropic, or with `--live` to the real API. A session is run once and then resumed.
+
+**It fails when:**
+
+- the CLI does not exit 0;
+- a `stream-json` line does not parse;
+- a result's reply or token counts do not read back. The fake reports a distinct count
+  for each field, because the parser reads a renamed field as zero rather than
+  failing;
+- the resumed session is not the same session;
+- a request reaches Anthropic without the real credential, or with the placeholder or
+  an `x-api-key` still on it.
+
+**What changed is reported, not failed.** The run is compared with the verified
+version's capture: each endpoint's header values, with `anthropic-beta` split into its
+flags, endpoints added or gone, and each kind of line's fields. The report also lists
+what the fake answered with a 404 and any host outside Anthropic the proxy refused.
+That is what a reviewer reads before taking the bump, so it goes in the PR.
+
+**The capture** is `test/fixtures/claude-code-probe-capture.json`: the verified
+version's requests and its runs' lines, and what the fake answered them with. Header
+values that vary by machine or run are recorded as `*`, and temporary paths are taken
+out of the lines. `egress.spec.ts` and `events.spec.ts` read it, so `npm test` checks
+the gateway and the parser against what the verified version actually sends and
+prints. The probe writes it and prettier skips it; do not edit it by hand. It is not a
+VCR cassette: a cassette holds what a Worker's `fetch` gets back, and this holds what a
+CLI we do not write sends and prints.
+
+**`--record`** writes the capture and `verified.ts` together, and a spec fails when
+their versions differ. It takes only a passing, offline run: a live run's traffic
+depends on the account it ran on.
+
+**A bump is:**
+
+1. `npm run probe:claude-code` passes;
+2. the same run with `--record`, then `npm test` against the new capture;
+3. both files committed in the round's PR, with the report of what changed;
+4. once that is on `main`, starter moves its image pin, and starter's `npm run check`
+   fails until the two agree.
+
+If the probe fails, the pin stays where it is and the round says which check failed.
+
+**What it cannot see** is the container itself: root with `IS_SANDBOX`, the read-only
+launch, the interception CA in the image, and rotating to another credential after a
+real `429`. A deployment's smoke test covers those after it ships.
+
+It needs `npm` and `openssl` on the PATH, and no credential unless `--live`. It
+imports the package from `dist/`, so the npm script builds first.

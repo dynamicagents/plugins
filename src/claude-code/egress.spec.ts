@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
 import type { CredentialState, CredentialStore } from "./credentials.js";
-import capture from "./capture.json";
+import capture from "../../test/fixtures/claude-code-probe-capture.json";
 
 /**
  * The gateway is the whole of the containment, so every test here is a
@@ -82,7 +82,8 @@ const openGateway = (
   });
 
 /**
- * A request's headers as the verified version sent them, from `./capture.json`.
+ * A request's headers as the verified version sent them, from the probe's
+ * capture in `test/fixtures/`.
  * The probe records a value that varies by machine or run as `*`, and those are
  * left out along with the connection's own framing.
  */

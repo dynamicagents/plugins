@@ -431,42 +431,16 @@ install's dependency tree makes that pull a large one.
 
 ## Updating Claude Code
 
-The gateway and the stream parser are written against one version's traffic —
-its auth header, its `anthropic-beta` list, the endpoints it calls, the fields of
-its `stream-json` lines — and a newer CLI can move any of it. So the version is
-pinned, and `VERIFIED_CLAUDE_CODE_VERSION` (`./verified.ts`) is the one this
-package was last checked against. `./capture.json` is that version's traffic, and
-the gateway and parser specs read it.
+The gateway and the stream parser are written against one CLI version's traffic,
+and a newer CLI can change it. So the version is pinned:
+`VERIFIED_CLAUDE_CODE_VERSION` (`./verified.ts`) is the one this package was last
+checked against. A deployment's image pins the same version, and should check that
+the two agree.
 
-A newer version is checked without a container:
-
-```bash
-npm run probe:claude-code                  # the registry's latest
-npm run probe:claude-code -- <version>     # a version, or any dist-tag
-npm run probe:claude-code -- --record      # and make it the verified version
-npm run probe:claude-code -- --live        # against the real API
-```
-
-The probe installs the CLI into a temporary directory, launches it with the
-command and environment `buildLaunch` gives a session, and intercepts its HTTPS
-with a throwaway CA the way `http-gateway` egress does. Every request goes
-through the real `claudeCodeEgress` to a fake Anthropic — or with `--live` to the
-real API, on `CLAUDE_CODE_OAUTH_TOKEN` — and the session is run once and then
-resumed. It fails when the CLI does not finish, a line does not parse, a result's
-reply or token counts do not read back, the resumed session is not the same one,
-or a request leaves without the swap. What differs from the capture — a new beta,
-a new endpoint, a new field — is reported and is not a failure: it is what a
-reviewer reads before taking the bump. It needs `npm` and `openssl`, and no
-credential unless `--live`.
-
-**A bump is:** the probe passes, `--record` writes `./capture.json` and
-`./verified.ts`, `npm test` passes against the new capture, and a deployment's
-image pin moves to the new version. The pin and the verified version are one
-fact, so a deployment should check they agree.
-
-What the probe cannot see is the container: root with `IS_SANDBOX`, the
-read-only launch, the interception CA in the image, and a real `429`'s rotation.
-A deployment's own smoke test covers those after it ships.
+A newer version is verified by running this repo's `npm run probe:claude-code`,
+which works without a container. This repo's AGENTS.md ("Updating Claude Code") has
+the procedure. The probe can't see the container itself, so a deployment's own smoke
+test covers that after it ships.
 
 ## The permission mode, and why it bypasses
 

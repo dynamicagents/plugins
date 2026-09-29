@@ -5,7 +5,7 @@ import {
   RATE_LIMIT_OK,
   type ClaudeCodeEvent
 } from "./events.js";
-import capture from "./capture.json";
+import capture from "../../test/fixtures/claude-code-probe-capture.json";
 import { VERIFIED_CLAUDE_CODE_VERSION } from "./verified.js";
 
 /**
@@ -45,7 +45,7 @@ const assistant = (text: string, extra: Record<string, unknown> = {}) =>
  * Copied from a recorded run rather than invented, because every one of these
  * keys is a place a rename would break the cost accounting silently — the run
  * would still succeed and simply report spending nothing. The verified
- * version's own runs are checked below, from `./capture.json`.
+ * version's own runs are checked below, from the probe's capture.
  */
 const RESULT = {
   type: "result",

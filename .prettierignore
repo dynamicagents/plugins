@@ -10,7 +10,7 @@ worker-configuration.d.ts
 # re-record.
 test/snapshots/
 # The same for the Claude Code probe's capture, which `--record` writes.
-src/claude-code/capture.json
+test/fixtures/claude-code-probe-capture.json
 
 # Agent config, written by tools or linked in. A checkout without symlinks
 # writes each link as a file holding its target, which --check would fail.

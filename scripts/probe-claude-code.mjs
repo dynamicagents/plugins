@@ -25,7 +25,7 @@
  *
  * What this cannot see is the container itself — root with `IS_SANDBOX`, the
  * read-only launch, the interception CA in the image, a real 429's rotation.
- * The README's "Updating Claude Code" says what covers those.
+ * AGENTS.md's "Updating Claude Code" says what covers those.
  *
  * Needs `npm` and `openssl` on the PATH, and reads `dist/`, so the npm script
  * builds first.
@@ -49,7 +49,7 @@ import tls from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CAPTURE = path.join(root, "src/claude-code/capture.json");
+const CAPTURE = path.join(root, "test/fixtures/claude-code-probe-capture.json");
 const VERIFIED = path.join(root, "src/claude-code/verified.ts");
 const PACKAGE = "@anthropic-ai/claude-code";
 const HOST = "api.anthropic.com";
@@ -280,9 +280,9 @@ try {
     );
     console.log(
       `\n✓ ${version} passes, and is now the verified version. Commit ` +
-        "src/claude-code/capture.json and src/claude-code/verified.ts, then " +
-        "run `npm test`: the specs read the new capture. A deployment's image " +
-        "pin moves to it next."
+        `${path.relative(root, CAPTURE)} and ${path.relative(root, VERIFIED)}, ` +
+        "then run `npm test`: the specs read the new capture. A deployment's " +
+        "image pin moves to it next."
     );
   } else {
     console.log(
