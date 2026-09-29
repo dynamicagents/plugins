@@ -167,8 +167,9 @@ rotation and saves a Durable Object class, a binding and a migration.
       "class_name": "AnthropicCodingWorkspace",
       "image": "./Dockerfile",
       // A Docker build arg. One Dockerfile serves both the plain workspace and
-      // this one; only the entry naming a version gets the CLI.
-      "image_vars": { "CLAUDE_CODE_VERSION": "2.1.238" },
+      // this one; only the entry naming a version gets the CLI. The value is
+      // `VERIFIED_CLAUDE_CODE_VERSION` — see "Updating Claude Code" below.
+      "image_vars": { "CLAUDE_CODE_VERSION": "<VERIFIED_CLAUDE_CODE_VERSION>" },
       "instance_type": "standard-2",
       "max_instances": 5
     }
@@ -208,9 +209,9 @@ The class must also be exported from the Worker entry point, along with
 `WorkspaceProxy` from `@cloudflare/computer` — the container dials back through
 it, and dropping that export breaks the container with no compile error.
 
-Pin the CLI version deliberately: the wire shape this package's gateway and
-parser are both written against is version-coupled, so re-run the smoke test on
-every bump.
+Pin the CLI to `VERIFIED_CLAUDE_CODE_VERSION`, and move the pin only as
+"Updating Claude Code" below says: the gateway and the parser are written against
+one version's traffic.
 
 The workspace Durable Object installs the gateway as its egress policy:
 
@@ -427,6 +428,19 @@ session's edits reaching the checkout — anything that then commits or pushes f
 the workspace side — should drive `workspace.pull()` to completion before it
 reads, and certainly before it stops the container. A session that wrote an
 install's dependency tree makes that pull a large one.
+
+## Updating Claude Code
+
+The gateway and the stream parser are written against one CLI version's traffic,
+and a newer CLI can change it. So the version is pinned:
+`VERIFIED_CLAUDE_CODE_VERSION` (`./verified.ts`) is the one this package was last
+checked against. A deployment's image pins the same version, and should check that
+the two agree.
+
+A newer version is verified by running this repo's `npm run probe:claude-code`,
+which works without a container. This repo's AGENTS.md ("Updating Claude Code") has
+the procedure. The probe can't see the container itself, so a deployment's own smoke
+test covers that after it ships.
 
 ## The permission mode, and why it bypasses
 

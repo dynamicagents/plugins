@@ -9,6 +9,8 @@ worker-configuration.d.ts
 # than hand-edited, so formatting them makes `npm run check` fail after every
 # re-record.
 test/snapshots/
+# The same for the Claude Code probe's capture, which `--record` writes.
+test/fixtures/claude-code-probe-capture.json
 
 # Agent config, written by tools or linked in. A checkout without symlinks
 # writes each link as a file holding its target, which --check would fail.

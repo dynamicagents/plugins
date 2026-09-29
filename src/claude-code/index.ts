@@ -71,6 +71,7 @@ export {
 } from "./spec.js";
 
 export { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
+export { VERIFIED_CLAUDE_CODE_VERSION } from "./verified.js";
 export type { EgressConfig } from "./egress.js";
 export {
   credentialPool,
