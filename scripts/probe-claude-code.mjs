@@ -55,6 +55,8 @@ const PACKAGE = "@anthropic-ai/claude-code";
 const HOST = "api.anthropic.com";
 const REPLY = "probe-ok";
 const RUN_TIMEOUT_MS = 120_000;
+/** How long a stopped run gets before it is killed outright. */
+const KILL_GRACE_MS = 5_000;
 /** Carries a request's index through the gateway; removed before upstream. */
 const PROBE_ID = "x-claude-code-probe-id";
 
@@ -109,6 +111,15 @@ const credential = live
 if (!credential)
   fail("--live needs CLAUDE_CODE_OAUTH_TOKEN in the environment.");
 
+/**
+ * The environment of every command the probe runs but the CLI: `npm`, whose
+ * install runs the candidate's lifecycle scripts, and `openssl`. The gateway
+ * holds the credential and nothing else here should — the CLI itself is given
+ * only the placeholder, as in the container.
+ */
+const TOOL_ENV = { ...process.env };
+delete TOOL_ENV.CLAUDE_CODE_OAUTH_TOKEN;
+
 // --- the package under test, from dist/ ---------------------------------------
 
 /**
@@ -141,7 +152,7 @@ const { VERIFIED_CLAUDE_CODE_VERSION } = await dist("verified.js");
 // --- which version ------------------------------------------------------------
 
 const version = resolveVersion(spec ?? "latest");
-if (!spec && version === VERIFIED_CLAUDE_CODE_VERSION && !record) {
+if (!spec && !record && !live && version === VERIFIED_CLAUDE_CODE_VERSION) {
   console.log(`${PACKAGE}@latest is ${version}, already the verified version.`);
   process.exit(0);
 }
@@ -215,20 +226,25 @@ try {
     check("the resumed run ran", false, "the first run reported no session id");
   }
 
-  const api = requests.filter((request) => request.upstream);
+  // Every intercepted request, not the ones that got through: a request the
+  // gateway refused never reaches upstream, and would otherwise go unseen.
   check(
     "every request reached Anthropic with the real credential",
-    api.length > 0 &&
-      api.every((r) => r.upstream.authorization === `Bearer ${credential}`),
-    `${api.length} request(s)`
+    requests.length > 0 &&
+      requests.every(
+        (r) => r.upstream?.authorization === `Bearer ${credential}`
+      ),
+    `${requests.filter((r) => r.upstream).length} of ${requests.length} forwarded`
   );
   check(
     "no request left with the placeholder or an x-api-key",
-    api.every(
+    requests.every(
       (r) =>
+        r.upstream &&
         !Object.values(r.upstream).some((v) =>
           v.includes(CREDENTIAL_PLACEHOLDER)
-        ) && !("x-api-key" in r.upstream)
+        ) &&
+        !("x-api-key" in r.upstream)
     )
   );
 
@@ -289,7 +305,7 @@ function resolveVersion(tagOrVersion) {
   const out = execFileSync(
     "npm",
     ["view", `${PACKAGE}@${tagOrVersion}`, "version", "--json"],
-    { encoding: "utf8" }
+    { encoding: "utf8", env: TOOL_ENV }
   ).trim();
   if (!out)
     throw new Error(`${PACKAGE}@${tagOrVersion} names no published version.`);
@@ -313,10 +329,13 @@ function install(target) {
       "--loglevel=error",
       `${PACKAGE}@${target}`
     ],
-    { stdio: ["ignore", "ignore", "inherit"] }
+    { stdio: ["ignore", "ignore", "inherit"], env: TOOL_ENV }
   );
   const bin = path.join(prefix, "node_modules/.bin/claude");
-  const reported = execFileSync(bin, ["--version"], { encoding: "utf8" });
+  const reported = execFileSync(bin, ["--version"], {
+    encoding: "utf8",
+    env: TOOL_ENV
+  });
   if (!reported.startsWith(target)) {
     throw new Error(`installed ${target}, but it reports ${reported.trim()}.`);
   }
@@ -329,7 +348,10 @@ function makeCerts() {
   mkdirSync(dir);
   const at = (name) => path.join(dir, name);
   const openssl = (...opts) =>
-    execFileSync("openssl", opts, { stdio: ["ignore", "ignore", "pipe"] });
+    execFileSync("openssl", opts, {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: TOOL_ENV
+    });
   openssl(
     "req",
     "-x509",
@@ -492,18 +514,37 @@ function runSession(bin, proxyUrl, ca, resume) {
     NODE_EXTRA_CA_CERTS: ca
   };
   return new Promise((resolve) => {
+    // A process group of its own, so a timeout reaches the CLI and not only the
+    // shell in front of it.
     const child = spawn("sh", ["-c", command], {
       cwd: work,
       env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
     });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
-    const timer = setTimeout(() => child.kill("SIGTERM"), RUN_TIMEOUT_MS);
-    child.on("exit", (code) => {
-      clearTimeout(timer);
+    const signal = (name) => {
+      try {
+        process.kill(-child.pid, name);
+      } catch {
+        // Already gone.
+      }
+    };
+    const timers = [
+      setTimeout(() => {
+        stderr += `\nprobe: no exit after ${RUN_TIMEOUT_MS / 1000}s; stopped.`;
+        signal("SIGTERM");
+      }, RUN_TIMEOUT_MS),
+      setTimeout(() => signal("SIGKILL"), RUN_TIMEOUT_MS + KILL_GRACE_MS)
+    ];
+    child.on("error", (err) => {
+      stderr += `\nprobe: could not start the CLI: ${err.message}`;
+    });
+    child.on("close", (code) => {
+      for (const timer of timers) clearTimeout(timer);
       const parsed = parseStream(
         stdout.endsWith("\n") ? stdout : `${stdout}\n`
       );

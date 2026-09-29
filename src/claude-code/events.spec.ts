@@ -6,6 +6,7 @@ import {
   type ClaudeCodeEvent
 } from "./events.js";
 import capture from "./capture.json";
+import { VERIFIED_CLAUDE_CODE_VERSION } from "./verified.js";
 
 /**
  * The stream parser, and the three ways it can quietly ruin a run.
@@ -558,6 +559,11 @@ describe("rate_limit_event", () => {
  */
 describe("the verified version's recorded runs", () => {
   const runs = Object.entries(capture.runs);
+
+  /** The two are written together; a partial record or a merge can part them. */
+  it("are the verified version's", () => {
+    expect(capture.version).toBe(VERIFIED_CLAUDE_CODE_VERSION);
+  });
 
   it.each(runs)("reads every line of the %s run", (_, lines) => {
     const parsed = parseStream(lines.map((l) => `${l}\n`).join(""));
