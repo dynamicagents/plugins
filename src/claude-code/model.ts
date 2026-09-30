@@ -1,4 +1,5 @@
 import type { LanguageModel } from "ai";
+import { isPlatformTransientError } from "agents";
 import type { ClaudeCodeConfig } from "./config.js";
 import type { ClaudeCodeResult, RateLimitInfo } from "./events.js";
 import { claudeCodeSession, requireCredentials } from "./session.js";
@@ -62,7 +63,11 @@ export interface SessionWorkspace extends Disposable {
 
 export interface ClaudeCodeModelOptions {
   config: ClaudeCodeConfig;
-  /** Opens the run's container — the workspace the run's `runtime()` names. */
+  /**
+   * Opens the run's container — the workspace the run's `runtime()` names.
+   * Called again to re-attach after a cut stream, so each call should reach the
+   * object through a new stub rather than one held from the last.
+   */
   workspace: () => Promise<SessionWorkspace>;
   /** The sub-agent's own storage, where every step's outcome is kept. */
   storage: DurableObjectStorage;
@@ -129,8 +134,10 @@ export function claudeCodeModel(
     if (reported !== undefined) return reported;
 
     const signal = call.abortSignal;
-    using workspace = await options.workspace();
-    const { runtime } = workspace;
+    // Opened again after a cut stream — see `drain`. Whichever is current is
+    // released when the run ends.
+    let workspace = await options.workspace();
+    using _release = { [Symbol.dispose]: () => workspace[Symbol.dispose]() };
 
     /** The exec being drained, which leads each note's key. */
     let current = "";
@@ -147,22 +154,55 @@ export function claudeCodeModel(
       ...(signal ? { signal } : {})
     };
 
-    /** Drain one exec to its end, starting it or re-attaching from the cursor. */
+    /**
+     * Drain one exec to its end, starting it or re-attaching from the cursor.
+     *
+     * **A cut stream is re-attached here, not failed.** The session is still
+     * running, and a failed run is stopped — the one outcome that loses it. The
+     * retry opens the workspace afresh, since the stub the stream came over may
+     * not survive the cut. Two attempts in a row that end in a cut with no
+     * checkpoint stored fail the run as before: a stream that breaks every time
+     * it opens is not a blip.
+     */
     const drain = async (
       execId: string,
-      begin: () => Promise<DrainOutcome>
+      begin: (runtime: SessionRuntime) => Promise<DrainOutcome>
     ): Promise<SessionEnd> => {
       current = execId;
-      const cursor = await storage.get<DrainCursor>(KEYS.cursor);
-      const outcome =
-        cursor?.execId === execId
-          ? await session.resume(runtime, cursor, sinks)
-          : await begin();
+      let outcome: DrainOutcome | undefined;
+      let stalled = false;
+      while (!outcome) {
+        const cursor = await storage.get<DrainCursor>(KEYS.cursor);
+        try {
+          outcome =
+            cursor?.execId === execId
+              ? await session.resume(workspace.runtime, cursor, sinks)
+              : await begin(workspace.runtime);
+        } catch (err) {
+          const after = await storage.get<DrainCursor>(KEYS.cursor);
+          const moved =
+            after?.execId === execId &&
+            (cursor?.execId !== execId || after.seq > cursor.seq);
+          if (!isStreamCut(err) || signal?.aborted || (stalled && !moved))
+            throw err;
+          stalled = !moved;
+          console.warn(
+            "[claude-code] the session's stream was cut — re-attaching",
+            {
+              execId,
+              err: String(err)
+            }
+          );
+          const fresh = await options.workspace();
+          workspace[Symbol.dispose]();
+          workspace = fresh;
+        }
+      }
       await storage.put(KEYS.cursor, outcome.cursor);
       if (!outcome.done) {
         // Only the signal stops a drain short of the end: the turn was
         // cancelled, so the session goes with it.
-        await session.stop(runtime, runId).catch((err: unknown) =>
+        await session.stop(workspace.runtime, runId).catch((err: unknown) =>
           console.warn("[claude-code] could not stop a cancelled session", {
             runId,
             err: String(err)
@@ -187,7 +227,7 @@ export function claudeCodeModel(
         await storage.put(KEYS.brief, prompt);
       }
       const brief = prompt;
-      ended = await drain(execIdFor(runId), () =>
+      ended = await drain(execIdFor(runId), (runtime) =>
         session.start(
           runtime,
           runId,
@@ -212,7 +252,7 @@ export function claudeCodeModel(
       const sessionId = ended.result?.sessionId;
       if (asked.prompt && sessionId) {
         const prompt = asked.prompt;
-        followUpEnd = await drain(followUpExecIdFor(runId), () =>
+        followUpEnd = await drain(followUpExecIdFor(runId), (runtime) =>
           session.followUp(
             runtime,
             runId,
@@ -279,6 +319,25 @@ export function claudeCodeModel(
       };
     }
   };
+}
+
+/**
+ * Whether a drain failed because the transport under a live session gave way.
+ *
+ * An exec's events reach the sub-agent as a stream over RPC, relayed by the
+ * workspace object from the container's own RPC session — so a drop anywhere on
+ * that path cuts the stream while the session runs on. Measured: a container's
+ * session dropped after 21 minutes and was attached again within a second, the
+ * process untouched. The message is workerd's for a stream whose far side went
+ * away, and it carries no code.
+ */
+function isStreamCut(err: unknown): boolean {
+  if (isPlatformTransientError(err)) return true;
+  for (let e: unknown = err; e instanceof Error; e = e.cause) {
+    if (e.message.includes("ReadableStream received over RPC disconnected"))
+      return true;
+  }
+  return false;
 }
 
 /**

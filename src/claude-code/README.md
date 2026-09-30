@@ -405,6 +405,11 @@ dies resumes from it and files only what came after. Without it, a drain that di
 would replay the whole stream — one production run lost six and a half minutes of
 a session that way.
 
+**A cut stream is re-attached, not failed.** When the RPC stream under a live
+session drops, the drain re-attaches from that cursor on a freshly opened
+workspace instead of failing the run — failing it would stop a session that is
+still running. `drain` in `./model.ts` has when it gives up.
+
 **`runId` namespaces the exec id, and it is not optional.** Runs are concurrent —
 reading runs share their parent's container — so two sessions sharing an id would
 spawn over each other, each drain would attach to whichever won, and `stop` would

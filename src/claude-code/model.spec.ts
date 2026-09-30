@@ -55,17 +55,29 @@ const exit = (id: string, seq: number, code = 0): Event => ({
   code
 });
 
-/** How a script ends once its events are read. */
-type Ending = "close" | "hang" | "break";
+/**
+ * How a script ends once its events are read. `cut` is the RPC stream under a
+ * live session dropping, in workerd's words.
+ */
+type Ending = "close" | "hang" | "break" | "cut";
+
+/**
+ * One exec's events, and the script its next attachment gets instead. `lost` is
+ * an exec whose container was replaced: attaching to it throws `EEXEC_LOST`.
+ */
+interface Script {
+  events: Event[];
+  ending?: Ending;
+  next?: Script;
+  lost?: boolean;
+}
 
 /**
  * A container that runs each exec id's script. `getExec` replays from the
  * cursor's `seq`, as the runtime does; `busy` ids refuse a second spawn, which
  * is what a session still running after a lost isolate looks like.
  */
-function container(
-  scripts: Record<string, { events: Event[]; ending?: Ending }>
-) {
+function container(scripts: Record<string, Script>) {
   const calls = {
     exec: [] as { id: string; command: string }[],
     getExec: [] as { id: string; resume: unknown }[],
@@ -80,11 +92,21 @@ function container(
           if (ending === "close") controller.close();
           if (ending === "break")
             controller.error(new Error("the isolate went away"));
+          if (ending === "cut")
+            controller.error(
+              new Error(
+                "ReadableStream received over RPC disconnected prematurely."
+              )
+            );
         }
       }),
       { id, [Symbol.dispose]: () => {} }
     );
-  const script = (id: string) => scripts[id] ?? { events: [] };
+  const script = (id: string) => {
+    const current = scripts[id] ?? { events: [] };
+    if (current.next) scripts[id] = current.next;
+    return current;
+  };
 
   const runtime = {
     exec: async (command: string, options: { id: string }) => {
@@ -99,7 +121,11 @@ function container(
     },
     getExec: async (id: string, options: { resume?: unknown }) => {
       calls.getExec.push({ id, resume: options.resume });
-      const { events, ending = "close" } = script(id);
+      const { events, ending = "close", lost } = script(id);
+      if (lost)
+        throw Object.assign(new Error(`execution ${id} was lost`), {
+          code: "EEXEC_LOST"
+        });
       const from = typeof options.resume === "number" ? options.resume : 0;
       return handle(
         id,
@@ -294,6 +320,88 @@ describe("claudeCodeModel", () => {
     expect(box.calls.exec).toEqual([]);
     expect(box.calls.getExec).toEqual([{ id: SESSION, resume: 2 }]);
     expect(notes).toEqual([{ key: `${SESSION}:claude:2`, text: "three" }]);
+  });
+
+  /**
+   * The RPC stream under a live session drops mid-drain. Failing the run would
+   * have it stopped, and the session is still running — so the drain
+   * re-attaches, on a workspace opened afresh, and the run finishes.
+   */
+  it("re-attaches a cut stream on a fresh workspace, and stops nothing", async () => {
+    const all = [
+      say(SESSION, 1, "one"),
+      say(SESSION, 2, "two"),
+      say(SESSION, 3, "three"),
+      result(SESSION, 4),
+      exit(SESSION, 5)
+    ];
+    const box = container({
+      [SESSION]: {
+        events: all.slice(0, 2),
+        ending: "cut",
+        next: { events: all }
+      }
+    });
+    let opened = 0;
+    const { model, notes, reports } = harness(box, {
+      workspace: async () => {
+        opened++;
+        return { runtime: box.runtime, [Symbol.dispose]: () => {} };
+      }
+    });
+
+    expect(textOf(await streamed(model))).toBe("report 1");
+
+    expect(opened).toBe(2);
+    expect(box.calls.killed).toEqual([]);
+    // Cut inside the checkpoint interval, so nothing was stored and the
+    // re-attach reads from the start; the transcript dedupes what is refiled.
+    expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, SESSION]);
+    expect(box.calls.getExec).toEqual([{ id: SESSION, resume: 0 }]);
+    expect(new Set(notes.map((n) => n.key))).toEqual(
+      new Set([0, 1, 2].map((n) => `${SESSION}:claude:${n}`))
+    );
+    expect(reports[0]?.session.exitCode).toBe(0);
+  });
+
+  it("fails a run whose stream is cut again before anything is stored", async () => {
+    const cut: Script = {
+      events: [say(SESSION, 1, "one")],
+      ending: "cut"
+    };
+    const box = container({ [SESSION]: { ...cut, next: cut } });
+    const { model } = harness(box);
+
+    await expect(streamed(model)).rejects.toThrow(/disconnected prematurely/);
+    expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, SESSION]);
+  });
+
+  /** A container replaced under the cut is the report `resume` already makes. */
+  it("reports the session lost when the re-attach finds its container replaced", async () => {
+    const box = container({
+      [SESSION]: {
+        events: [say(SESSION, 3, "three")],
+        ending: "cut",
+        next: { events: [], lost: true }
+      }
+    });
+    const { model, reports, map } = harness(box);
+    map.set(`claude-code:${RUN}:brief`, "the brief");
+    map.set(`claude-code:${RUN}:cursor`, {
+      execId: SESSION,
+      seq: 2,
+      carry: "",
+      emitted: 2
+    });
+
+    expect(textOf(await streamed(model))).toBe("report 1");
+
+    expect(box.calls.getExec).toEqual([
+      { id: SESSION, resume: 2 },
+      { id: SESSION, resume: 2 }
+    ]);
+    expect(reports[0]?.session.exitCode).toBe(-1);
+    expect(reports[0]?.session.stderr).toMatch(/was replaced/);
   });
 
   it("runs a follow-up in the same session, and reports both ends", async () => {
