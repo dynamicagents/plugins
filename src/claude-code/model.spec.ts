@@ -6,6 +6,7 @@ import {
   type SessionOutcome
 } from "./model.js";
 import { execIdFor, followUpExecIdFor, type SessionRuntime } from "./run.js";
+import type { WorkspaceAdvisory } from "../workspace/advisory.js";
 
 /**
  * The session as a sub-agent's model, against a scripted container.
@@ -166,6 +167,7 @@ function harness(
       runtime: box.runtime,
       [Symbol.dispose]: () => {}
     }),
+    advisories: async () => [],
     storage,
     runId: RUN,
     kind: "write",
@@ -423,7 +425,7 @@ describe("claudeCodeModel", () => {
       { id: SESSION, resume: 2 }
     ]);
     expect(reports[0]?.session.exitCode).toBe(-1);
-    expect(reports[0]?.session.stderr).toMatch(/was replaced/);
+    expect(reports[0]?.session.stderr).toMatch(/stopped or replaced/);
   });
 
   it("runs a follow-up in the same session, and reports both ends", async () => {
@@ -563,5 +565,154 @@ describe("claudeCodeModel", () => {
     );
 
     expect(brief).toHaveBeenCalledWith("fix the parser");
+  });
+});
+
+/**
+ * A reading session's copy takes the parent's dependency trees as they are when
+ * it is made, so an install still running then is one the session never sees.
+ */
+describe("a reading session", () => {
+  const COPY = `${SESSION}:copy`;
+  const building: WorkspaceAdvisory = {
+    kind: "deps-building",
+    command: "npm ci",
+    startedAt: 0
+  };
+  const scripts = (): Record<string, Script> => ({
+    [COPY]: {
+      events: [
+        {
+          id: COPY,
+          seq: 1,
+          name: "stdout",
+          value:
+            "tree=/var/tmp/claude-read/run/tree\ndeps=1/1\nupper=disk\nisolated=yes\n"
+        },
+        exit(COPY, 2)
+      ]
+    },
+    [SESSION]: { events: [result(SESSION, 1), exit(SESSION, 2)] }
+  });
+
+  /** Runs `body` on a fake clock, draining every timer it leaves. */
+  async function timed<T>(body: () => Promise<T>): Promise<T> {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const running = body();
+      await vi.runAllTimersAsync();
+      return await running;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("waits out an install in flight before its brief and its copy", async () => {
+    const order: string[] = [];
+    let polls = 0;
+    const box = container(scripts());
+    const { model, reports } = harness(box, {
+      kind: "read",
+      advisories: async () => {
+        order.push("advisories");
+        return ++polls < 3 ? [building] : [];
+      },
+      brief: async (task) => {
+        order.push("brief");
+        return task;
+      }
+    });
+
+    await timed(() => streamed(model));
+
+    expect(order).toEqual(["advisories", "advisories", "advisories", "brief"]);
+    expect(box.calls.exec.map((c) => c.id)).toEqual([
+      COPY,
+      SESSION,
+      `${SESSION}:uncopy`
+    ]);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("copies as the workspace is once the session's ceiling has passed", async () => {
+    const advisories = vi.fn(async () => [building]);
+    const box = container(scripts());
+    const { model, reports } = harness(box, {
+      kind: "read",
+      config: { credentials: () => ["sk-ant-oat01-REAL"], timeoutMs: 12_000 },
+      advisories
+    });
+
+    await timed(() => streamed(model));
+
+    expect(advisories.mock.calls.length).toBeGreaterThan(1);
+    expect(box.calls.exec[0]?.id).toBe(COPY);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("copies as the workspace is when its install cannot be read", async () => {
+    const advisories = vi.fn(async (): Promise<WorkspaceAdvisory[]> => {
+      throw new Error("the workspace object is overloaded");
+    });
+    const box = container(scripts());
+    const { model, reports } = harness(box, { kind: "read", advisories });
+
+    await streamed(model);
+
+    expect(advisories).toHaveBeenCalledTimes(1);
+    expect(box.calls.exec[0]?.id).toBe(COPY);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("does not wait once its session has started", async () => {
+    const advisories = vi.fn(async () => [building]);
+    const box = container(scripts());
+    const { model, reports, map } = harness(box, { kind: "read", advisories });
+    map.set(`claude-code:${RUN}:brief`, "the brief");
+    map.set(`claude-code:${RUN}:cursor`, {
+      execId: SESSION,
+      seq: 0,
+      carry: "",
+      emitted: 0,
+      copy: true
+    });
+
+    await streamed(model);
+
+    expect(advisories).not.toHaveBeenCalled();
+    expect(box.calls.getExec).toEqual([{ id: SESSION, resume: 0 }]);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("stops waiting when the turn is cancelled mid-read", async () => {
+    const cancel = new AbortController();
+    let asked = false;
+    const box = container(scripts());
+    const { model, reports } = harness(box, {
+      kind: "read",
+      advisories: () => {
+        asked = true;
+        return new Promise(() => {});
+      }
+    });
+
+    const running = streamed(model, call(undefined, cancel.signal));
+    await vi.waitFor(() => expect(asked).toBe(true));
+    cancel.abort(new Error("cancelled"));
+
+    await expect(running).rejects.toThrow(/cancelled/);
+    expect(box.calls.exec).toEqual([]);
+    expect(reports).toEqual([]);
+  });
+
+  it("is a writing session's host's concern, not its own", async () => {
+    const advisories = vi.fn(async () => [building]);
+    const box = container(scripts());
+    const { model, reports } = harness(box, { advisories });
+
+    await streamed(model);
+
+    expect(advisories).not.toHaveBeenCalled();
+    expect(reports).toHaveLength(1);
   });
 });

@@ -1014,6 +1014,7 @@ export async function drainRun(
         // The stream ended without an `exit` event — the container went away
         // under the run. Report it as a failure rather than as still-running,
         // or the caller would wait on a dead process.
+        stderr = containerLost(stderr);
         return await finish(-1);
       }
       consume(next.value);
@@ -1070,6 +1071,37 @@ export async function drainRun(
     await reader.cancel("drain stopped").catch(() => {});
     return await finish();
   }
+}
+
+/**
+ * What a session reports on `stderr` when its container went away under it:
+ * the stream ended with no `exit` event, or a re-attach found the exec gone.
+ *
+ * **It comes first, because the process did not end on its own.** What it had
+ * printed is not why it ended, and without this it is all a report shows — so
+ * whatever came last, a startup warning included, reads as the cause.
+ *
+ * **What it must not say is that starting over is safe.** A session is an
+ * agent: by the time its container went, it may have written files that reached
+ * the workspace, committed, pushed, or called something outside altogether.
+ * None of that is visible from here — only that the process is gone — so the
+ * honest report is what is known plus where to look, and the decision belongs
+ * to whoever can read the durable state.
+ */
+export function containerLost(printed = ""): string {
+  const said = printed.trim();
+  return (
+    "the container holding this session was stopped or replaced before the " +
+    "session finished — a deploy or a container rollout does this — so the " +
+    "process was ended from outside and reported no result. What it had " +
+    "already written to the workspace is still there, and anything it did " +
+    "outside the workspace — a commit, a push, a request — has already " +
+    "happened. Check the workspace and the branch before starting this work " +
+    "again, since a rerun repeats from the beginning." +
+    (said
+      ? `\n\nWhat it had printed by then, which is not why it ended:\n${said}`
+      : "")
+  );
 }
 
 function sleep(ms: number): Promise<void> {
