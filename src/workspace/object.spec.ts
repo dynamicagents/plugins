@@ -1266,6 +1266,41 @@ describe("releasing a container", () => {
     });
   });
 
+  /**
+   * A detached session in the container makes no call in while it works, so
+   * only its host can say it is there.
+   */
+  it("defers while held, and releases at the last unhold", async () => {
+    const stub = freshWorkspace("release-held");
+    const until = Date.now() + 60_000;
+    await stub.hold("run-a", until);
+    await stub.hold("run-b", until);
+
+    expect(await stub.releaseContainer()).toEqual({ released: false });
+    expect(await stub.unhold("run-a")).toEqual({ released: false });
+    expect(await stub.unhold("run-b")).toEqual({ released: true });
+  });
+
+  it("keeps a container used since the release was asked for", async () => {
+    const stub = freshWorkspace("release-held-then-used");
+    await stub.hold("run", Date.now() + 60_000);
+    expect(await stub.releaseContainer()).toEqual({ released: false });
+
+    // Used again after the ask: whoever used it asks for its own release.
+    await runInDurableObject(stub, (_instance, state) =>
+      state.storage.put("lastUsedAt", Date.now() + 1_000)
+    );
+
+    expect(await stub.unhold("run")).toEqual({ released: false });
+  });
+
+  it("ignores a hold past its time", async () => {
+    const stub = freshWorkspace("release-hold-lapsed");
+    await stub.hold("run", Date.now() - 1);
+
+    expect(await stub.releaseContainer()).toEqual({ released: true });
+  });
+
   it("is safe on a workspace nothing has ever opened", async () => {
     // Reached on a task that failed before it cloned anything. Nothing to stop and
     // nothing to drain, and a teardown that threw here would be reported against

@@ -459,6 +459,33 @@ export class InstallJob {
     }
     const { startedAt } = reserved;
     const run = this.#job.generation(startedAt);
+    this.#owned.add(startedAt);
+    let handed = false;
+    try {
+      return await this.#spawnReserved(req, run, reserved, own, () => {
+        handed = true;
+      });
+    } finally {
+      if (!handed) this.#owned.delete(startedAt);
+    }
+  }
+
+  /**
+   * Everything after the reservation: prepare, spawn, and hand the command to
+   * `own`. Split out so {@link #beginInstall} can hold the generation for exactly
+   * this long — `handing` is called as the drain takes it over.
+   */
+  async #spawnReserved(
+    req: { dir: string; repo?: string },
+    run: InstallRun,
+    reserved: { startedAt: number; previous: InstallState },
+    own: (
+      handle: WorkspaceRuntimeExecHandle<"utf8">,
+      startedAt: number
+    ) => void | Promise<void>,
+    handing: () => void
+  ): Promise<InstallState> {
+    const { startedAt } = reserved;
 
     // Nothing trusts the interception CA here, deliberately: the workspace's own
     // `ready` does it, above every early return in this method. An install
@@ -524,6 +551,7 @@ export class InstallJob {
       return await this.#settle(run, failed);
     }
 
+    handing();
     await own(handle, startedAt);
 
     return state;
@@ -728,11 +756,9 @@ export class InstallJob {
       return repaired ? failed : await this.#job.read();
     }
 
-    if (!this.#draining) {
-      await this.#reattachInstall(state.startedAt);
-      return await this.#job.read();
-    }
-    return state;
+    if (await this.#drivenHere(state.startedAt)) return state;
+    await this.#reattachInstall(state.startedAt);
+    return await this.#job.read();
   }
 
   /**
@@ -746,8 +772,29 @@ export class InstallJob {
     return await this.#job.armedAt();
   }
 
-  /** True while this isolate holds the drain, so the watchdog leaves it alone. */
-  #draining = false;
+  /**
+   * The generations this isolate is driving: reserved, taken over from the
+   * alarm's placeholder, or draining — until the drain ends.
+   *
+   * The re-attach is for a `running` record nobody here is driving, which is one
+   * a dead isolate left. Asked of a generation that is reserved but not yet
+   * spawned, it finds no exec, or the last container's, and writes `failed` over
+   * an install about to start, whose own verdict is then discarded as
+   * superseded. Owning from the reservation rather than from the drain is what
+   * closes that window: resolving and spawning await the container for seconds.
+   */
+  readonly #owned = new Set<number>();
+
+  /**
+   * Whether a `running` record's install is this isolate's to finish: one it
+   * owns, or the alarm's placeholder still waiting for the alarm, whose
+   * `startedAt` is the arming stamp.
+   */
+  async #drivenHere(startedAt: number): Promise<boolean> {
+    return (
+      this.#owned.has(startedAt) || (await this.#job.armedAt()) === startedAt
+    );
+  }
 
   async #drainInstall(
     handle: WorkspaceRuntimeExecHandle<"utf8">,
@@ -761,7 +808,7 @@ export class InstallJob {
      */
     startedAt: number
   ): Promise<void> {
-    this.#draining = true;
+    this.#owned.add(startedAt);
     const context = await this.#job.context();
     const command = context?.command ?? "(unknown)";
 
@@ -891,7 +938,7 @@ export class InstallJob {
         error: String(err)
       });
     } finally {
-      this.#draining = false;
+      this.#owned.delete(startedAt);
       handle[Symbol.dispose]();
     }
   }
@@ -908,7 +955,7 @@ export class InstallJob {
     /** The running record's `startedAt`: the generation it picks up. */
     startedAt: number
   ): Promise<void> {
-    if (this.#draining) return;
+    if (await this.#drivenHere(startedAt)) return;
     try {
       const handle = await this.deps
         .workspace()
@@ -964,21 +1011,28 @@ export class InstallJob {
   async onRun(): Promise<void> {
     const context = await this.#job.context();
     const armedAt = await this.#job.armedAt();
-    await this.#job.clearArmed();
-    if (!context?.dir || armedAt === undefined) return;
+    // Owned before the arm is cleared: from then until the reservation takes it
+    // over, the placeholder is a `running` record that only this call will finish.
+    if (armedAt !== undefined) this.#owned.add(armedAt);
+    try {
+      await this.#job.clearArmed();
+      if (!context?.dir || armedAt === undefined) return;
 
-    const state = await this.#awaited(
-      {
+      const state = await this.#awaited(
+        {
+          dir: context.dir,
+          ...(context.repo ? { repo: context.repo } : {})
+        },
+        armedAt
+      );
+      console.info(`[${this.deps.tag()}] armed reinstall finished`, {
+        id: this.deps.id(),
         dir: context.dir,
-        ...(context.repo ? { repo: context.repo } : {})
-      },
-      armedAt
-    );
-    console.info(`[${this.deps.tag()}] armed reinstall finished`, {
-      id: this.deps.id(),
-      dir: context.dir,
-      state: state.state
-    });
+        state: state.state
+      });
+    } finally {
+      if (armedAt !== undefined) this.#owned.delete(armedAt);
+    }
   }
 
   /** The watchdog: an install still running that nobody is draining. */

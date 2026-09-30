@@ -288,3 +288,102 @@ describe("one install at a time", () => {
     );
   });
 });
+
+/**
+ * The re-attach is for a `running` record a dead isolate left. Asked of an
+ * install this isolate is still starting, it reaches the last container's exec,
+ * or none, and fails an install that is about to run.
+ */
+describe("an install this isolate is driving is not re-attached", () => {
+  const COMMAND = "npm ci --no-audit --no-fund";
+
+  /** A checkout that installs, a finished command, and a count of re-attaches. */
+  function drivenWorkspace(probe?: () => Promise<void>) {
+    const present = new Set([
+      "/workspace/repo/package.json",
+      "/workspace/repo/package-lock.json"
+    ]);
+    const reattached: string[] = [];
+    const workspace = {
+      fs: {
+        exists: async (path: string) => {
+          await probe?.();
+          return present.has(path);
+        },
+        readFile: async () => "{}"
+      },
+      runtime: {
+        exec: async () => ({
+          result: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+          [Symbol.dispose]: () => {}
+        }),
+        getExec: async (id: string) => {
+          reattached.push(id);
+          throw Object.assign(new Error(`execution ${id} was lost`), {
+            code: "EEXEC_LOST"
+          });
+        }
+      }
+    } as unknown as Workspace;
+    return { workspace, reattached };
+  }
+
+  it("leaves an armed install to the alarm", async () => {
+    const stub = freshWorkspace("driven-armed");
+    const { workspace, reattached } = drivenWorkspace();
+    const state = await runInDurableObject(stub, async (_instance, s) => {
+      await seedFinishedInstall(s.storage, { tree: true });
+      const job = jobOn(s.storage, workspace);
+      await job.containerGone();
+      // What `advisories()` does: arm, then read the state straight back.
+      await job.armIfTreeMissing();
+      return await job.state();
+    });
+    expect(reattached).toEqual([]);
+    expect(state.state).toBe("running");
+  });
+
+  it("leaves an install it has reserved but not yet spawned", async () => {
+    const stub = freshWorkspace("driven-reserved");
+    let open = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const { workspace, reattached } = drivenWorkspace(() => gate);
+    const during = await runInDurableObject(stub, async (_instance, s) => {
+      const job = jobOn(s.storage, workspace);
+      const starting = job.start({ dir: "/workspace/repo" });
+      // Reserved, and held in the probe that comes before the spawn.
+      while ((await job.read()).state !== "running") await scheduler.wait(1);
+      const read = await job.state();
+      open();
+      await starting;
+      return read;
+    });
+    expect(reattached).toEqual([]);
+    expect(during.state).toBe("running");
+  });
+
+  it("runs the alarm's placeholder without re-attaching to it", async () => {
+    const stub = freshWorkspace("driven-alarm");
+    const { workspace, reattached } = drivenWorkspace();
+    const after = await runInDurableObject(stub, async (_instance, s) => {
+      const armedAt = Date.now();
+      await s.storage.put("install", {
+        state: "running",
+        command: COMMAND,
+        startedAt: armedAt
+      } satisfies InstallState);
+      await s.storage.put("install:armed", armedAt);
+      await s.storage.put("install:context", {
+        dir: "/workspace/repo",
+        command: COMMAND
+      });
+      const job = jobOn(s.storage, workspace);
+      await job.onRun();
+      return await job.read();
+    });
+    expect(reattached).toEqual([]);
+    expect(after.state).toBe("done");
+  });
+});
