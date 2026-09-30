@@ -684,6 +684,27 @@ describe("a reading session", () => {
     expect(reports).toHaveLength(1);
   });
 
+  it("stops waiting when the turn is cancelled mid-read", async () => {
+    const cancel = new AbortController();
+    let asked = false;
+    const box = container(scripts());
+    const { model, reports } = harness(box, {
+      kind: "read",
+      advisories: () => {
+        asked = true;
+        return new Promise(() => {});
+      }
+    });
+
+    const running = streamed(model, call(undefined, cancel.signal));
+    await vi.waitFor(() => expect(asked).toBe(true));
+    cancel.abort(new Error("cancelled"));
+
+    await expect(running).rejects.toThrow(/cancelled/);
+    expect(box.calls.exec).toEqual([]);
+    expect(reports).toEqual([]);
+  });
+
   it("is a writing session's host's concern, not its own", async () => {
     const advisories = vi.fn(async () => [building]);
     const box = container(scripts());

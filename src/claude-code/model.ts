@@ -350,12 +350,13 @@ const INSTALL_POLL_MS = 5_000;
 
 /**
  * Wait while the workspace has anything transient to wait out — an install in
- * flight — the same test `execGate` in `../computer/gate.ts` holds a command on.
+ * flight — by the test {@link file://../computer/gate.ts execGate} holds a
+ * command on.
  *
  * Bounded by the session's own ceiling: a wait longer than any session could
- * run is not one worth finishing. The install's own timeout and watchdog end a
- * stuck one before that. A read that fails stops the wait rather than the run:
- * the copy is then made as the workspace is, which is what happened before.
+ * run is not one worth finishing, and the install's own timeout and watchdog
+ * end a stuck one before that. A read that fails ends the wait, not the run, and
+ * the copy is made as the workspace is. A cancel ends both, mid-read included.
  */
 async function untilInstalled(
   advisories: () => Promise<readonly WorkspaceAdvisory[]>,
@@ -369,8 +370,11 @@ async function untilInstalled(
     signal?.throwIfAborted();
     let current: readonly WorkspaceAdvisory[];
     try {
-      current = await advisories();
+      current = await raced(advisories(), signal);
     } catch (err) {
+      // Open on a failed read, never on a cancel: going on would make the copy
+      // for a run its caller has given up on.
+      if (signal?.aborted) throw err;
       console.warn("[claude-code] could not read the workspace's install", {
         runId,
         err: String(err)
@@ -400,6 +404,19 @@ async function untilInstalled(
     }
     await pause(Math.min(INSTALL_POLL_MS, ceilingMs - waitedMs), signal);
   }
+}
+
+/** `promise`, or `signal`'s reason the moment it aborts. */
+function raced<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    if (signal.aborted) return onAbort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 /** `ms`, or until `signal` aborts, which rejects with its reason. */

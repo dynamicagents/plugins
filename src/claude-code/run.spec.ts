@@ -569,7 +569,7 @@ describe("drainRun", () => {
 
   /**
    * What the process printed is not why it ended, and reported alone it reads
-   * as the cause — a startup warning did, once.
+   * as the cause.
    */
   it("says the container went, ahead of what the process had printed", async () => {
     const warning =

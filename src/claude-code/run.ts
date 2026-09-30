@@ -1078,10 +1078,8 @@ export async function drainRun(
  * the stream ended with no `exit` event, or a re-attach found the exec gone.
  *
  * **It comes first, because the process did not end on its own.** What it had
- * printed is not why it ended, and without this it is all a report shows: a
- * planning session stopped by a deploy's container rollout reported Claude
- * Code's startup warning about an untrusted workspace, and was read as having
- * failed on trust.
+ * printed is not why it ended, and without this it is all a report shows — so
+ * whatever came last, a startup warning included, reads as the cause.
  *
  * **What it must not say is that starting over is safe.** A session is an
  * agent: by the time its container went, it may have written files that reached
