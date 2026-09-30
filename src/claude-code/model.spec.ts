@@ -342,17 +342,39 @@ describe("claudeCodeModel", () => {
         next: { events: all }
       }
     });
-    let opened = 0;
+    // Each open is its own runtime, recording the calls made through it.
+    const opened: { calls: string[]; disposed: boolean }[] = [];
     const { model, notes, reports } = harness(box, {
       workspace: async () => {
-        opened++;
-        return { runtime: box.runtime, [Symbol.dispose]: () => {} };
+        const mine = { calls: [] as string[], disposed: false };
+        opened.push(mine);
+        const runtime = new Proxy(box.runtime, {
+          get(target, name) {
+            const value = Reflect.get(target, name) as unknown;
+            if (typeof value !== "function") return value;
+            return (...args: unknown[]) => {
+              mine.calls.push(String(name));
+              return (value as (...a: unknown[]) => unknown).apply(
+                target,
+                args
+              );
+            };
+          }
+        });
+        return {
+          runtime,
+          [Symbol.dispose]: () => {
+            mine.disposed = true;
+          }
+        };
       }
     });
 
     expect(textOf(await streamed(model))).toBe("report 1");
 
-    expect(opened).toBe(2);
+    // The cut attempt ran on the first; the re-attach went through the second.
+    expect(opened.map((w) => w.calls)).toEqual([["exec"], ["exec", "getExec"]]);
+    expect(opened.map((w) => w.disposed)).toEqual([true, true]);
     expect(box.calls.killed).toEqual([]);
     // Cut inside the checkpoint interval, so nothing was stored and the
     // re-attach reads from the start; the transcript dedupes what is refiled.
