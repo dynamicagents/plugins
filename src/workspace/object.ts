@@ -1164,15 +1164,19 @@ export abstract class WorkspaceObjectBase<
    * used since, in which case the next release is asked for by whoever used it.
    */
   async unhold(key: string): Promise<{ released: boolean }> {
+    // Read and written with no other I/O between, so the object's input gate
+    // keeps another call from interleaving: the map written is the one decided on.
     const holds = await this.#holdMap();
     delete holds[key];
     await this.ctx.storage.put(HOLDS_KEY, holds);
-    if ((await this.#liveHolds()).length > 0) return { released: false };
+    if (Object.keys(holds).length > 0) return { released: false };
 
     const asked = await this.ctx.storage.get<number>(RELEASE_ASKED_KEY);
     if (asked === undefined) return { released: false };
+    // A use in the same millisecond as the ask counts as after it: wrongly
+    // keeping a container costs its idle window, wrongly stopping one a session.
     const lastUsedAt = (await this.ctx.storage.get<number>("lastUsedAt")) ?? 0;
-    if (lastUsedAt > asked) {
+    if (lastUsedAt >= asked) {
       await this.ctx.storage.delete(RELEASE_ASKED_KEY);
       return { released: false };
     }
@@ -1587,6 +1591,14 @@ export abstract class WorkspaceObjectBase<
       await this.#containerIdle.set(
         new Date(Date.now() + this.#containerIdleMs)
       );
+      return;
+    }
+
+    // Work nothing calls in for, which the deadline cannot measure: come back
+    // when the first hold lapses, without counting the hold as use.
+    const lapses = Object.values(await this.#holdMap());
+    if (lapses.length > 0) {
+      await this.#containerIdle.set(new Date(Math.min(...lapses)));
       return;
     }
 

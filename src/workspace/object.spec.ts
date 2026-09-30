@@ -1286,12 +1286,37 @@ describe("releasing a container", () => {
     await stub.hold("run", Date.now() + 60_000);
     expect(await stub.releaseContainer()).toEqual({ released: false });
 
-    // Used again after the ask: whoever used it asks for its own release.
-    await runInDurableObject(stub, (_instance, state) =>
-      state.storage.put("lastUsedAt", Date.now() + 1_000)
+    // Used again after the ask — here in the same millisecond, which counts as
+    // after: whoever used it asks for its own release.
+    await runInDurableObject(stub, async (_instance, state) =>
+      state.storage.put(
+        "lastUsedAt",
+        await state.storage.get<number>("container-release-asked")
+      )
     );
 
     expect(await stub.unhold("run")).toEqual({ released: false });
+  });
+
+  it("keeps a held container past its idle deadline", async () => {
+    const stub = freshWorkspace("idle-held");
+    const dir = "/workspace/probe";
+    await seedGitCheckout(stub, dir);
+    await stub.hold("run", Date.now() + 60_000);
+    await runInDurableObject(stub, async (instance, state) => {
+      await state.storage.put("install:tree", { dir, fingerprint: "x", at: 0 });
+      await state.storage.put("lastUsedAt", Date.now() - 24 * 60 * 60_000);
+      expect(forceDue(state, "containerIdle")).toBeGreaterThan(0);
+      await instance.alarm?.();
+    });
+
+    // Stopping the container drops the tree record, so it standing is the
+    // container standing.
+    expect(
+      await runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("install:tree")
+      )
+    ).toBeDefined();
   });
 
   it("ignores a hold past its time", async () => {
