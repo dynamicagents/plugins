@@ -795,8 +795,9 @@ export async function drainRun(
    * one inside the read loop would stall the drain for as long as the session
    * keeps talking. A rejected note does not stop the drain — a note is
    * best-effort — but it is logged, and it ends the checkpoints: see
-   * `DrainOptions.onCheckpoint`. Settled before the drain returns, so nothing is
-   * cut short when it unwinds.
+   * `DrainOptions.onCheckpoint`. Settled before the drain returns or throws, so
+   * nothing is cut short when it unwinds, and nothing lands behind a drain that
+   * re-attaches after it.
    */
   let sunk: Promise<void> = Promise.resolve();
   /** Set once a note is rejected — see `DrainOptions.onCheckpoint`. */
@@ -1017,6 +1018,10 @@ export async function drainRun(
       }
       consume(next.value);
     }
+  } catch (err) {
+    // See `sunk`. It never rejects: each link catches its own.
+    await sunk;
+    throw err;
   } finally {
     reader.releaseLock();
   }

@@ -119,6 +119,43 @@ function liveHandle(script: readonly Event[]): {
   };
 }
 
+/**
+ * A handle whose stream breaks once its script is read, as a cut RPC stream
+ * does. Pulled one event per read, because `controller.error` discards whatever
+ * is still queued.
+ */
+function brokenHandle(script: readonly Event[]): {
+  handle: WorkspaceRuntimeExecHandle<"utf8">;
+  reads: () => number;
+} {
+  let reads = 0;
+  const stream = new ReadableStream<Event>(
+    {
+      pull(controller) {
+        const event = script[reads++];
+        if (event) controller.enqueue(event);
+        else
+          controller.error(
+            new Error(
+              "ReadableStream received over RPC disconnected prematurely."
+            )
+          );
+      }
+    },
+    { highWaterMark: 0 }
+  );
+  const handle = Object.assign(stream, {
+    id: EXEC,
+    backend: "container",
+    result: async () => {
+      throw new Error("not used by the drain");
+    },
+    kill: async () => {},
+    [Symbol.dispose]: () => {}
+  }) as unknown as WorkspaceRuntimeExecHandle<"utf8">;
+  return { handle, reads: () => reads };
+}
+
 const line = (value: unknown) => `${JSON.stringify(value)}\n`;
 const assistant = (text: string) =>
   line({ type: "assistant", message: { content: [{ type: "text", text }] } });
@@ -528,6 +565,41 @@ describe("drainRun", () => {
     if (!outcome.done) throw new Error("unreachable");
     expect(outcome.exitCode).toBe(-1);
     expect(outcome.result).toBeUndefined();
+  });
+
+  /**
+   * A caller may re-attach on a broken stream's error, so this drain's notes
+   * must not still be landing behind the next drain's — the error waits for
+   * them, as an outcome does.
+   */
+  it("files its queued notes before a broken stream's error leaves", async () => {
+    const { handle, reads } = brokenHandle([
+      stdout(1, assistant("half a job"))
+    ]);
+    let release!: () => void;
+    const posted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const filed: string[] = [];
+    let settled = false;
+
+    const drained = drainRun(handle, FRESH, {
+      onProgress: async (note) => {
+        await posted;
+        filed.push(note.key);
+      }
+    }).finally(() => {
+      settled = true;
+    });
+
+    // The stream has broken, and every microtask behind that has run.
+    await vi.waitFor(() => expect(reads()).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    release();
+    await expect(drained).rejects.toThrow(/disconnected prematurely/);
+    expect(filed).toEqual(["claude:0"]);
   });
 
   it("resumes from a cursor without re-emitting what the last drain showed", async () => {
