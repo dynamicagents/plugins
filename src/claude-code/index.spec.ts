@@ -396,6 +396,7 @@ describe("construction", () => {
       workspace: async () => {
         throw new Error("not opened");
       },
+      advisories: async () => [],
       storage: {} as DurableObjectStorage,
       runId: "r",
       kind: "write",

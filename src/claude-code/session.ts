@@ -3,6 +3,7 @@ import { credentialPool } from "./credentials.js";
 import type { CredentialStore, Lead } from "./credentials.js";
 import {
   attachRun,
+  containerLost,
   drainRun,
   execIdFor,
   followUpExecIdFor,
@@ -169,14 +170,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
      * terminal outcome ends it at the first attempt instead, with the exit code
      * the runtime uses for a killed process and an explanation on `stderr`,
      * which is exactly the channel a session that died without a result line
-     * already reports through.
-     *
-     * **What it must not say is that starting over is safe.** A session is an
-     * agent: by the time its container went, it may have written files that
-     * reached the workspace, committed, pushed, or called something outside
-     * altogether. None of that is visible from here — only that the attachment
-     * is gone — so the honest report is what is known plus where to look, and
-     * the decision belongs to whoever can read the durable state.
+     * already reports through. The wording is {@link containerLost}'s.
      */
     async resume(
       runtime: SessionRuntime,
@@ -197,14 +191,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
           cursor,
           progress: [],
           exitCode: -1,
-          stderr:
-            "the container holding this session was replaced, so the session " +
-            "was lost before it finished and cannot be re-attached. What it had " +
-            "already written to the workspace is still there, and anything it " +
-            "did outside the workspace — a commit, a push, a request — has " +
-            "already happened. Check the workspace and the branch before " +
-            "starting this work again, since a rerun repeats from the " +
-            "beginning."
+          stderr: containerLost()
         };
       }
       using session = handle;

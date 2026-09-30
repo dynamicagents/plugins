@@ -568,6 +568,23 @@ describe("drainRun", () => {
   });
 
   /**
+   * What the process printed is not why it ended, and reported alone it reads
+   * as the cause — a startup warning did, once.
+   */
+  it("says the container went, ahead of what the process had printed", async () => {
+    const warning =
+      "Ignoring 3 permissions.allow entries from .claude/settings.json";
+    const outcome = await drainRun(
+      fakeHandle([stderrOut(1, `${warning}\n`)]),
+      FRESH
+    );
+
+    if (!outcome.done) throw new Error("unreachable");
+    expect(outcome.stderr).toMatch(/^the container holding this session/);
+    expect(outcome.stderr).toContain(`which is not why it ended:\n${warning}`);
+  });
+
+  /**
    * A caller may re-attach on a broken stream's error, so this drain's notes
    * must not still be landing behind the next drain's — the error waits for
    * them, as an outcome does.

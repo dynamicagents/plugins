@@ -1,6 +1,7 @@
 import type { LanguageModel } from "ai";
 import { isPlatformTransientError } from "agents";
-import type { ClaudeCodeConfig } from "./config.js";
+import { shapeOf, type WorkspaceAdvisory } from "../workspace/advisory.js";
+import { DEFAULT_TIMEOUT_MS, type ClaudeCodeConfig } from "./config.js";
 import type { ClaudeCodeResult, RateLimitInfo } from "./events.js";
 import { claudeCodeSession, requireCredentials } from "./session.js";
 import {
@@ -75,6 +76,16 @@ export interface ClaudeCodeModelOptions {
   runId: string;
   /** A reading session runs in a throwaway copy of `dir`; see `./copy.ts`. */
   kind: "write" | "read";
+  /**
+   * What is true about the workspace: its object's `advisories()`.
+   *
+   * A reading session waits here while an install is in flight, before its
+   * brief and its copy are made. The copy takes the parent's dependency trees as
+   * they are at that moment, and nothing reaches it after: made a moment
+   * earlier, it has no tree or half of one for the whole session. Required, so
+   * a host cannot leave its reading sessions copying a workspace mid-install.
+   */
+  advisories: () => Promise<readonly WorkspaceAdvisory[]>;
   /** The checkout. */
   dir: string;
   /**
@@ -220,6 +231,19 @@ export function claudeCodeModel(
 
     let ended = await storage.get<SessionEnd>(KEYS.session);
     if (!ended) {
+      // Before the brief, so the brief describes the workspace the copy is
+      // made from. Skipped once the session has a cursor: its copy is made.
+      if (
+        options.kind === "read" &&
+        (await storage.get<DrainCursor>(KEYS.cursor)) === undefined
+      ) {
+        await untilInstalled(
+          options.advisories,
+          options.config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+          runId,
+          signal
+        );
+      }
       let prompt = await storage.get<string>(KEYS.brief);
       if (prompt === undefined) {
         const task = lastUserText(call.prompt);
@@ -319,6 +343,78 @@ export function claudeCodeModel(
       };
     }
   };
+}
+
+/** How often a waiting reading session asks again. */
+const INSTALL_POLL_MS = 5_000;
+
+/**
+ * Wait while the workspace has anything transient to wait out — an install in
+ * flight — the same test `execGate` in `../computer/gate.ts` holds a command on.
+ *
+ * Bounded by the session's own ceiling: a wait longer than any session could
+ * run is not one worth finishing. The install's own timeout and watchdog end a
+ * stuck one before that. A read that fails stops the wait rather than the run:
+ * the copy is then made as the workspace is, which is what happened before.
+ */
+async function untilInstalled(
+  advisories: () => Promise<readonly WorkspaceAdvisory[]>,
+  ceilingMs: number,
+  runId: string,
+  signal?: AbortSignal
+): Promise<void> {
+  const since = Date.now();
+  let waiting = false;
+  for (;;) {
+    signal?.throwIfAborted();
+    let current: readonly WorkspaceAdvisory[];
+    try {
+      current = await advisories();
+    } catch (err) {
+      console.warn("[claude-code] could not read the workspace's install", {
+        runId,
+        err: String(err)
+      });
+      return;
+    }
+    const waitedMs = Date.now() - since;
+    if (!current.some((a) => shapeOf(a).transient)) {
+      if (waiting) {
+        console.info("[claude-code] done waiting for the install", {
+          runId,
+          waitedMs
+        });
+      }
+      return;
+    }
+    if (waitedMs >= ceilingMs) {
+      console.warn("[claude-code] still installing — copying as it is", {
+        runId,
+        waitedMs
+      });
+      return;
+    }
+    if (!waiting) {
+      console.info("[claude-code] waiting for the install", { runId });
+      waiting = true;
+    }
+    await pause(Math.min(INSTALL_POLL_MS, ceilingMs - waitedMs), signal);
+  }
+}
+
+/** `ms`, or until `signal` aborts, which rejects with its reason. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**

@@ -360,6 +360,9 @@ export class AnthropicCodingWriterChild extends SubAgent<Env> {
     return claudeCodeModel({
       config: CLAUDE_CODE_SESSION,
       workspace: () => openWorkspace(stub) as Promise<SessionWorkspace>,
+      // What is true about the workspace. A reading session waits out an
+      // install in flight before its copy is made.
+      advisories: () => stub.advisories(),
       storage: this.ctx.storage,
       runId: this.name,
       kind: "write",
@@ -494,6 +497,12 @@ anything is where it runs, not what it may do: a copy of the parent's checkout o
 container disk, outside the workspace mount, deleted when the session ends — see
 `copy.ts`. Every mode that refuses an edit also refuses the commands a question
 usually needs answered.
+
+**A reading session waits for an install in flight.** Its copy takes the
+parent's dependency trees as they are when it is made, so the model polls
+`advisories` first and makes the brief and the copy once no install is running
+— bounded by the session's `timeoutMs`. `untilInstalled` in `./model.ts` has the
+rest.
 
 > **The container runs as root, and that changes how the flag has to be passed.**
 > The CLI refuses to bypass its permission checks under uid 0 unless `IS_SANDBOX=1`
