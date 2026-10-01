@@ -571,6 +571,20 @@ describe("drainRun", () => {
    * What the process printed is not why it ended, and reported alone it reads
    * as the cause.
    */
+  it("says a signal ended a session that reported nothing", async () => {
+    const warning =
+      "Ignoring 3 permissions.allow entries from .claude/settings.json";
+    const outcome = await drainRun(
+      fakeHandle([stderrOut(1, `${warning}\n`), exit(2, 143)]),
+      FRESH
+    );
+
+    if (!outcome.done) throw new Error("unreachable");
+    expect(outcome.exitCode).toBe(143);
+    expect(outcome.stderr).toMatch(/^the process was stopped by SIGTERM/);
+    expect(outcome.stderr).toContain(`which is not why it ended:\n${warning}`);
+  });
+
   it("says the container went, ahead of what the process had printed", async () => {
     const warning =
       "Ignoring 3 permissions.allow entries from .claude/settings.json";

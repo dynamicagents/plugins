@@ -183,6 +183,12 @@ export const IDLE_RECLAIM_MS = 7 * 24 * 60 * 60 * 1000;
 /** Where the container-idle deadline keeps its current schedule id. */
 const CONTAINER_IDLE_ID = "container-idle-id";
 
+/** The holds on the container — see `hold` — as key → the time each lapses. */
+const HOLDS_KEY = "container-holds";
+
+/** When a release was asked for while a hold stood, for the last `unhold`. */
+const RELEASE_ASKED_KEY = "container-release-asked";
+
 /** Where the container-warm wake keeps its current schedule id. */
 const CONTAINER_WARM_ID = "container-warm-id";
 
@@ -1096,9 +1102,23 @@ export abstract class WorkspaceObjectBase<
    * `released: false` means the container is still up and the standing deadline
    * still owns it — an install is running, or a pull is still moving blocks. Both
    * resolve themselves: the drain re-arms the deadline to come back and finish,
-   * which is the same path `#onContainerIdle` takes.
+   * which is the same path `#onContainerIdle` takes. Under a {@link hold} the
+   * release is deferred instead, to the last `unhold`.
    */
   async releaseContainer(): Promise<{ released: boolean }> {
+    // Work this object cannot see. Deferred rather than refused: the last
+    // `unhold` releases, unless the workspace is used again first.
+    const holds = await this.#liveHolds();
+    if (holds.length > 0) {
+      await this.ctx.storage.put(RELEASE_ASKED_KEY, Date.now());
+      console.info(`[${this.#tag}] release deferred while held`, {
+        id: this.ctx.id.toString(),
+        holds
+      });
+      return { released: false };
+    }
+    await this.ctx.storage.delete(RELEASE_ASKED_KEY);
+
     // An install in flight is "in use" even though nothing has called in.
     // Same rule, and same reason, as `#onContainerIdle`.
     const install = await this.#install.read();
@@ -1116,6 +1136,66 @@ export abstract class WorkspaceObjectBase<
     await this.#containerIdle.clear();
     await this.#stopContainer("idle");
     return { released: true };
+  }
+
+  /**
+   * Keep the container up for work this object cannot see, until `untilMs` or
+   * {@link unhold}.
+   *
+   * A session a host starts here — a Claude Code reading session in its copy —
+   * runs detached: nothing calls in while it works, and the runtime cannot list
+   * what is running. So a host done with the workspace cannot tell that the
+   * container is not, and {@link releaseContainer} would stop the session with
+   * it. A hold is the host saying so. It defers a release; it is not use, so it
+   * does not touch, and the idle deadline already outlasts a session.
+   *
+   * `untilMs` bounds a hold whose `unhold` never comes — a run cut between its
+   * start and its end. Past it the hold is ignored.
+   */
+  async hold(key: string, untilMs: number): Promise<void> {
+    const holds = await this.#holdMap();
+    holds[key] = untilMs;
+    await this.ctx.storage.put(HOLDS_KEY, holds);
+  }
+
+  /**
+   * The work a {@link hold} stood for is over. When it was the last hold, a
+   * release asked for while it stood happens now — unless the workspace was
+   * used since, in which case the next release is asked for by whoever used it.
+   */
+  async unhold(key: string): Promise<{ released: boolean }> {
+    // Read and written with no other I/O between, so the object's input gate
+    // keeps another call from interleaving: the map written is the one decided on.
+    const holds = await this.#holdMap();
+    delete holds[key];
+    await this.ctx.storage.put(HOLDS_KEY, holds);
+    if (Object.keys(holds).length > 0) return { released: false };
+
+    const asked = await this.ctx.storage.get<number>(RELEASE_ASKED_KEY);
+    if (asked === undefined) return { released: false };
+    // A use in the same millisecond as the ask counts as after it: wrongly
+    // keeping a container costs its idle window, wrongly stopping one a session.
+    const lastUsedAt = (await this.ctx.storage.get<number>("lastUsedAt")) ?? 0;
+    if (lastUsedAt >= asked) {
+      await this.ctx.storage.delete(RELEASE_ASKED_KEY);
+      return { released: false };
+    }
+    return await this.releaseContainer();
+  }
+
+  /** Every hold, lapsed ones pruned. */
+  async #holdMap(): Promise<Record<string, number>> {
+    const now = Date.now();
+    const stored =
+      (await this.ctx.storage.get<Record<string, number>>(HOLDS_KEY)) ?? {};
+    return Object.fromEntries(
+      Object.entries(stored).filter(([, until]) => until > now)
+    );
+  }
+
+  /** The keys of the holds still standing. */
+  async #liveHolds(): Promise<string[]> {
+    return Object.keys(await this.#holdMap());
   }
 
   /**
@@ -1511,6 +1591,14 @@ export abstract class WorkspaceObjectBase<
       await this.#containerIdle.set(
         new Date(Date.now() + this.#containerIdleMs)
       );
+      return;
+    }
+
+    // Work nothing calls in for, which the deadline cannot measure: come back
+    // when the first hold lapses, without counting the hold as use.
+    const lapses = Object.values(await this.#holdMap());
+    if (lapses.length > 0) {
+      await this.#containerIdle.set(new Date(Math.min(...lapses)));
       return;
     }
 

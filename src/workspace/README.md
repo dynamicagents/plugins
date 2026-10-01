@@ -178,9 +178,18 @@ object, so renaming one is a storage migration rather than a refactor.
 | `checkout`                                                                   | where the work is, and whether it is a clone or a scratchpad |
 | `lastUsedAt`                                                                 | what the idle clock measures                                 |
 | `idle-reclaim-id`, `container-idle-id`, `sync-drain-id`                      | the schedule row each deadline currently stands as           |
+| `container-holds`, `container-release-asked`                                 | holds on the container, and a release deferred behind them   |
 
 The scheduler owns its own tables beneath these. A subclass may store whatever it
 likes alongside, and one does: a credential pool's state, per workspace.
+
+### A hold keeps the container up for work the object cannot see
+
+A session a host runs detached in the container, such as a Claude Code reading
+session in its copy, makes no call into the object while it works, and the runtime
+cannot list it. So `hold(key, untilMs)` records it, and `releaseContainer()` then
+defers: the last `unhold(key)` releases, unless the workspace was used in between.
+`untilMs` bounds a hold whose `unhold` never comes.
 
 ### `running` is the state that blocks work
 

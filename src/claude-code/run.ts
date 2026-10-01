@@ -963,7 +963,9 @@ export async function drainRun(
           // said everything worth saying, and its stderr is the CLI's own
           // diagnostic chatter — surfacing that beside a perfectly good report
           // would bury the report.
-          ...(!result && stderr ? { stderr } : {})
+          ...(!result && (SIGNALS[code] || stderr)
+            ? { stderr: explainExit(code, stderr) }
+            : {})
         };
   };
 
@@ -1074,30 +1076,57 @@ export async function drainRun(
 }
 
 /**
+ * The signal behind each exit code `computerd` maps one to — the ones a process
+ * is stopped from outside with.
+ */
+const SIGNALS: Record<number, string> = { 143: "SIGTERM", 137: "SIGKILL" };
+
+/** A resultless session's `stderr`, explained when a signal ended it. */
+function explainExit(code: number, stderr: string): string {
+  const signal = SIGNALS[code];
+  if (!signal) return stderr;
+  return endedFromOutside(
+    `the process was stopped by ${signal} before it reported a result — its ` +
+      "container stopping, its time limit or a cancel does this.",
+    stderr
+  );
+}
+
+/**
  * What a session reports on `stderr` when its container went away under it:
  * the stream ended with no `exit` event, or a re-attach found the exec gone.
- *
- * **It comes first, because the process did not end on its own.** What it had
- * printed is not why it ended, and without this it is all a report shows — so
- * whatever came last, a startup warning included, reads as the cause.
- *
- * **What it must not say is that starting over is safe.** A session is an
- * agent: by the time its container went, it may have written files that reached
- * the workspace, committed, pushed, or called something outside altogether.
- * None of that is visible from here — only that the process is gone — so the
- * honest report is what is known plus where to look, and the decision belongs
- * to whoever can read the durable state.
  */
 export function containerLost(printed = ""): string {
+  return endedFromOutside(
+    "the container holding this session was stopped or replaced before the " +
+      "session finished — a deploy or a container rollout does this — so the " +
+      "process was ended from outside and reported no result.",
+    printed
+  );
+}
+
+/**
+ * The report for a process that did not end on its own: why, what that leaves,
+ * then what it had printed.
+ *
+ * **The cause comes first.** What the process printed is not why it ended, and
+ * without this it is all a report shows — so whatever came last, a startup
+ * warning included, reads as the cause.
+ *
+ * **What it must not say is that starting over is safe.** A session is an
+ * agent: by the time it was stopped, it may have written files that reached the
+ * workspace, committed, pushed, or called something outside altogether. None of
+ * that is visible from here — only that the process is gone — so the honest
+ * report is what is known plus where to look, and the decision belongs to
+ * whoever can read the durable state.
+ */
+function endedFromOutside(cause: string, printed: string): string {
   const said = printed.trim();
   return (
-    "the container holding this session was stopped or replaced before the " +
-    "session finished — a deploy or a container rollout does this — so the " +
-    "process was ended from outside and reported no result. What it had " +
-    "already written to the workspace is still there, and anything it did " +
-    "outside the workspace — a commit, a push, a request — has already " +
-    "happened. Check the workspace and the branch before starting this work " +
-    "again, since a rerun repeats from the beginning." +
+    `${cause} What it had already written to the workspace is still there, ` +
+    "and anything it did outside the workspace — a commit, a push, a request — " +
+    "has already happened. Check the workspace and the branch before starting " +
+    "this work again, since a rerun repeats from the beginning." +
     (said
       ? `\n\nWhat it had printed by then, which is not why it ended:\n${said}`
       : "")

@@ -1266,6 +1266,66 @@ describe("releasing a container", () => {
     });
   });
 
+  /**
+   * A detached session in the container makes no call in while it works, so
+   * only its host can say it is there.
+   */
+  it("defers while held, and releases at the last unhold", async () => {
+    const stub = freshWorkspace("release-held");
+    const until = Date.now() + 60_000;
+    await stub.hold("run-a", until);
+    await stub.hold("run-b", until);
+
+    expect(await stub.releaseContainer()).toEqual({ released: false });
+    expect(await stub.unhold("run-a")).toEqual({ released: false });
+    expect(await stub.unhold("run-b")).toEqual({ released: true });
+  });
+
+  it("keeps a container used since the release was asked for", async () => {
+    const stub = freshWorkspace("release-held-then-used");
+    await stub.hold("run", Date.now() + 60_000);
+    expect(await stub.releaseContainer()).toEqual({ released: false });
+
+    // Used again after the ask — here in the same millisecond, which counts as
+    // after: whoever used it asks for its own release.
+    await runInDurableObject(stub, async (_instance, state) =>
+      state.storage.put(
+        "lastUsedAt",
+        await state.storage.get<number>("container-release-asked")
+      )
+    );
+
+    expect(await stub.unhold("run")).toEqual({ released: false });
+  });
+
+  it("keeps a held container past its idle deadline", async () => {
+    const stub = freshWorkspace("idle-held");
+    const dir = "/workspace/probe";
+    await seedGitCheckout(stub, dir);
+    await stub.hold("run", Date.now() + 60_000);
+    await runInDurableObject(stub, async (instance, state) => {
+      await state.storage.put("install:tree", { dir, fingerprint: "x", at: 0 });
+      await state.storage.put("lastUsedAt", Date.now() - 24 * 60 * 60_000);
+      expect(forceDue(state, "containerIdle")).toBeGreaterThan(0);
+      await instance.alarm?.();
+    });
+
+    // Stopping the container drops the tree record, so it standing is the
+    // container standing.
+    expect(
+      await runInDurableObject(stub, (_instance, state) =>
+        state.storage.get("install:tree")
+      )
+    ).toBeDefined();
+  });
+
+  it("ignores a hold past its time", async () => {
+    const stub = freshWorkspace("release-hold-lapsed");
+    await stub.hold("run", Date.now() - 1);
+
+    expect(await stub.releaseContainer()).toEqual({ released: true });
+  });
+
   it("is safe on a workspace nothing has ever opened", async () => {
     // Reached on a task that failed before it cloned anything. Nothing to stop and
     // nothing to drain, and a teardown that threw here would be reported against
