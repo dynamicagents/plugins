@@ -1,11 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  guardPath,
-  isGitInternal,
-  isSkipped,
-  skipNames,
-  WALK_SKIPS
-} from "./paths.js";
+import { guardPath, isGitInternal } from "./paths.js";
 
 /**
  * The guard, on its own terms.
@@ -27,26 +21,6 @@ describe("segments, not substrings", () => {
       false
     );
     expect(isGitInternal("/workspace/repo/src/git/index.ts")).toBe(false);
-  });
-
-  it("skips node_modules as a whole segment, not as a substring", () => {
-    const skips = WALK_SKIPS;
-    expect(isSkipped(skips, "/workspace/repo/node_modules/zod/index.js")).toBe(
-      true
-    );
-    expect(isSkipped(skips, "/workspace/repo/node_modules")).toBe(true);
-    expect(isSkipped(skips, "/workspace/repo/src/node_modules_old/a.ts")).toBe(
-      false
-    );
-    expect(isSkipped(skips, "/workspace/repo/src/my_node_modules.ts")).toBe(
-      false
-    );
-  });
-});
-
-describe("WALK_SKIPS", () => {
-  it("names what it skipped, for the sentence that reports a crowded page", () => {
-    expect(skipNames(WALK_SKIPS)).toBe("`.git` and `node_modules`");
   });
 });
 

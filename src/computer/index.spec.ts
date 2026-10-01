@@ -18,6 +18,7 @@ interface GrepOptions extends Page {
   regex?: boolean;
   ignoreCase?: boolean;
   context?: number;
+  exclude?: string[];
 }
 
 /** The paging pair every listing method on the workspace takes. */
@@ -37,6 +38,28 @@ interface Page {
 const page = <T>(items: T[], options?: Page): T[] => {
   const from = options?.offset ?? 0;
   return items.slice(from, from + (options?.limit ?? items.length));
+};
+
+/**
+ * Model the store's `exclude`: `**\/<name>` prunes the directory `<name>` and
+ * everything beneath it, matched as a whole path segment — so a
+ * `node_modules_old` survives a `**\/node_modules`.
+ *
+ * Pruning happens *before* paging, which is the half that matters: `offset` then
+ * counts only matches a caller can be shown, and that is what lets the tool
+ * forward an offset it got back without correcting it.
+ *
+ * A pattern this cannot model throws rather than being ignored. Silently
+ * searching everything would let a tool that sends the wrong glob pass the very
+ * tests written to catch it.
+ */
+const pruned = (exclude?: string[]): ((path: string) => boolean) => {
+  const segments = (exclude ?? []).map((pattern) => {
+    const segment = /^\*\*\/([A-Za-z0-9_.-]+)$/.exec(pattern)?.[1];
+    if (!segment) throw new Error(`stub cannot model exclude: ${pattern}`);
+    return segment;
+  });
+  return (path) => path.split("/").some((part) => segments.includes(part));
 };
 
 /**
@@ -98,13 +121,15 @@ function stub(
       /**
        * A real line scan over the seeded files, because the rendering is what
        * these tests are about — grouping, line numbers, context markers and the
-       * byte budget all need matches that look like matches. `limit` and `offset`
-       * are honoured for the same reason `readFile` honours its byte range: a stub
-       * that ignored them would let an unbounded or mis-paged search pass.
+       * byte budget all need matches that look like matches. `limit`, `offset`
+       * and `exclude` are honoured for the same reason `readFile` honours its
+       * byte range: a stub that ignored them would let an unbounded, mis-paged or
+       * unpruned search pass. See {@link pruned}.
        */
       grep: async (query: string, _path: string, options?: GrepOptions) => {
         greps.push({ query, path: _path, ...options });
         const context = options?.context ?? 0;
+        const skip = pruned(options?.exclude);
         const out: Array<{
           path: string;
           line: number;
@@ -112,6 +137,7 @@ function stub(
           context?: Array<{ line: number; text: string; isMatch: boolean }>;
         }> = [];
         for (const [file, content] of files) {
+          if (skip(file)) continue;
           const lines = content.split("\n");
           lines.forEach((text, i) => {
             if (!text.includes(query)) return;
@@ -530,6 +556,122 @@ describe("grep", () => {
     const out = await run(tools, "grep", { query: "const" });
     expect(out).toContain("const a = 1;");
     expect(out).not.toContain("still installing");
+  });
+});
+
+/**
+ * Skipped directories are pruned by the store, not filtered out here.
+ *
+ * Filtering on this side had to page blind: it asked for a page, dropped what
+ * was skipped, and could not tell a genuinely short page from one the skips had
+ * emptied — so it searched again, and still gave up while `node_modules`
+ * crowded the result. Pruning answers both. The walk never descends into either
+ * directory, and because nothing is dropped after paging, `offset` counts only
+ * matches the model can be shown, which is what makes a reported offset one the
+ * store understands.
+ *
+ * The stub prunes the way the store documents it — {@link pruned}.
+ */
+describe("grep pruning", () => {
+  const src = "/workspace/repo/src/a.ts";
+
+  it("asks the store to prune, in one search rather than two", async () => {
+    const { workspace, greps } = stub({ [src]: "const marker = 1;\n" });
+
+    const out = await run(buildComputerTools(workspace, config), "grep", {
+      query: "marker"
+    });
+
+    expect(greps[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
+    // The point of the retirement: one round trip. A filter here needed a second
+    // to refill a page its own skips had emptied, and a retry re-scanned every
+    // file the first round had already read.
+    expect(greps).toHaveLength(1);
+    expect(out).toContain("const marker = 1;");
+  });
+
+  it("keeps both skipped directories out of the results", async () => {
+    const { workspace } = stub({
+      "/workspace/repo/node_modules/zod/index.ts": "const marker = 1;\n",
+      "/workspace/repo/.git/COMMIT_EDITMSG": "const marker = 2;\n",
+      [src]: "const marker = 3;\n"
+    });
+
+    const out = await run(buildComputerTools(workspace, config), "grep", {
+      query: "marker"
+    });
+
+    expect(out).toContain(src);
+    expect(out).not.toContain("node_modules");
+    expect(out).not.toContain("COMMIT_EDITMSG");
+  });
+
+  /**
+   * A glob of `**\/node_modules` matches a path *segment*, so the directories
+   * whose names merely contain one stay searchable. Asserted through the tool
+   * because the matching is the store's now, and the only thing this package
+   * still decides is the shape of the pattern it sends.
+   */
+  it("prunes a whole segment, sparing the names that merely contain it", async () => {
+    const { workspace } = stub({
+      "/workspace/repo/src/node_modules_old/a.ts": "const marker = 1;\n",
+      "/workspace/repo/src/my_node_modules.ts": "const marker = 2;\n",
+      "/workspace/repo/node_modules/zod/index.ts": "const marker = 3;\n"
+    });
+
+    const out = await run(buildComputerTools(workspace, config), "grep", {
+      query: "marker"
+    });
+
+    expect(out).toContain("node_modules_old/a.ts");
+    expect(out).toContain("my_node_modules.ts");
+    expect(out).not.toContain("/node_modules/zod");
+  });
+
+  /**
+   * The property the raw-index bookkeeping used to buy, now free: paging a
+   * pruned search end to end shows every visible match exactly once.
+   *
+   * The skipped files are seeded *first*, so they hold the low source offsets. A
+   * tool that paged before pruning would spend its offsets on them and lose real
+   * matches off the front of page two.
+   */
+  it("pages to the end without repeating or losing a match", async () => {
+    const seed: Record<string, string> = {
+      "/workspace/repo/node_modules/zod/index.ts": "const marker = 0;\n",
+      "/workspace/repo/.git/COMMIT_EDITMSG": "const marker = 0;\n"
+    };
+    for (const n of [1, 2, 3, 4])
+      seed[`/workspace/repo/src/a${n}.ts`] = `const marker = ${n};\n`;
+
+    const { workspace, greps } = stub(seed);
+    // A budget that fits some matches but not all, so a page has to report where
+    // to resume.
+    const tools = buildComputerTools(workspace, {
+      ...config,
+      maxOutputChars: 120
+    });
+
+    const seen: string[] = [];
+    let offset = 0;
+    let pages = 0;
+    for (;;) {
+      const out = await run(tools, "grep", { query: "marker", offset });
+      seen.push(...[...out.matchAll(/\/src\/(a\d)\.ts/g)].map((m) => m[1]!));
+      pages += 1;
+      const next = /`offset: (\d+)`/.exec(out);
+      if (!next) break;
+      offset = Number(next[1]);
+      // A page that advertised an offset it had already reached would loop here.
+      expect(pages).toBeLessThan(6);
+    }
+
+    expect(seen).toEqual(["a1", "a2", "a3", "a4"]);
+    // Otherwise the budget fit everything and the paging was never exercised.
+    expect(pages).toBeGreaterThan(1);
+    // Every page asked the store to prune, not just the first.
+    for (const call of greps)
+      expect(call.exclude).toEqual(["**/.git", "**/node_modules"]);
   });
 });
 

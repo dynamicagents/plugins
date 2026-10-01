@@ -1,9 +1,8 @@
 import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
-import { guardPath, isSkipped, skipNames, WALK_SKIPS } from "./paths.js";
+import { guardPath, WALK_SKIPS } from "./paths.js";
 import { renderGrepMatches } from "./render.js";
-import { collectVisible, listingNote } from "./read.js";
 import type { ComputerContext } from "./context.js";
 
 /**
@@ -17,10 +16,9 @@ import type { ComputerContext } from "./context.js";
  * How many matches one `grep` returns.
  *
  * Bounded at the source: without a `limit`, `fs.grep` reads *every* file under
- * the path looking for more. `.git` and the dependency tree are both in the workspace, so
- * an unbounded search of `/workspace` streams every loose object and every
- * vendored file through the isolate before answering. The limit is what stops
- * that walk early, and the skip list is what keeps the matches worth reading.
+ * the path looking for more, so an unbounded search of `/workspace` answers only
+ * after streaming the whole tree through the isolate. The limit stops that walk
+ * early; `exclude` keeps it out of `.git` and the dependency tree entirely.
  */
 const DEFAULT_MAX_MATCHES = 200;
 
@@ -112,41 +110,39 @@ export function grepTools(ctx: ComputerContext): ToolSet {
             ? undefined
             : Math.min(context, MAX_CONTEXT_LINES);
         return inWorkspace("searching", target, async (fs) => {
-          // Two rounds, because a `grep` retry re-reads and re-scans every file
-          // it already looked at. `.git` rarely floods a page here — its bulk is
-          // compressed objects, which a text query does not match — where a
-          // `node_modules` left in the workspace is source and matches.
-          const skips = WALK_SKIPS;
-          const page = await collectVisible(
-            (at, limit) =>
-              fs.grep(query, target, {
-                include,
-                regex,
-                ignoreCase,
-                context: around,
-                limit,
-                offset: at
-              }),
-            (m) => m.path,
-            (p) => isSkipped(skips, p),
-            DEFAULT_MAX_MATCHES,
-            from,
-            2
-          );
-          if (page.items.length === 0)
-            return page.crowded
-              ? `every match for ${JSON.stringify(query)} from offset ${from} is inside ${skipNames(skips)}, which ${skips.length > 1 ? "are" : "is"} not searched. Add \`include\` (e.g. '**/*.ts') to search the working tree instead, or use bash to search \`node_modules\`.`
-              : `no matches for ${JSON.stringify(query)} in ${target}${
-                  include ? ` (${include})` : ""
-                }${from > 0 ? ` past offset ${from}` : ""}`;
+          // Pruned in the store, not filtered here: an excluded directory is
+          // never descended into, so `node_modules` costs nothing to skip and
+          // `offset` counts only matches the model can actually be shown. A
+          // filter on this side could not do either — it pages blind, so a
+          // crowded page could hide every real match behind skipped ones.
+          const matches = await fs.grep(query, target, {
+            include,
+            regex,
+            ignoreCase,
+            context: around,
+            limit: DEFAULT_MAX_MATCHES + 1,
+            offset: from,
+            exclude: WALK_SKIPS.map((segment) => `**/${segment}`)
+          });
+          if (matches.length === 0)
+            return `no matches for ${JSON.stringify(query)} in ${target}${
+              include ? ` (${include})` : ""
+            }${from > 0 ? ` past offset ${from}` : ""}`;
 
           const { body, shown, capped } = renderGrepMatches(
-            page.items.slice(0, DEFAULT_MAX_MATCHES),
+            matches.slice(0, DEFAULT_MAX_MATCHES),
             maxChars
           );
           return (
             body +
-            listingNote(page, shown, "matches", "`include`") +
+            // `shown` falls short of what came back either because the page was
+            // capped or because the render budget ran out; both continue here.
+            (shown < matches.length
+              ? `\n\n… showed ${shown} matches; there are more. Continue with ` +
+                `\`offset: ${from + shown}\`, or narrow with \`include\` — ` +
+                `narrowing is cheaper, since an offset still walks everything ` +
+                `it skips.`
+              : "") +
             (capped
               ? `\n(Some lines were shortened. Read one in full with \`read\`, passing its line number as \`offset\`.)`
               : "") +
