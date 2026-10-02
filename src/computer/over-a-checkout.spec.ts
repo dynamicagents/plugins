@@ -82,6 +82,21 @@ describe("the file tools over a checkout", () => {
       await run(ours.grep, { query: "value119959 =", path: `${root}/src` })
     ).toContain("f1199.ts");
 
+    // And from the checkout root, where the loose objects outnumber the source
+    // several times over. `grep` is pruned there, so a query that only `.git`
+    // holds answers that nothing matched instead of paging out its objects, and
+    // the walk never pays to read them — the cost this fixture was built to
+    // measure. Asserted on the answer rather than on what the store was asked,
+    // so it holds however the pruning comes to be done.
+    const everywhere = (await run(ours.grep, {
+      query: "blob",
+      path: root
+    })) as string;
+    expect(everywhere).toBe(`no matches for "blob" in ${root}`);
+    expect(
+      await run(ours.grep, { query: "value119959 =", path: root })
+    ).toContain("f1199.ts");
+
     // Think's `find`, over the workspace's `glob`, which prunes `.git`.
     const found = (await run(think.find, {
       pattern: `${root}/**/f11*.ts`

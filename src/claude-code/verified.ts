@@ -12,4 +12,4 @@
  * and the capture move together. AGENTS.md's "Updating Claude Code" is the
  * procedure.
  */
-export const VERIFIED_CLAUDE_CODE_VERSION = "2.1.285";
+export const VERIFIED_CLAUDE_CODE_VERSION = "2.1.287";
