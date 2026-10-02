@@ -629,12 +629,13 @@ describe("grep pruning", () => {
   });
 
   /**
-   * The property the raw-index bookkeeping used to buy, now free: paging a
-   * pruned search end to end shows every visible match exactly once.
+   * Paging a pruned search end to end shows every visible match exactly once,
+   * because `offset` counts only the matches that survive the prune.
    *
-   * The skipped files are seeded *first*, so they hold the low source offsets. A
-   * tool that paged before pruning would spend its offsets on them and lose real
-   * matches off the front of page two.
+   * The skipped files are seeded *first*, so they hold the low source offsets,
+   * which is what makes the assertion discriminating: a tool that paged before
+   * pruning would spend its offsets on them and lose real matches off the front
+   * of page two.
    */
   it("pages to the end without repeating or losing a match", async () => {
     const seed: Record<string, string> = {

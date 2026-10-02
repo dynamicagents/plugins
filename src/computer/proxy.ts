@@ -94,10 +94,11 @@ async function orNull<T>(read: Promise<T>): Promise<T | null> {
 /**
  * `stat`, with a missing path answered as `null`.
  *
- * Asked of the stub's own `statOrNull` where it has one, as `pathExists` asks
- * for `exists` (`../workspace/read.ts`): Think's `read` stats before it reads, so a
- * missing file is an ordinary answer here, and a `stat` that throws across the
- * boundary leaves the object an unhandled rejection to log for it.
+ * Asked of the stub's own `statOrNull` where it has one, the way
+ * {@link file://../workspace/read.ts pathExists} asks for `exists`: Think's
+ * `read` stats before it reads, so a missing file is an ordinary answer here,
+ * and a `stat` that throws across the boundary leaves the object an unhandled
+ * rejection to log for it.
  */
 function statOrNull(fs: WorkspaceClient["fs"], path: string) {
   // Called as a method, never through `.call`: on an RPC stub `.call` is read
