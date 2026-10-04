@@ -1335,3 +1335,96 @@ describe("releasing a container", () => {
     expect(await stub.releaseContainer()).toEqual({ released: true });
   });
 });
+
+/**
+ * What a deploy does to a running container: replaces it when the image changed,
+ * adopts it when nothing did.
+ *
+ * The backend matches a running container against what it was launched with —
+ * env, network, size, image key — and the image an `images` key resolves to is
+ * not part of that, so the object carries the reference in the env. Dropping it
+ * would pass every other spec here and adopt an old-image container under a new
+ * Worker, which fails at `[stage=auth]` in production.
+ *
+ * The pool runs no container, so the runtime's handle is a stand-in that records
+ * what it is asked; the object, its backend and the launch record in its storage
+ * are real. A connect stops at egress, after the launch decision this pins.
+ */
+describe("launching the container", () => {
+  const IMAGE_A = "registry.cloudflare.com/account/test-workspace-app@sha256:a";
+  const IMAGE_B = "registry.cloudflare.com/account/test-workspace-app@sha256:b";
+
+  /** Connect once on a container prepared with `app` as `image`, and report. */
+  function connectOnce(
+    stub: DurableObjectStub<TestWorkspaceDO>,
+    image: string,
+    running: boolean
+  ) {
+    return runInDurableObject(stub, async (instance, state) => {
+      const starts: ContainerStartupOptions[] = [];
+      let destroys = 0;
+      Object.defineProperty(state, "container", {
+        configurable: true,
+        value: {
+          running,
+          images: { app: image },
+          start: (options: ContainerStartupOptions) =>
+            void starts.push(options),
+          monitor: () => new Promise<void>(() => {}),
+          destroy: async () => void destroys++,
+          interceptOutboundHttp: () =>
+            Promise.reject(new Error("stand-in: no egress"))
+        }
+      });
+      await expect(instance.backend.connect()).rejects.toThrow(/no egress/);
+      return { starts, destroys };
+    });
+  }
+
+  /** The same workspace in a new instance, as a deploy leaves it. */
+  async function redeployed(stub: DurableObjectStub<TestWorkspaceDO>) {
+    await runInDurableObject(stub, (_instance, state) =>
+      state.abort("redeploy")
+    ).catch(() => {});
+    return workspaceNamespace.get(stub.id);
+  }
+
+  it("starts the prepared image at the configured size, with the image in its env", async () => {
+    const { starts } = await connectOnce(
+      freshWorkspace("launch-spec"),
+      IMAGE_A,
+      false
+    );
+
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      image: IMAGE_A,
+      // `TestWorkspaceDO`'s configured size.
+      instance: "standard-1",
+      env: { DYNAMICAGENTS_IMAGE: IMAGE_A }
+    });
+  });
+
+  it("adopts a running container when a deploy left its image as it was", async () => {
+    const stub = freshWorkspace("launch-same-image");
+    await connectOnce(stub, IMAGE_A, false);
+
+    const after = await connectOnce(await redeployed(stub), IMAGE_A, true);
+
+    expect(after).toEqual({ starts: [], destroys: 0 });
+  });
+
+  it("replaces a running container when a deploy brought a new image", async () => {
+    const stub = freshWorkspace("launch-new-image");
+    await connectOnce(stub, IMAGE_A, false);
+
+    const after = await connectOnce(await redeployed(stub), IMAGE_B, true);
+
+    expect(after.destroys).toBe(1);
+    expect(after.starts).toHaveLength(1);
+    expect(after.starts[0]).toMatchObject({
+      image: IMAGE_B,
+      env: { DYNAMICAGENTS_IMAGE: IMAGE_B }
+    });
+  });
+});
