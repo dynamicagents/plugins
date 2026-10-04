@@ -15,8 +15,9 @@ import {
   type WorkspaceStub
 } from "@cloudflare/computer";
 import {
-  CloudflareContainerBackend,
-  withWorkspaceContainer
+  ContainerBackend,
+  withWorkspaceContainer,
+  type ContainerInstanceSize
 } from "@cloudflare/computer/backends/container";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
@@ -195,9 +196,9 @@ const CONTAINER_WARM_ID = "container-warm-id";
 /**
  * How long a container stays up after the last command **started**.
  *
- * Ours to schedule: `withWorkspaceContainer` wraps the runtime's raw
- * `ctx.container`, not `@cloudflare/containers`' `Container`, so there is no
- * `sleepAfter` to lean on.
+ * Ours to schedule. The backend replaces a container but never stops one, and
+ * there is no `@cloudflare/containers` `Container` here with a `sleepAfter` to
+ * lean on: a container nobody is using runs until this deadline stops it.
  *
  * **This must exceed the longest command the agent allows**, and breaking that
  * kills work in flight. Measured from when a command *starts*: `#touch()` arms
@@ -277,6 +278,24 @@ export function readyWithin(work: Promise<void>, ms: number): Promise<void> {
  */
 const SYNCED_TREES_PURGED_KEY = "deps:purged";
 
+/**
+ * The `images` key a container starts from: `containers[].images.app` in the
+ * consumer's wrangler config. Named to the backend rather than left as its
+ * default, because {@link IMAGE_ENV} has to be read under the same key.
+ */
+const IMAGE_NAME = "app";
+
+/**
+ * The env name the prepared image's reference rides under — see `backend` for
+ * why it rides at all.
+ *
+ * Nothing reads it, and the spelling keeps it that way. `computerd` hands a
+ * command its allowlist plus every `COMPUTER_VAR_` name, and reads its own
+ * configuration from `COMPUTERD_`, where a later release could claim this
+ * name. Outside both, it stays in the daemon's environment, unread.
+ */
+const IMAGE_ENV = "DYNAMICAGENTS_IMAGE";
+
 // --- the object -------------------------------------------------------------
 
 /**
@@ -291,10 +310,9 @@ class WorkspaceContainerHost extends DurableObject<Cloudflare.Env> {}
 
 /**
  * `withWorkspaceContainer` adds one method, `getWorkspaceContainer()`, over
- * `this.ctx.container` — the runtime's own container handle. There is no
- * `@cloudflare/containers` `Container` subclass here and so no `sleepAfter`:
- * idle shutdown is this object's job, and it lands on the wake map with
- * everything else.
+ * `this.ctx.container` — the runtime's own container handle, started with the
+ * image and instance size this object asks for. Stopping it is this object's
+ * job — see {@link CONTAINER_IDLE_MS}.
  */
 const WorkspaceContainerBase = withWorkspaceContainer(WorkspaceContainerHost);
 
@@ -402,6 +420,15 @@ export interface WorkspaceObjectConfig {
    * agent's longest command grows.
    */
   containerIdleMs?: number;
+  /**
+   * The size this agent's container starts at — a tier such as `standard-2`, or
+   * `{ vcpu, memoryMib, diskMb }`.
+   *
+   * Requested on every start, and part of what a running container is matched
+   * against: change it and the next connect replaces a container started at the
+   * old size. Which size, and why there is no default: {@link file://./README.md}.
+   */
+  instance: ContainerInstanceSize;
   /** The forge credential and commit identity — see {@link WorkspaceGitConfig}. */
   git: WorkspaceGitConfig;
 }
@@ -615,20 +642,40 @@ export abstract class WorkspaceObjectBase<
    * Nothing sets `egressHost`; the default `computer.internal` is the host the
    * container's outbound HTTP is intercepted on, internal to that loopback.
    *
-   * The binding name and the egress policy are the subclass's — see
-   * {@link WorkspaceObjectConfig}, which carries the warnings on both.
+   * **The image rides in the env so that a deploy replaces the container.** The
+   * backend reuses a running container whose launch — env, network, size, image
+   * key — matches the one it asks for, and the image a key resolves to is not
+   * part of that: a container started before a deploy would go on running the
+   * old image under the new Worker. The library here and the `computerd` in the
+   * image are one release, and a daemon from across a version line fails to
+   * authenticate (`[stage=auth]`). With the prepared image's reference in the
+   * env as {@link IMAGE_ENV}, a new image is a new launch, and the next connect
+   * replaces the container. With no image prepared under {@link IMAGE_NAME}
+   * there is nothing to add, and the backend's start says so.
+   *
+   * The binding name, the egress policy and the instance size are the
+   * subclass's — see {@link WorkspaceObjectConfig}, which carries the warnings
+   * on each.
    */
-  #backendMemo?: CloudflareContainerBackend;
+  #backendMemo?: ContainerBackend;
 
-  get backend(): CloudflareContainerBackend {
-    return (this.#backendMemo ??= new CloudflareContainerBackend({
+  get backend(): ContainerBackend {
+    return (this.#backendMemo ??= this.#newBackend());
+  }
+
+  #newBackend(): ContainerBackend {
+    const image: string | undefined = this.ctx.container?.images?.[IMAGE_NAME];
+    return new ContainerBackend({
       container: () => this,
       workspace: {
         binding: this.#cfg.binding,
         id: this.ctx.id.toString()
       },
-      egress: this.#cfg.egress
-    }));
+      egress: this.#cfg.egress,
+      name: IMAGE_NAME,
+      instance: this.#cfg.instance,
+      containerEnv: image === undefined ? {} : { [IMAGE_ENV]: image }
+    });
   }
 
   #workspaceMemo?: Workspace;

@@ -59,9 +59,10 @@ same lock.
 
 It is a bind mount of the container's disk — see [`/workspace`](../workspace/).
 The file tools read the workspace, so they refuse `node_modules` paths and route to
-`bash`. Walks skip it with `.git`: the workspace's `glob`, which Think's `find` walks
-with, passes both to the store as exclusions, so the store never walks them, and
-`grep`, whose store search takes no exclusion, filters its results.
+`bash`. Walks skip it with `.git`, and both skips are the store's: the workspace's
+`glob`, which Think's `find` walks with, and `grep`, which passes
+`["**/.git", "**/node_modules"]` to the store's `fs.grep`, hand it the two as
+exclusions, so an excluded directory is never descended into at all.
 
 ## `.git` is off limits
 
@@ -78,8 +79,9 @@ the workspace object in one call, bounds its matches at the source and reports t
 `offset` that continues a cut result, where Think's own `grep` reads every file under
 the root through the workspace, one call per file. `find` and `list` are Think's.
 
-The store's search takes no exclusion, so `grep` from a checkout's root reads `.git`
-too before filtering it out. Give it a `path` below the root, or an `include`.
+Searching a checkout's root needs no narrowing of its own: the store prunes `.git`
+and `node_modules` before the walk reaches them (above), so a `path` or an `include`
+only narrows what you want to _see_.
 
 ## The container is the trust boundary
 

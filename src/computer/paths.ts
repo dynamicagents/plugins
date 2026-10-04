@@ -30,24 +30,11 @@ export function isGitInternal(path: string): boolean {
 }
 
 /**
- * What every walk steps over. The workspace's `glob` prunes these in the store;
- * the store's `grep` takes no exclusion, so the `grep` tool filters its results
- * instead.
+ * What every walk steps over, as directory names. Both the workspace's `glob`
+ * and the `grep` tool hand these to the store as `**\/<name>` exclusions, which
+ * prunes them: neither directory is descended into, so neither costs a read.
  */
 export const WALK_SKIPS = [".git", "node_modules"] as const;
-
-/** Whether a walk carrying `skips` steps over `path`. */
-export function isSkipped(skips: readonly string[], path: string): boolean {
-  return skips.some((segment) => hasSegment(path, segment));
-}
-
-/** The skipped directories, for a sentence: "`.git` and `node_modules`". */
-export function skipNames(skips: readonly string[]): string {
-  const quoted = skips.map((segment) => `\`${segment}\``);
-  return quoted.length > 1
-    ? `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`
-    : (quoted[0] ?? "");
-}
 
 /** The sentence a `node_modules` path gets. */
 function dependencyTreeNote(path: string, verb: string): string {

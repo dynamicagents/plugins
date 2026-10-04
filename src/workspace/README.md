@@ -120,6 +120,7 @@ export class Workspace extends WorkspaceObjectBase {
       label: "workspace",
       installPlan: INSTALL_PLAN,
       egress: { mode: "direct" },
+      instance: "standard-2",
       git: {
         tokenBinding: "GITHUB_TOKEN",
         author: { name: this.env.GITHUB_NAME, email: this.env.GITHUB_EMAIL }
@@ -149,7 +150,7 @@ about this agent's workspace". Everything else is inherited, and the alternative
 second copy of a thousand-line object drifting in whichever direction the one nobody
 redeployed recently went.
 
-Three fields have no safe default:
+These fields have no safe default:
 
 - **`binding`** is not cosmetic and not derivable — `computerd` dials _back_ through
   it, so a wrong name produces a container that starts, mounts nothing, and fails at
@@ -159,6 +160,11 @@ Three fields have no safe default:
   cause. `http-gateway` puts your Worker on the container's outbound path — see
   [`/claude-code`](../claude-code/), which uses it to swap in a credential the
   container must never hold.
+- **`instance`** is the container's size, asked for on every start: a tier from
+  `lite` to `standard-4`, or a custom `{ vcpu, memoryMib, diskMb }` in the
+  runtime's camel case. Required because the runtime's own default is `lite`, a
+  sixteenth of a vCPU and 256 MiB — a size for trying containers, not for
+  installing and building a real project.
 - **`git.tokenBinding`** names the binding rather than carrying the token, because
   `workspaceConfig()` is an ordinary method and on a Durable Object `protected` is a
   typechecker's opinion, not a runtime boundary. A config carrying the credential
@@ -211,8 +217,15 @@ installs can displace each other. `install-job.ts` closes each and names which.
   "containers": [
     {
       "class_name": "Workspace",
-      "image": "./Dockerfile",
-      "instance_type": "standard-2"
+      // The object starts its own containers. Fixed when the application is
+      // created — see below.
+      "scheduling_policy": "durable_object",
+      // `app` is the key the object starts its image by. A Docker build arg goes
+      // beside `dockerfile`, as `build_vars`.
+      "images": { "app": { "dockerfile": "./Dockerfile" } },
+      // The container's own output, `computerd`'s included: where a container
+      // that would not mount or start says why.
+      "observability": { "logs": { "enabled": true } }
     }
   ],
   // Without this the observer degrades to a no-op and nothing measures a sync.
@@ -224,6 +237,12 @@ One class per agent, because a Durable Object namespace is keyed by class name: 
 sharing one class share one namespace, and one caller's checkout answers for all of
 them.
 
+There is no `instance_type` or `max_instances` under this policy. The size is
+`instance` in `workspaceConfig()`, and running containers count against the account's
+limits rather than a cap per application. Nor is there a rollout: a deploy that
+changes the image replaces each running container when its workspace next connects
+— `backend` in [`object.ts`](./object.ts) says why it must.
+
 Your Worker entry must also re-export `WorkspaceProxy`:
 
 ```ts
@@ -233,6 +252,19 @@ export { WorkspaceProxy } from "@cloudflare/computer";
 Nothing imports it and no binding names it — the container's egress loopback is built
 from `ctx.exports.WorkspaceProxy`, so dropping it compiles cleanly and breaks every
 container at runtime.
+
+### The scheduling policy is fixed when the application is created
+
+An application created without `scheduling_policy: "durable_object"` — any
+`containers` entry that never named one — cannot be switched to it in place. Delete
+it first with `wrangler containers delete`, then deploy the same class with the new
+entry: the deploy creates a new application on the class's existing namespace, so the
+class keeps its name, its binding and every workspace's storage. Cloudflare's
+migration guide moves to a new class instead, which leaves that storage behind.
+
+Between the delete and the deploy no container can start, and a workspace reports
+the missing application as the deployment's fault, so move with no task running.
+Removing an entry from `wrangler.jsonc` does not delete its application.
 
 ## Requirements
 

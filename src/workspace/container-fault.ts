@@ -3,9 +3,9 @@
  *
  * Everything else this host catches is the kind of thing a retry clears: a
  * container that is starting, a connection that dropped, a command that died
- * with it. These two are not. They describe a Worker and a container
- * application that cannot work together no matter how many times they are
- * asked, and they end only when an operator deploys.
+ * with it. These are not. They describe a Worker and a container application
+ * that cannot work together no matter how many times they are asked, and they
+ * end only when an operator deploys.
  *
  * **This changes what is said, not what is done.** No caller branches its
  * control flow on the answer, and none should start: the match is on a string
@@ -34,14 +34,18 @@ export interface DeploymentFault {
 /**
  * Match on the shape the backend formats, not on the prose after it.
  *
- * `[stage=auth]` is the stage label `CloudflareContainerBackend` writes into
- * every message it throws from that stage, and the container-application
- * sentence is the runtime's own, surfaced verbatim through the backend's
- * `priorExit=` field. Both are stabler than the explanations they introduce, and
- * neither has a `code` to key on the way a lost exec does.
+ * `[stage=auth]` is the stage label `ContainerBackend` writes into every
+ * message it throws from that stage, and the container-application sentence is
+ * the runtime's own, surfaced verbatim through the backend's `priorExit=` field.
+ * `prepared images` is in both of the backend's refusals to start without an
+ * image — none prepared at all, and none under the key it was asked for — and
+ * survives the reconnect wrapper's truncation of either. All are stabler than
+ * the explanations they introduce, and none has a `code` to key on the way a
+ * lost exec does.
  */
 const AUTH_STAGE = "[stage=auth]";
 const NO_APPLICATION = "no container application";
+const NO_IMAGE = "prepared images";
 
 /**
  * Whether this error says the deployment is wrong, and what to say about it.
@@ -69,6 +73,18 @@ export function deploymentFault(err: unknown): DeploymentFault | undefined {
         "not exist, so no container can start. Deploying the Worker is what " +
         "creates it — deleting it does not cause it to be rebuilt — so this " +
         "clears when an operator redeploys, and not before."
+    };
+  if (text.includes(NO_IMAGE))
+    return {
+      summary: "this Worker prepared no image for the workspace container",
+      remedy:
+        "the container application has no image under the name this workspace " +
+        "starts, so no container can start. The workspace schedules its own " +
+        'containers, which takes `scheduling_policy: "durable_object"` and an ' +
+        "`images` entry for that name in the Worker's containers block, and an " +
+        "application created under another policy is deleted before that " +
+        "deploy rather than switched. This clears when an operator redeploys " +
+        "with both in place, and not before."
     };
   return undefined;
 }
