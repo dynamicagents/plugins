@@ -4,10 +4,10 @@ import {
   type WorkspaceObjectConfig
 } from "../src/workspace/index.js";
 
-// Not one of our classes, and not optional: `CloudflareContainerBackend` builds
-// the container's egress loopback out of `ctx.exports.WorkspaceProxy`, so a host
-// that omits this export compiles cleanly and fails at the first command. It is
-// here because this file is also the worked example of what a host owes.
+// Not one of our classes, and not optional: `ContainerBackend` builds the
+// container's egress loopback out of `ctx.exports.WorkspaceProxy`, so a host that
+// omits this export compiles cleanly and fails at the first command. It is here
+// because this file is also the worked example of what a host owes.
 export { WorkspaceProxy } from "@cloudflare/computer";
 
 /**
@@ -23,9 +23,9 @@ export { WorkspaceProxy } from "@cloudflare/computer";
  * production failures its specs pin.
  *
  * The narrowest config that satisfies the seam: no container will start, so the
- * egress policy and the git identity are never used for anything — they are here
- * because omitting a required field would say more about this file than about
- * the class under test.
+ * egress policy, the instance size and the git identity are never used for
+ * anything — they are here because omitting a required field would say more
+ * about this file than about the class under test.
  */
 export class TestWorkspaceDO extends WorkspaceObjectBase {
   protected workspaceConfig(): WorkspaceObjectConfig {
@@ -36,6 +36,7 @@ export class TestWorkspaceDO extends WorkspaceObjectBase {
       // is testing `resolveInstallCommand`, which has its own specs next door.
       installPlan: { ...DEFAULT_INSTALL_PLAN, overrides: {} },
       egress: { mode: "direct" },
+      instance: "standard-1",
       git: {
         // A binding this test Worker does not declare, which reads `undefined`
         // — the unauthenticated case, and the only one reachable with no

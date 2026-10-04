@@ -65,9 +65,9 @@ export const ANTHROPIC_HOST = "api.anthropic.com";
  * Bouncing a request back into it is never a legitimate fetch, so it is refused
  * before any policy is consulted.
  *
- * A workspace that overrides `egressHost` on its `CloudflareContainerBackend`
- * should add that name here; the default is what the backend uses when nothing
- * says otherwise.
+ * A workspace that overrides `egressHost` on its `ContainerBackend` should add
+ * that name here; the default is what the backend uses when nothing says
+ * otherwise.
  */
 const NEVER_ALLOWED = new Set([
   "computer.internal",
