@@ -162,16 +162,23 @@ rotation and saves a Durable Object class, a binding and a migration.
 ```jsonc
 // wrangler.jsonc
 {
+  // The rest of the entry, and the container's size, are the workspace's — see
+  // `@dynamicagents/plugins/workspace`.
   "containers": [
     {
       "class_name": "AnthropicCodingWorkspace",
-      "image": "./Dockerfile",
-      // A Docker build arg. One Dockerfile serves both the plain workspace and
-      // this one; only the entry naming a version gets the CLI. The value is
-      // `VERIFIED_CLAUDE_CODE_VERSION` — see "Updating Claude Code" below.
-      "image_vars": { "CLAUDE_CODE_VERSION": "<VERIFIED_CLAUDE_CODE_VERSION>" },
-      "instance_type": "standard-2",
-      "max_instances": 5
+      "scheduling_policy": "durable_object",
+      "images": {
+        "app": {
+          "dockerfile": "./Dockerfile",
+          // A Docker build arg. One Dockerfile serves both the plain workspace
+          // and this one; only the entry naming a version gets the CLI. The value
+          // is `VERIFIED_CLAUDE_CODE_VERSION` — see "Updating Claude Code" below.
+          "build_vars": {
+            "CLAUDE_CODE_VERSION": "<VERIFIED_CLAUDE_CODE_VERSION>"
+          }
+        }
+      }
     }
   ],
   // The container is bound to a Durable Object, and the class has to exist as
@@ -241,14 +248,16 @@ readonly #credentials: CredentialStore = {
   write: (states) => this.ctx.storage.put(CREDS_KEY, states)
 };
 
-readonly backend = new CloudflareContainerBackend({
-  container: () => this,
-  workspace: { binding: "ANTHROPIC_CODING_WORKSPACE", id: this.ctx.id.toString() },
-  egress: {
-    mode: "http-gateway",
-    gateway: this.#session.egress(this.#credentials)
-  }
-});
+protected workspaceConfig(): WorkspaceObjectConfig {
+  return {
+    // …binding, label, installPlan, instance and git — see
+    // `@dynamicagents/plugins/workspace`.
+    egress: {
+      mode: "http-gateway",
+      gateway: this.#session.egress(this.#credentials)
+    }
+  };
+}
 ```
 
 `egress` takes the store as an **argument** rather than reading it off the
