@@ -333,9 +333,22 @@ function resolveVersion(tagOrVersion) {
   return Array.isArray(parsed) ? parsed.at(-1) : parsed;
 }
 
-/** The CLI, in a directory of its own. The machine's `claude` is not touched. */
+/**
+ * The CLI, in a directory of its own. The machine's `claude` is not touched.
+ *
+ * The package's `postinstall` is what puts the native binary behind `claude`,
+ * which is published as a placeholder that exits 1, so the script is approved
+ * by name. A `--prefix` install refuses `--allow-scripts` and reads the approval
+ * from the prefix's own `package.json`; without it npm warns or blocks,
+ * depending on the release.
+ */
 function install(target) {
   const prefix = path.join(tmp, "cli");
+  mkdirSync(prefix);
+  writeFileSync(
+    path.join(prefix, "package.json"),
+    JSON.stringify({ allowScripts: { [PACKAGE]: true } })
+  );
   execFileSync(
     "npm",
     [
