@@ -108,7 +108,8 @@ does. Every request then goes through the real `claudeCodeEgress`, and on to a f
 Anthropic, or with `--live` to the real API. A session is run once, resumed,
 forked, and run once more with a `jsonSchema`, so every flag the plugin passes is
 exercised — then asked to resume a conversation that does not exist, which is the
-one run that must reach the API not at all.
+one run that must make no model call. Its client's own startup requests are
+expected; `/v1/messages` is what it must not reach.
 
 **It fails when:**
 

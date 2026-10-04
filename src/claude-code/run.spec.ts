@@ -251,6 +251,19 @@ describe("buildLaunch", () => {
       );
     });
 
+    /**
+     * The id arrives from storage, and an empty one is what a host that never
+     * recorded a handle has. Dropped, `--resume` would go missing and the run
+     * would be a fresh conversation answering a prompt written as the next turn
+     * of one the caller believes is still going.
+     */
+    it("refuses an empty id rather than starting a fresh session", () => {
+      expect(() => launch({ resume: "" })).toThrow(/cannot be empty/);
+      expect(() => launch({ resume: "", fork: true })).toThrow(
+        /cannot be empty/
+      );
+    });
+
     it("puts the client's own state where the host asks, and nowhere by default", () => {
       expect(
         launch({ configDir: "/workspace/.claude-sessions" }).env

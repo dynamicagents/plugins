@@ -245,8 +245,8 @@ try {
   const structured = await runSession(bin, proxyUrl, certs.ca, {
     jsonSchema: SCHEMA
   });
-  // Last, and the count is taken before it: this one must reach the API not at
-  // all, and a request made after it could only be its own.
+  // Last, and the count is taken before it: this one must make no model call,
+  // and a request made after it could only be its own.
   const calledBefore = requests.length;
   const unresumable = await runSession(bin, proxyUrl, certs.ca, {
     resume: UNKNOWN_SESSION
@@ -284,9 +284,9 @@ try {
   /**
    * A resume of a conversation that is not there. This has to stay cheap and
    * legible, because it is the fallback for every check a host skips: a
-   * `result` line naming the reason, no API call, nothing spent. A version that
-   * started a fresh session instead would silently do unrelated work under a
-   * caller's "continue this" — which is why this is a check and not a note.
+   * `result` line naming the reason, no model call, nothing spent. A version
+   * that started a fresh session instead would silently do unrelated work under
+   * a caller's "continue this" — which is why this is a check and not a note.
    */
   check(
     "a resume with nothing to resume says so on the result line",

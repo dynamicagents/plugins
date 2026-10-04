@@ -219,6 +219,9 @@ export interface LaunchOptions {
    * exits in milliseconds; its client still makes its own startup requests, but
    * nothing is inferred and nothing is billed. The honest report is "not
    * resumable", and the retry is the same delegation without this.
+   *
+   * **An empty id is refused rather than dropped.** That retry is launching
+   * without this option, not passing it empty.
    */
   resume?: string;
 
@@ -391,10 +394,19 @@ export function buildLaunch(options: LaunchOptions): Launch {
   }
 
   /**
-   * Refused rather than dropped: dropped, a caller that asked to fork a
-   * conversation gets a session that started one of its own, and reports it as
-   * the continuation of whatever it was told to continue.
+   * Refused rather than dropped, both of them: dropped, a caller that asked to
+   * continue or fork a conversation gets a session that started one of its own,
+   * and reports it as the continuation of whatever it was told to continue. An
+   * empty id is the same state {@link file://./session.ts followUp} refuses,
+   * and refusing it here covers every caller of this option rather than that
+   * one path.
    */
+  if (options.resume === "") {
+    throw new Error(
+      "claude-code: `resume` is the session id of the conversation to " +
+        "continue, so it cannot be empty. Launch without it to start one."
+    );
+  }
   if (options.fork && !options.resume) {
     throw new Error(
       "claude-code: `fork` forks a resumed conversation, so it needs the " +
