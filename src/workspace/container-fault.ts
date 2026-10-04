@@ -82,9 +82,9 @@ export function deploymentFault(err: unknown): DeploymentFault | undefined {
         "starts, so no container can start. The workspace schedules its own " +
         'containers, which takes `scheduling_policy: "durable_object"` and an ' +
         "`images` entry for that name in the Worker's containers block, and an " +
-        "application created under another policy cannot be switched — it " +
-        "takes a replacement. This clears when an operator redeploys with " +
-        "both in place, and not before."
+        "application created under another policy is deleted before that " +
+        "deploy rather than switched. This clears when an operator redeploys " +
+        "with both in place, and not before."
     };
   return undefined;
 }

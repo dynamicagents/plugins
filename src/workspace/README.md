@@ -256,18 +256,15 @@ container at runtime.
 ### The scheduling policy is fixed when the application is created
 
 An application created without `scheduling_policy: "durable_object"` — any
-`containers` entry that never named one — cannot be switched to it, and trying is
-worse than a refusal: `wrangler deploy` ships the Worker before it configures the
-application, so the deploy fails with the new Worker already live and nothing behind
-it.
+`containers` entry that never named one — cannot be switched to it in place. Delete
+it first with `wrangler containers delete`, then deploy the same class with the new
+entry: the deploy creates a new application on the class's existing namespace, so the
+class keeps its name, its binding and every workspace's storage. Cloudflare's
+migration guide moves to a new class instead, which leaves that storage behind.
 
-Moving takes a replacement application: a new workspace class with its own binding
-and migration, and a new `containers` entry with a `name` of its own, naming that
-class. The old namespace cannot attach to the new application and its storage does
-not move, so each workspace starts empty and clones again on first use — anything
-left unpushed stays behind in the old namespace. Once nothing routes to the old
-application, delete it with `wrangler containers delete`; removing its entry from
-`wrangler.jsonc` does not.
+Between the delete and the deploy no container can start, and a workspace reports
+the missing application as the deployment's fault, so move with no task running.
+Removing an entry from `wrangler.jsonc` does not delete its application.
 
 ## Requirements
 
