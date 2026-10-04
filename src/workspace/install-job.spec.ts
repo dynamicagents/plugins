@@ -135,10 +135,10 @@ describe("the tree belongs to the container", () => {
 describe("what an install says when the container cannot be reached", () => {
   /** The host refusing a container whose image predates the shared secret. */
   const AUTH_FAULT = new Error(
-    "WorkspaceTransportError: CloudflareContainerBackend(container-shell) " +
-      "[stage=auth]: container served an unauthenticated request to /api with " +
-      "405, so this workspace would run without authorization. A container or " +
-      "image predating RPC_CLIENT_SECRET has to be recycled."
+    "WorkspaceTransportError: ContainerBackend(container-shell) [stage=auth]: " +
+      "container served an unauthenticated request to /api with 405, so this " +
+      "workspace would run without authorization. A container or image " +
+      "predating RPC_CLIENT_SECRET has to be recycled."
   );
 
   /** The same spawn failing because the container was merely not there. */

@@ -37,15 +37,15 @@ function trustWith(output: string | Error) {
 /**
  * A container the host refuses outright: its image predates the shared secret.
  *
- * Verbatim from a deployment that hit it, for the reason given in
- * {@link file://./container-fault.spec.ts} — the string being matched is the
- * backend's, not ours.
+ * The backend's `[stage=auth]` message, with the status a deployment that hit
+ * it was served — the string being matched is the backend's, not ours, for the
+ * reason given in {@link file://./container-fault.spec.ts}.
  */
 const AUTH_FAULT =
-  "WorkspaceTransportError: CloudflareContainerBackend(container-shell) " +
-  "[stage=auth]: container served an unauthenticated request to /api with 405, " +
-  "so this workspace would run without authorization. A container or image " +
-  "predating RPC_CLIENT_SECRET has to be recycled.";
+  "WorkspaceTransportError: ContainerBackend(container-shell) [stage=auth]: " +
+  "container served an unauthenticated request to /api with 405, so this " +
+  "workspace would run without authorization. A container or image predating " +
+  "RPC_CLIENT_SECRET has to be recycled.";
 
 /** How many times the trust command was actually sent. */
 async function runsAfterTwoEnsures(output: string | Error): Promise<number> {
