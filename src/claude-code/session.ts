@@ -20,11 +20,48 @@ import { DEFAULT_TIMEOUT_MS, type ClaudeCodeConfig } from "./config.js";
 import { closeCopy, copyNote, openCopy, WORKSPACE_MOUNT } from "./copy.js";
 
 /**
+ * What continuing an interrupted conversation takes — see
+ * {@link file://./run.ts LaunchOptions.resume}.
+ */
+export interface ResumeSession {
+  sessionId: string;
+  /** Continue under a new id, leaving the original conversation whole. */
+  fork?: boolean;
+}
+
+/** What one session needs to be launched: see {@link ClaudeCodeSession.start}. */
+export interface StartSession {
+  /** A reading session runs in a throwaway copy; see {@link file://./copy.ts}. */
+  kind: "write" | "read";
+  /** The whole of what this session is asked to do, or its next user turn. */
+  prompt: string;
+  /** The checkout. */
+  dir: string;
+  jsonSchema?: Record<string, unknown>;
+  /** A Claude Code conversation to continue rather than start. */
+  resume?: ResumeSession;
+  /** Where the client keeps its state — {@link file://./run.ts LaunchOptions.configDir}. */
+  configDir?: string;
+}
+
+/**
  * Bind a config to a workspace runtime: start, follow up, resume, stop.
  *
  * What `claudeCodeModel` drives a run with, and what a host's `settle` stops
  * one with. State lives in the {@link DrainCursor} the caller stores, so this
  * holds none and a fresh isolate picks up exactly where the last one stopped.
+ *
+ * ## Two senses of "resume", and they are not the same mechanism
+ *
+ * {@link ClaudeCodeSession.resume} re-attaches to a running **exec** — the
+ * process is alive in the container and a drain that was cut reads on from the
+ * cursor's sequence. Nothing about the conversation changes; this is plumbing.
+ *
+ * {@link StartSession.resume} continues a Claude Code **conversation** that has
+ * already ended, in a new process with a new exec: the session's transcript is
+ * read back into context and the prompt is the next user turn. Where that
+ * transcript lives — and so how long this is possible at all — is
+ * {@link StartSession.configDir}.
  */
 export function claudeCodeSession(config: ClaudeCodeConfig) {
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -84,16 +121,18 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
      * handed in by the caller**: a host able to pass the copy is a host able to
      * leave it out, and a reading session without one would run in the tree its
      * parent and every other reader share.
+     *
+     * `resume` continues a conversation on this session's **own** exec rather
+     * than on a second one: a run given a conversation to continue has no first
+     * session of its own, so there is nothing for a follow-up exec to follow.
      */
     async start(
       runtime: SessionRuntime,
       runId: string,
-      kind: "write" | "read",
-      prompt: string,
-      dir: string,
-      sinks: Sinks = {},
-      jsonSchema?: Record<string, unknown>
+      options: StartSession,
+      sinks: Sinks = {}
     ): Promise<DrainOutcome> {
+      const { kind, prompt, dir } = options;
       const execId = execIdFor(runId);
       const copy =
         kind === "read"
@@ -110,7 +149,9 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
               ...(copy.isolated ? { readOnly: WORKSPACE_MOUNT } : {})
             }
           : launch(prompt, dir)),
-        ...(jsonSchema ? { jsonSchema } : {}),
+        ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}),
+        ...resumption(options.resume),
+        ...(options.configDir ? { configDir: options.configDir } : {}),
         execId,
         timeoutMs,
         signal: sinks.signal
@@ -125,30 +166,39 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     /**
      * Give a finished writing session one more turn, and drain it.
      *
-     * `sessionId` is the one its `result` line reported. The transcript is on the
-     * container's disk, so this must run in the workspace the session did. A
-     * drain cut short goes on through {@link resume} with the cursor it stored,
-     * like any other session's.
+     * `sessionId` is the one the session reported — on its `result` line, or on
+     * its cursor when it ended without one. This runs in the workspace the
+     * session did, and under the same `configDir`, because both are what decide
+     * where the transcript it is continuing can be found. A drain cut short goes
+     * on through {@link resume} with the cursor it stored, like any other
+     * session's.
+     *
+     * Never forked: a follow-up is one more turn of the same conversation, which
+     * is exactly what a fork is for *not* doing.
      */
     async followUp(
       runtime: SessionRuntime,
       runId: string,
-      sessionId: string,
-      prompt: string,
-      dir: string,
+      options: {
+        sessionId: string;
+        prompt: string;
+        dir: string;
+        configDir?: string;
+      },
       sinks: Sinks = {}
     ): Promise<DrainOutcome> {
       // Without one, `--resume` would be dropped and a new session started
       // under the follow-up's id — unrelated work, reported as the follow-up.
-      if (!sessionId) {
+      if (!options.sessionId) {
         throw new Error(
           "claude-code: a follow-up needs the session id its result reported"
         );
       }
       const execId = followUpExecIdFor(runId);
       using handle = await startRun(runtime, {
-        ...launch(prompt, dir),
-        resume: sessionId,
+        ...launch(options.prompt, options.dir),
+        resume: options.sessionId,
+        ...(options.configDir ? { configDir: options.configDir } : {}),
         execId,
         timeoutMs,
         signal: sinks.signal
@@ -256,6 +306,20 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
 }
 
 export type ClaudeCodeSession = ReturnType<typeof claudeCodeSession>;
+
+/**
+ * A conversation to continue, as launch flags.
+ *
+ * One place rather than a spread at each call site, so `fork` can never travel
+ * without the id it forks — which {@link file://./run.ts buildLaunch} refuses,
+ * but refuses at launch rather than here.
+ */
+function resumption(
+  resume: ResumeSession | undefined
+): { resume: string; fork?: true } | undefined {
+  if (!resume) return undefined;
+  return { resume: resume.sessionId, ...(resume.fork ? { fork: true } : {}) };
+}
 
 /**
  * Refuse a deployment with no credential when the model is built, naming this

@@ -59,6 +59,17 @@ export interface ClaudeCodeResult {
    * for any other session, and for one that never made the call.
    */
   structured?: unknown;
+  /**
+   * What the CLI says went wrong, when it reports an error rather than an
+   * answer.
+   *
+   * The only account there is of a refused resume: a `--resume` naming a
+   * conversation the config directory does not hold ends in a `result` line with
+   * no `text` at all, and `No conversation found with session ID: …` here. A
+   * caller that reports such a run as a failed session rather than as "not
+   * resumable" is reporting the one thing it was handed to say.
+   */
+  errors?: string[];
 }
 
 /**
@@ -463,6 +474,7 @@ function readResult(event: Record<string, unknown>): ClaudeCodeResult {
     : 0;
   const sessionId = str(event.session_id);
   const spawned = stats ? num(stats.spawned) : undefined;
+  const errors = readErrors(event.errors);
 
   return {
     subtype: str(event.subtype) ?? "unknown",
@@ -476,11 +488,38 @@ function readResult(event: Record<string, unknown>): ClaudeCodeResult {
     usage: readUsage(event.usage),
     ...(spawned === undefined ? {} : { subagentsSpawned: spawned }),
     permissionDenials: denials,
+    ...(errors.length > 0 ? { errors } : {}),
     ...(event.structured_output === undefined ||
     event.structured_output === null
       ? {}
       : { structured: event.structured_output })
   };
+}
+
+/**
+ * A result line's `errors`, as sentences.
+ *
+ * **Anything that is not a string is stringified rather than dropped**, which is
+ * the whole of the care this needs: the field is a vendor's, an entry carrying a
+ * code and a message is a perfectly likely shape for it, and on the run this
+ * exists to explain — a resume with nowhere to resume from — it is the only
+ * account of what happened. Dropping an unexpected entry would report that run
+ * as having failed for no stated reason.
+ */
+function readErrors(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => (typeof entry === "string" ? entry : safeJson(entry)))
+    .filter((entry) => entry.length > 0);
+}
+
+/** `value` as JSON, or as whatever `String` makes of it when it has no JSON. */
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
 
 /**
@@ -571,8 +610,10 @@ function describe(event: ClaudeCodeEvent): string | undefined {
             (event.info.resetsAt === undefined
               ? ""
               : ` until ${new Date(event.info.resetsAt * 1000).toISOString()}`);
-    // `init` names a session id nobody outside this package can use, and
-    // `result` is the terminal outcome the caller reports itself.
+    // `init`'s session id is a handle, not news: it reaches the host on the
+    // drain's cursor — see `DrainCursor.sessionId` in ./run.ts — where something
+    // can record it and resume with it. `result` is the terminal outcome the
+    // caller reports itself.
     case "init":
     case "result":
       return undefined;

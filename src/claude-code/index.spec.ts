@@ -142,7 +142,11 @@ describe("where a session runs", () => {
     const session = claudeCodeSession(config());
 
     await session
-      .start(runtime, "1", "read", "look at this", "/workspace/r")
+      .start(runtime, "1", {
+        kind: "read",
+        prompt: "look at this",
+        dir: "/workspace/r"
+      })
       .catch(() => {});
 
     expect(calls.map((c) => c.options.id)).toEqual([
@@ -167,7 +171,11 @@ describe("where a session runs", () => {
     const { calls, runtime } = launchRecorder();
 
     await claudeCodeSession(config())
-      .start(runtime, "1", "read", "look at this", "/workspace/r")
+      .start(runtime, "1", {
+        kind: "read",
+        prompt: "look at this",
+        dir: "/workspace/r"
+      })
       .catch(() => {});
 
     expect(calls[1]?.command).toMatch(
@@ -180,7 +188,11 @@ describe("where a session runs", () => {
     const { calls, runtime } = launchRecorder(false);
 
     await claudeCodeSession(config())
-      .start(runtime, "1", "read", "look at this", "/workspace/r")
+      .start(runtime, "1", {
+        kind: "read",
+        prompt: "look at this",
+        dir: "/workspace/r"
+      })
       .catch(() => {});
 
     expect(calls[1]?.command).toMatch(
@@ -200,7 +212,11 @@ describe("where a session runs", () => {
     const session = claudeCodeSession(config());
 
     await session
-      .start(runtime, "1", "read", "look at this", "/workspace/r")
+      .start(runtime, "1", {
+        kind: "read",
+        prompt: "look at this",
+        dir: "/workspace/r"
+      })
       .catch(() => {});
 
     expect(calls[1]?.command).toContain(
@@ -213,7 +229,11 @@ describe("where a session runs", () => {
     const session = claudeCodeSession(config());
 
     await session
-      .start(runtime, "1", "write", "change this", "/workspace/r")
+      .start(runtime, "1", {
+        kind: "write",
+        prompt: "change this",
+        dir: "/workspace/r"
+      })
       .catch(() => {});
 
     expect(calls).toHaveLength(1);
@@ -249,14 +269,20 @@ describe("where a session runs", () => {
     try {
       const session = claudeCodeSession(config());
       await expect(
-        session.start(runtime, "1", "write", "work", "/workspace/r", {
-          signal: replaced.signal
-        })
+        session.start(
+          runtime,
+          "1",
+          { kind: "write", prompt: "work", dir: "/workspace/r" },
+          { signal: replaced.signal }
+        )
       ).rejects.toThrow(/live subscriber/);
       await expect(
-        session.followUp(runtime, "1", "session-1", "more", "/workspace/r", {
-          signal: replaced.signal
-        })
+        session.followUp(
+          runtime,
+          "1",
+          { sessionId: "session-1", prompt: "more", dir: "/workspace/r" },
+          { signal: replaced.signal }
+        )
       ).rejects.toThrow(/live subscriber/);
       expect(looks).toBe(2);
     } finally {
@@ -279,13 +305,11 @@ describe("where a session runs", () => {
     } as unknown as Runtime;
 
     await expect(
-      claudeCodeSession(config()).start(
-        runtime,
-        "1",
-        "read",
-        "look",
-        "/workspace/r"
-      )
+      claudeCodeSession(config()).start(runtime, "1", {
+        kind: "read",
+        prompt: "look",
+        dir: "/workspace/r"
+      })
     ).rejects.toThrow(/could not make a copy/);
     expect(calls).toEqual(["claude-code-run:1:copy"]);
   });
@@ -338,7 +362,11 @@ describe("where a session runs", () => {
     const { calls, runtime } = launchRecorder();
 
     await claudeCodeSession(config())
-      .followUp(runtime, "1", "sess-1", "one more thing", "/workspace/r")
+      .followUp(runtime, "1", {
+        sessionId: "sess-1",
+        prompt: "one more thing",
+        dir: "/workspace/r"
+      })
       .catch(() => {});
 
     expect(calls.map((c) => c.options.id)).toEqual([
@@ -349,17 +377,68 @@ describe("where a session runs", () => {
     expect(calls[0]?.command).toContain("'one more thing'");
   });
 
+  /**
+   * A run given a conversation to continue has no first session of its own, so
+   * the continuation is its **own** exec — not the follow-up's, which exists to
+   * follow a session this run ran.
+   */
+  it("continues a conversation on the run's own exec, in the checkout", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await claudeCodeSession(config())
+      .start(runtime, "1", {
+        kind: "write",
+        prompt: "carry on",
+        dir: "/workspace/r",
+        resume: { sessionId: "sess-1", fork: true },
+        configDir: "/workspace/.claude-sessions"
+      })
+      .catch(() => {});
+
+    expect(calls.map((c) => c.options.id)).toEqual(["claude-code-run:1"]);
+    expect(calls[0]?.options.cwd).toBe("/workspace/r");
+    expect(calls[0]?.command).toContain("--resume sess-1 --fork-session");
+    expect(calls[0]?.options.env?.CLAUDE_CONFIG_DIR).toBe(
+      "/workspace/.claude-sessions"
+    );
+    // No copy: a writing session works in the checkout it was given.
+    expect(calls[0]?.command).not.toContain("throwaway copy");
+  });
+
+  /**
+   * Without it the follow-up would look for the transcript under the CLI's own
+   * `$HOME/.claude`, find nothing, and start an unrelated session reported as
+   * the follow-up.
+   */
+  it("gives a follow-up the directory the session's transcript is in", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await claudeCodeSession(config())
+      .followUp(runtime, "1", {
+        sessionId: "sess-1",
+        prompt: "commit what you left",
+        dir: "/workspace/r",
+        configDir: "/workspace/.claude-sessions"
+      })
+      .catch(() => {});
+
+    expect(calls[0]?.options.env?.CLAUDE_CONFIG_DIR).toBe(
+      "/workspace/.claude-sessions"
+    );
+    expect(calls[0]?.command).toContain("--resume sess-1");
+    // One more turn of the same conversation is the opposite of a fork.
+    expect(calls[0]?.command).not.toContain("--fork-session");
+  });
+
   it("refuses a follow-up with no session id rather than starting a new session", async () => {
     const { calls, runtime } = launchRecorder();
 
     await expect(
-      claudeCodeSession(config()).followUp(
-        runtime,
-        "1",
-        "",
-        "more",
-        "/workspace/r"
-      )
+      claudeCodeSession(config()).followUp(runtime, "1", {
+        sessionId: "",
+        prompt: "more",
+        dir: "/workspace/r"
+      })
     ).rejects.toThrow(/needs the session id/);
     expect(calls).toEqual([]);
   });

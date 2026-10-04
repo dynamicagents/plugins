@@ -47,6 +47,34 @@ export interface SessionEnd {
   stderr?: string;
   /** The subscription bucket as the client last reported it, if it did. */
   rateLimit?: RateLimitInfo;
+  /**
+   * The Claude Code session id, from the `init` line by way of the drain's
+   * cursor — see {@link file://./run.ts DrainCursor.sessionId}.
+   *
+   * Here as well as on `result` because the sessions worth continuing are often
+   * the ones with no result: a session ended by its time limit, a cancel or a
+   * container rollout reports none, and this is then the only handle to the
+   * conversation it got half-way through.
+   */
+  sessionId?: string;
+}
+
+/**
+ * A session's handle, as the host is told it.
+ *
+ * Told **twice**: once with the id alone, as soon as the session's `init` line
+ * names it, and once with the session's end. The first call is what makes a
+ * session that is about to be killed resumable at all; the second says how the
+ * conversation it left stands.
+ *
+ * So a host keys its record on `sessionId` and keeps an `end` once it has one: a
+ * recovered turn can report the same id again without an end, and a record that
+ * let that erase the end would forget how the session finished.
+ */
+export interface SessionRecord {
+  sessionId: string;
+  /** Absent on the first call; the session's end on the second. */
+  end?: SessionEnd;
 }
 
 /** What a run amounted to, handed to `report`. */
@@ -93,8 +121,36 @@ export interface ClaudeCodeModelOptions {
    * the answer as `structured`, for `report` to read.
    */
   jsonSchema?: Record<string, unknown>;
+  /**
+   * A Claude Code conversation for this run to continue instead of starting one
+   * — see {@link file://./session.ts StartSession.resume}.
+   *
+   * Resolved by the host, in `prepare`, against whatever it recorded through
+   * {@link ClaudeCodeModelOptions.onSession}: which conversations exist in a
+   * workspace, and which of them a caller may continue, are the host's
+   * questions. The run's prompt is then the next user turn — its `brief` hook
+   * is the place to say what changed and nothing the session already holds.
+   */
+  resume?: { sessionId: string; fork?: boolean };
+  /**
+   * Where the session's own state goes — see
+   * {@link file://./run.ts LaunchOptions.configDir}.
+   *
+   * Per run and the host's, because a reading session cannot have one in the
+   * workspace: its namespace remounts the workspace read-only.
+   */
+  configDir?: string;
   /** Files one note on the parent's transcript: the sub-agent's `note`. */
   note: (key: string, text: string) => Promise<void>;
+  /**
+   * The session's handle, as soon as there is one and again when the session
+   * ends — see {@link SessionRecord}.
+   *
+   * Best-effort, like `note`: a throw is logged and the run goes on. Recording a
+   * handle is what makes a later run able to continue this conversation, and
+   * losing that is not worth losing the session over.
+   */
+  onSession?: (record: SessionRecord) => Promise<void>;
   /**
    * The session's prompt, from the task the parent sent. Defaults to the task.
    *
@@ -153,6 +209,33 @@ export function claudeCodeModel(
     /** The exec being drained, which leads each note's key. */
     let current = "";
     /**
+     * The handle already recorded, so one id is not announced twice over — and
+     * set only once the host has taken it, so a record that failed is tried
+     * again at the next checkpoint rather than given up on.
+     */
+    let announced = "";
+    /**
+     * Tell the host the session's handle, and never fail the run over it.
+     *
+     * Not on the note chain: a note is one line of a transcript, and this is the
+     * only way back to the conversation. It is awaited where it is called so a
+     * handle is recorded before whatever comes next can lose it.
+     */
+    const announce = async (record: SessionRecord): Promise<void> => {
+      const sink = options.onSession;
+      if (!sink) return;
+      try {
+        await sink(record);
+        announced = record.sessionId;
+      } catch (err) {
+        console.warn("[claude-code] the session's handle was not recorded", {
+          runId,
+          sessionId: record.sessionId,
+          err: String(err)
+        });
+      }
+    };
+    /**
      * Each note, filed as it is parsed, then the cursor behind it. Keyed on the
      * exec as well as the position: the parent's transcript is one per task and
      * dedupes on the key, so a run's notes must not collide with another run's
@@ -161,7 +244,15 @@ export function claudeCodeModel(
     const sinks = {
       onProgress: (note: { key: string; text: string }) =>
         options.note(`${current}:${note.key}`, note.text),
-      onCheckpoint: (cursor: DrainCursor) => storage.put(KEYS.cursor, cursor),
+      // The drain offers a cursor the moment the session id appears, which is
+      // what makes this the earliest the handle can be recorded — seconds in,
+      // rather than at the end a killed session never reaches.
+      onCheckpoint: async (cursor: DrainCursor) => {
+        await storage.put(KEYS.cursor, cursor);
+        if (cursor.sessionId && cursor.sessionId !== announced) {
+          await announce({ sessionId: cursor.sessionId });
+        }
+      },
       ...(signal ? { signal } : {})
     };
 
@@ -225,7 +316,10 @@ export function claudeCodeModel(
         exitCode: outcome.exitCode,
         ...(outcome.result ? { result: outcome.result } : {}),
         ...(outcome.stderr ? { stderr: outcome.stderr } : {}),
-        ...(outcome.rateLimit ? { rateLimit: outcome.rateLimit } : {})
+        ...(outcome.rateLimit ? { rateLimit: outcome.rateLimit } : {}),
+        ...(outcome.cursor.sessionId
+          ? { sessionId: outcome.cursor.sessionId }
+          : {})
       };
     };
 
@@ -255,14 +349,23 @@ export function claudeCodeModel(
         session.start(
           runtime,
           runId,
-          options.kind,
-          brief,
-          options.dir,
-          sinks,
-          options.jsonSchema
+          {
+            kind: options.kind,
+            prompt: brief,
+            dir: options.dir,
+            ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}),
+            ...(options.resume ? { resume: options.resume } : {}),
+            ...(options.configDir ? { configDir: options.configDir } : {})
+          },
+          sinks
         )
       );
       await storage.put(KEYS.session, ended);
+      // After the end is stored, so a turn that dies here does not report an end
+      // the run has not kept — and the handle is already recorded from the
+      // drain's first checkpoint, so nothing is lost either way.
+      if (ended.sessionId)
+        await announce({ sessionId: ended.sessionId, end: ended });
     }
 
     let followUpEnd = await storage.get<SessionEnd>(KEYS.followUpEnd);
@@ -273,16 +376,21 @@ export function claudeCodeModel(
         asked = prompt ? { prompt } : {};
         await storage.put(KEYS.followUp, asked);
       }
-      const sessionId = ended.result?.sessionId;
+      // The cursor's id as well as the result's: a session that was stopped
+      // before it reported still has a conversation worth one more turn.
+      const sessionId = ended.result?.sessionId ?? ended.sessionId;
       if (asked.prompt && sessionId) {
         const prompt = asked.prompt;
         followUpEnd = await drain(followUpExecIdFor(runId), (runtime) =>
           session.followUp(
             runtime,
             runId,
-            sessionId,
-            prompt,
-            options.dir,
+            {
+              sessionId,
+              prompt,
+              dir: options.dir,
+              ...(options.configDir ? { configDir: options.configDir } : {})
+            },
             sinks
           )
         );

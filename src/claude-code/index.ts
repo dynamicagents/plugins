@@ -59,10 +59,15 @@ export type {
   ClaudeCodeModelOptions,
   SessionEnd,
   SessionOutcome,
+  SessionRecord,
   SessionWorkspace
 } from "./model.js";
 export { claudeCodeSession } from "./session.js";
-export type { ClaudeCodeSession } from "./session.js";
+export type {
+  ClaudeCodeSession,
+  ResumeSession,
+  StartSession
+} from "./session.js";
 export {
   CLAUDE_CODE_AGENT,
   CLAUDE_CODE_READER_AGENT,

@@ -105,17 +105,21 @@ temporary directory, never over the machine's own `claude`, and launched with th
 command and environment `buildLaunch` gives a session. Its HTTPS goes through a proxy
 that terminates TLS for Anthropic with a throwaway CA, the way `http-gateway` egress
 does. Every request then goes through the real `claudeCodeEgress`, and on to a fake
-Anthropic, or with `--live` to the real API. A session is run once, resumed, and
-then run once more with a `jsonSchema`, so every flag the plugin passes is exercised.
+Anthropic, or with `--live` to the real API. A session is run once, resumed,
+forked, and run once more with a `jsonSchema`, so every flag the plugin passes is
+exercised — then asked to resume a conversation that does not exist, which is the
+one run that must reach the API not at all.
 
 **It fails when:**
 
-- the CLI does not exit 0;
+- the CLI does not exit 0 on a run meant to succeed;
 - a `stream-json` line does not parse;
 - a result's reply, structured answer or token counts do not read back. The fake
   reports a distinct count for each field, because the parser reads a renamed field
   as zero rather than failing;
-- the resumed session is not the same session;
+- the resumed session is not the same session, or the forked one is not a new one;
+- a resume of an unknown session does not report itself on a `result` line with
+  `errors`, or spends a model call doing it;
 - a request reaches Anthropic without the real credential, or with the placeholder or
   an `x-api-key` still on it.
 

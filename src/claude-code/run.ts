@@ -201,13 +201,70 @@ export interface LaunchOptions {
   jsonSchema?: Record<string, unknown>;
 
   /**
-   * A session id to continue, from an earlier session's `result` line.
+   * A Claude Code session id to continue — the handle an earlier session left on
+   * its {@link DrainCursor}, or reported on its `result` line.
    *
-   * The transcript lives on the container's disk, so this only resumes a session
-   * that ran in the same container. {@link LaunchOptions.prompt} is then the next
-   * user turn rather than a new task.
+   * {@link LaunchOptions.prompt} is then the **next user turn** rather than a new
+   * task: the conversation is already in the session's context, so a brief that
+   * restates it pays for it twice.
+   *
+   * Not scoped to the working directory — a session recorded against one cwd
+   * resumes under another and goes on appending to the original transcript — so
+   * what decides whether this works is where the transcript is, which is
+   * {@link LaunchOptions.configDir}.
+   *
+   * **An id whose transcript is not there is not a failed session.** The CLI
+   * prints `No conversation found with session ID`, emits a `result` line
+   * carrying that as {@link file://./events.ts ClaudeCodeResult.errors}, and
+   * exits in milliseconds; its client still makes its own startup requests, but
+   * nothing is inferred and nothing is billed. The honest report is "not
+   * resumable", and the retry is the same delegation without this.
    */
   resume?: string;
+
+  /**
+   * Fork the resumed conversation: continue it under a **new** session id,
+   * leaving the original transcript whole and resumable.
+   *
+   * What a change of kind wants — a finished plan session continued as a writing
+   * one — so that the plan's own conversation can still be resumed for an edit
+   * afterwards. Continuing the same kind takes no fork: one conversation
+   * accumulating is what "continue" means.
+   *
+   * Refused without {@link LaunchOptions.resume}: on its own the flag has no
+   * conversation to fork, and a caller that set it meant to resume one.
+   */
+  fork?: boolean;
+
+  /**
+   * Where Claude Code keeps its own state — `CLAUDE_CONFIG_DIR`.
+   *
+   * Relocates the **whole** config directory, creating it if absent: the
+   * transcripts under `projects/<cwd-with-/-as-->/<session-id>.jsonl`, the
+   * session index, `.claude.json` and the auto-memory directory. It holds no
+   * credential.
+   *
+   * This is what decides how long a session stays resumable. Left unset it is
+   * `$HOME/.claude` on the container's disk, so the conversation dies with the
+   * container — which a deploy, a rollout and the workspace's own idle timer all
+   * end. Pointed inside the workspace mount it is the Durable Object's storage,
+   * and the conversation outlives the container that held it.
+   *
+   * **A session whose namespace remounts the workspace read-only cannot have one
+   * there.** The CLI writes this directory as it runs; see
+   * {@link READ_ONLY_LAUNCH}. So the choice belongs to the host, per session,
+   * rather than to a deployment-wide config field.
+   *
+   * A host putting it in the workspace should name the directory
+   * {@link file://../computer/paths.ts SESSION_STATE_DIR}, which is the name the
+   * file tools' walk steps over: a transcript records every line the session
+   * read, so a walk that descended into it would answer the parent's `grep` for
+   * a line of source with the session that quoted it. That name is defined
+   * beside the walk rather than here, and deliberately not imported across:
+   * `/computer` and `/claude-code` are separate subpaths, and a consumer
+   * installing one does not pay for the other.
+   */
+  configDir?: string;
 }
 
 /**
@@ -273,13 +330,15 @@ function gitIdentityEnv(
  * `--verbose` is required: without it Claude Code emits
  * only the final result even in stream mode.
  *
- * Note what is **absent**. No `--bare`, no `--settings` override, no
- * `CLAUDE_CONFIG_DIR`: a cloned repository's `CLAUDE.md`, skills and hooks are
- * exactly the material that makes the agent good at that repository, and the
- * container is already an arbitrary-code-execution environment by design — the
- * install runs the repo's `postinstall`, the agent runs its test suite. Stripping
- * one door while the others stand open buys nothing and costs the agent its
- * context.
+ * Note what is **absent**. No `--bare` and no `--settings` override: a cloned
+ * repository's `CLAUDE.md`, skills and hooks are exactly the material that makes
+ * the agent good at that repository, and the container is already an
+ * arbitrary-code-execution environment by design — the install runs the repo's
+ * `postinstall`, the agent runs its test suite. Stripping one door while the
+ * others stand open buys nothing and costs the agent its context.
+ * `CLAUDE_CONFIG_DIR` is not that kind of flag and is set when a host asks: it
+ * moves where the *client* keeps its own state, touching nothing a repository
+ * ships — see {@link LaunchOptions.configDir}.
  *
  * No `ANTHROPIC_BASE_URL` either: `http-gateway` egress intercepts
  * transparently, so the client talks to the real hostname and the gateway sees
@@ -331,10 +390,23 @@ export function buildLaunch(options: LaunchOptions): Launch {
     );
   }
 
+  /**
+   * Refused rather than dropped: dropped, a caller that asked to fork a
+   * conversation gets a session that started one of its own, and reports it as
+   * the continuation of whatever it was told to continue.
+   */
+  if (options.fork && !options.resume) {
+    throw new Error(
+      "claude-code: `fork` forks a resumed conversation, so it needs the " +
+        "`resume` session id it is forking."
+    );
+  }
+
   const permissionMode = options.permissionMode ?? DEFAULT_PERMISSION_MODE;
 
   const argv = ["claude", "-p", shellQuote(options.prompt)];
   if (options.resume) argv.push("--resume", shellQuote(options.resume));
+  if (options.fork) argv.push("--fork-session");
   argv.push("--output-format", "stream-json", "--verbose");
   argv.push("--permission-mode", permissionMode);
   if (options.model) argv.push("--model", shellQuote(options.model));
@@ -386,6 +458,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
       ...gitIdentityEnv(options.author),
       ...(options.readOnly ? { CLAUDE_READ_ONLY: options.readOnly } : {}),
       ...(options.workdir ? { CLAUDE_WORKDIR: options.workdir } : {}),
+      ...(options.configDir ? { CLAUDE_CONFIG_DIR: options.configDir } : {}),
       [RESERVED_ENV_KEY]: CREDENTIAL_PLACEHOLDER
     }
   };
@@ -403,6 +476,20 @@ export interface DrainCursor {
   execId: string;
   /** The last event sequence consumed; a resumed drain starts here. */
   seq: number;
+  /**
+   * The Claude Code session id, from the `init` line — the handle that continues
+   * this conversation later.
+   *
+   * Carried here rather than read off the `result` line alone because the runs
+   * that most need continuing are the ones that never reach a result: a session
+   * stopped by its time limit, a cancel or a container rollout reports no result
+   * at all, and without this the conversation it got half-way through would be
+   * unreachable. The `init` line arrives in the first seconds, so a session has a
+   * handle almost from the start — which is why {@link drainRun} offers the
+   * cursor the moment the id appears instead of waiting out
+   * {@link CHECKPOINT_MIN_MS}.
+   */
+  sessionId?: string;
   /** Bytes after the last newline — an incomplete line the next read finishes. */
   carry: string;
   /** Progress notes emitted so far. The base for the positional keys. */
@@ -786,6 +873,12 @@ export async function drainRun(
   // a resumed session's bucket visible without carrying a stale one forward.
   let rateLimit: RateLimitInfo | undefined;
   let stderr = cursor.stderr ?? "";
+  let sessionId = cursor.sessionId;
+  /**
+   * Set when this drain is the one that learned the session id, and cleared by
+   * the checkpoint it lets through. See {@link DrainCursor.sessionId}.
+   */
+  let newHandle = false;
   let exitCode: number | undefined;
   let checkpointedAt = now();
   /**
@@ -822,6 +915,12 @@ export async function drainRun(
     buffer = parsed.carry;
     for (const event of parsed.events) {
       if (event.kind === "result") result = event.result;
+      // The first one only, and it is the id of whatever this drain is actually
+      // draining: a resumed conversation's own, or the new one a fork starts.
+      if (event.kind === "init" && !sessionId) {
+        sessionId = event.sessionId;
+        newHandle = true;
+      }
       if (event.kind === "rateLimit") {
         /**
          * Logged when the reading **changes**, not per line — and a change is
@@ -902,6 +1001,7 @@ export async function drainRun(
     seq,
     carry: buffer,
     emitted,
+    ...(sessionId ? { sessionId } : {}),
     ...(result ? { result } : {}),
     ...(stderr ? { stderr } : {}),
     ...(cursor.copy ? { copy: true as const } : {})
@@ -909,11 +1009,16 @@ export async function drainRun(
 
   /**
    * Offer the caller a cursor to store, at most every
-   * {@link CHECKPOINT_MIN_MS}.
+   * {@link CHECKPOINT_MIN_MS} — and once more the moment the session id appears.
    *
    * Fire-and-forget onto the same chain the notes ride, so a storage write
    * cannot stall the read loop and cannot land before the notes it claims are
    * already posted.
+   *
+   * **The id does not wait for the interval.** It is the handle to everything
+   * that follows — the one thing that lets a later run continue this
+   * conversation — and a session killed inside the first interval would
+   * otherwise leave none. One extra write per session buys that.
    */
   const offerCheckpoint = (): void => {
     const sink = options.onCheckpoint;
@@ -923,7 +1028,8 @@ export async function drainRun(
     // delivered, and a drain dying after it loses them permanently. The
     // documented unsafe combination is one nothing can reach.
     if (!sink || !options.onProgress || rejected) return;
-    if (now() - checkpointedAt < CHECKPOINT_MIN_MS) return;
+    if (newHandle) newHandle = false;
+    else if (now() - checkpointedAt < CHECKPOINT_MIN_MS) return;
     checkpointedAt = now();
     const at = checkpoint();
     // Checked again on the chain: a note queued ahead of this one may yet be

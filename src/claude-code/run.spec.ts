@@ -159,6 +159,14 @@ function brokenHandle(script: readonly Event[]): {
 const line = (value: unknown) => `${JSON.stringify(value)}\n`;
 const assistant = (text: string) =>
   line({ type: "assistant", message: { content: [{ type: "text", text }] } });
+/** The line that names the session, which the CLI emits within seconds. */
+const initLine = (sessionId: string) =>
+  line({
+    type: "system",
+    subtype: "init",
+    session_id: sessionId,
+    model: "opus"
+  });
 const RESULT_LINE = line({
   type: "result",
   subtype: "success",
@@ -218,6 +226,54 @@ describe("buildLaunch", () => {
       `--json-schema ${shellQuote(JSON.stringify(schema))}`
     );
     expect(launch().command).not.toContain("--json-schema");
+  });
+
+  describe("continuing a conversation", () => {
+    it("resumes the id it is given, and forks only when asked", () => {
+      expect(launch({ resume: "sess-7" }).command).toContain("--resume sess-7");
+      // A continuation of the same kind accumulates in one conversation, which
+      // is what `continue` means — the fork is for the kind changing.
+      expect(launch({ resume: "sess-7" }).command).not.toContain(
+        "--fork-session"
+      );
+      expect(launch({ resume: "sess-7", fork: true }).command).toContain(
+        "--resume sess-7 --fork-session"
+      );
+    });
+
+    /**
+     * Dropped, the flag would leave a session that started a conversation of
+     * its own and reported itself as the continuation of somebody else's.
+     */
+    it("refuses a fork with no conversation to fork", () => {
+      expect(() => launch({ fork: true })).toThrow(
+        /needs the .resume. session/
+      );
+    });
+
+    it("puts the client's own state where the host asks, and nowhere by default", () => {
+      expect(
+        launch({ configDir: "/workspace/.claude-sessions" }).env
+          .CLAUDE_CONFIG_DIR
+      ).toBe("/workspace/.claude-sessions");
+      // Unset, the CLI's own `$HOME/.claude` — on the container's disk, so the
+      // conversation dies with the container.
+      expect(launch().env.CLAUDE_CONFIG_DIR).toBeUndefined();
+    });
+
+    /**
+     * Where a transcript goes is decided per session — a reading session's
+     * namespace makes the workspace read-only, so only the host knows — and a
+     * deployment-wide `env` must not be able to answer it instead.
+     */
+    it("is not something a host's own environment can redirect", () => {
+      expect(
+        launch({
+          configDir: "/workspace/.claude-sessions",
+          env: { CLAUDE_CONFIG_DIR: "/root/.claude" }
+        }).env.CLAUDE_CONFIG_DIR
+      ).toBe("/workspace/.claude-sessions");
+    });
   });
 
   /**
@@ -1358,6 +1414,73 @@ describe("drainRun, reporting as it goes", () => {
     // that is the only reason it is safe to resume from mid-stream.
     expect(checkpoints[0]!.emitted).toBe(2);
     expect(checkpoints[0]!.seq).toBe(2);
+  });
+
+  /**
+   * The id is the handle to everything a later run might continue, and the runs
+   * that most need continuing are the ones that end badly — so the question each
+   * of these asks is whether the handle survives the way that run ended.
+   */
+  describe("the session's handle", () => {
+    it("offers the id the moment it appears, without waiting out the interval", async () => {
+      const checkpoints: DrainCursor[] = [];
+      // Frozen: nothing here has waited `CHECKPOINT_MIN_MS`, so a checkpoint
+      // offered at all is one the id let through.
+      const clock = () => 0;
+      const outcome = await drainRun(
+        fakeHandle([
+          stdout(1, initLine("sess-9") + assistant("reading the tree")),
+          exit(2, 0)
+        ]),
+        FRESH,
+        {
+          now: clock,
+          onProgress: () => {},
+          onCheckpoint: (cursor) => {
+            checkpoints.push(cursor);
+          }
+        }
+      );
+
+      expect(checkpoints.map((c) => c.sessionId)).toEqual(["sess-9"]);
+      expect(outcome.cursor.sessionId).toBe("sess-9");
+    });
+
+    /**
+     * The case the cursor's copy of the id exists for: a session stopped by its
+     * time limit, a cancel or a container rollout reports no result at all, and
+     * the conversation it got half-way through would otherwise be unreachable.
+     */
+    it("keeps the id on a session that died before reporting anything", async () => {
+      const outcome = await drainRun(
+        fakeHandle([stdout(1, initLine("sess-9")), exit(2, 143)]),
+        FRESH
+      );
+
+      if (!outcome.done) throw new Error("unreachable");
+      expect(outcome.result).toBeUndefined();
+      expect(outcome.cursor.sessionId).toBe("sess-9");
+    });
+
+    /**
+     * A resumed drain re-reads whatever arrived after the stored position, the
+     * `init` line included. The id a host has already recorded is the one the
+     * cursor keeps.
+     */
+    it("holds the first id against a replayed init line", async () => {
+      const first = await drainRun(
+        fakeHandle([stdout(1, initLine("sess-9"))], true),
+        FRESH,
+        stopAfter(50)
+      );
+      expect(first.cursor.sessionId).toBe("sess-9");
+
+      const second = await drainRun(
+        fakeHandle([stdout(2, initLine("sess-other")), exit(3, 0)]),
+        first.cursor
+      );
+      expect(second.cursor.sessionId).toBe("sess-9");
+    });
   });
 
   it("reports a bucket reading only to the drain that saw it", async () => {

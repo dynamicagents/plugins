@@ -40,7 +40,7 @@ import { grepTools } from "./tools-grep.js";
  * entry point. `verify:exports` treats `./computer` as one realm, so what it
  * exports must not move when the files behind it do.
  */
-export { isGitInternal, WALK_SKIPS } from "./paths.js";
+export { isGitInternal, SESSION_STATE_DIR, WALK_SKIPS } from "./paths.js";
 export {
   packBlocks,
   renderGrepMatches,

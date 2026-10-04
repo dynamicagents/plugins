@@ -377,6 +377,14 @@ export class AnthropicCodingWriterChild extends SubAgent<Env> {
       kind: "write",
       dir,
       note: (key, text) => this.note(key, text),
+      // The session's handle, as soon as it has one and again when it ends. It
+      // goes in the workspace object that ran the session, because the id names
+      // a transcript in that container — see "A session has a handle" below.
+      onSession: (record) => stub.noteSession(record),
+      // Where the client keeps its state. In the workspace, so the conversation
+      // outlives the container; a reading session's has to stay on container
+      // disk, so leave it unset for one.
+      configDir: `${WORKSPACE_DIR}/${SESSION_STATE_DIR}`,
       // Once per run, before the session starts. A throw fails the run with its
       // message — how a host refuses a run its credentials cannot pay for.
       brief: async (task) => this.#brief(task, stub),
@@ -408,8 +416,9 @@ on field by field rather than passing along: `report` reads it as the result's
 `structured`. `LaunchOptions.jsonSchema` in `./run.ts` has how the CLI gets it.
 
 **The follow-up is a second exec.** `claude -p --resume` under an exec id of its
-own, so its cursor and its notes are its own. The transcript is on the container's
-disk, so it runs in the workspace the session did. `stop` ends it with the session.
+own, so its cursor and its notes are its own. It runs in the workspace the session
+did, and under the same `configDir`, because both decide where the transcript it is
+continuing can be found. `stop` ends it with the session.
 
 **The cursor is stored behind the notes.** It rides the same chain as the notes it
 counts, so a stored position never names a note that was not filed; a drain that
@@ -449,6 +458,91 @@ session's edits reaching the checkout — anything that then commits or pushes f
 the workspace side — should drive `workspace.pull()` to completion before it
 reads, and certainly before it stops the container. A session that wrote an
 install's dependency tree makes that pull a large one.
+
+## A session has a handle, and a later run may continue it
+
+Every session's `init` line names it, within seconds of starting. That id is the
+handle to the whole conversation, and it reaches a host two ways:
+
+- on the drain's **cursor** (`DrainCursor.sessionId`), and so on `SessionEnd` —
+  which is the half that matters, because the sessions worth continuing are often
+  the ones that never reach a `result` line. A time limit, a cancel or a container
+  rollout ends a session with no result at all;
+- through **`onSession`**, called with the id the moment it appears and again with
+  the session's end. The first call is what makes a session that is about to be
+  killed resumable; the second says how the conversation it left stands. The drain
+  offers its cursor as soon as the id appears rather than waiting out its
+  checkpoint interval, which is what makes the first call early enough to matter.
+
+`onSession` is best-effort, like `note` — a throw is logged and the run goes on.
+Where the record lives is the host's: the id describes a transcript in one
+workspace's container, so the workspace object that ran the session is the place
+that can answer for it. A host keys its record on the id and keeps an `end` once it
+has one; a recovered turn can report the same id again without one.
+
+**A run continues a conversation with `resume`**, which the host resolves in
+`prepare` — which conversations exist in a workspace, and which a caller may
+continue, are its questions, not the model's. The run's prompt is then the next
+user turn: the session already holds the conversation, so a brief that restates it
+pays for it twice. `fork` continues it under a **new** id and leaves the original
+whole, which is what a change of kind wants — a finished plan session continued as
+a writing one, with the plan's own conversation still resumable for an edit.
+Continuing the same kind takes no fork: one conversation accumulating is what
+continuing means.
+
+Measured against the pinned CLI, and all of it load-bearing here:
+
+- `--resume <id>` is **not scoped to the working directory**. A session recorded
+  against one cwd resumes under another, reports the original id, and goes on
+  appending to the original transcript. So what decides whether a resume works is
+  where the transcript is, not where the session runs.
+- `--resume <id> --permission-mode <other>` is accepted, and the `init` line
+  reports the **new** mode. A resume can therefore change mode, which is the whole
+  of "going from a plan to doing the work" at the CLI level.
+- `--resume <unknown-id>` is **not a failed session**: the CLI prints
+  `No conversation found with session ID: …` and emits a `result` line —
+  `error_during_execution`, `is_error: true`, the sentence in `errors`, no reply —
+  then exits 1 in milliseconds. Its client still makes its own startup requests,
+  but nothing is inferred and nothing is billed. Report it as "not resumable" and
+  delegate again without `resume`; `ClaudeCodeResult.errors` is the only account
+  there is of it.
+- **`--session-id` is deliberately not used.** Naming the id up front would make
+  the handle known before launch, and its failure mode is worse than its benefit: a
+  relaunch inside the same container exits 1 with `Session ID … is already in use`
+  on stderr and nothing on stdout — the class of death that reports nothing. The
+  `init` line's id gives the same handle and adds no failure.
+
+### How long a conversation stays resumable
+
+The transcript is a file:
+`$CLAUDE_CONFIG_DIR|$HOME/.claude/projects/<cwd-with-/-as-->/<session-id>.jsonl`.
+
+**Unset, that is the container's disk, and the conversation dies with the
+container** — a deploy, a container rollout, a release at task settle and the
+workspace's own idle timer all end one. A resume after that is the refusal above,
+and the branch and its commits are untouched by it: what is gone is the
+conversation, not the work.
+
+**`configDir` moves it.** `CLAUDE_CONFIG_DIR` relocates the whole config directory,
+creating it if absent — the transcripts, the session index, `.claude.json` (which
+carries no credential) and the client's auto-memory directory. Pointed inside the
+workspace mount it is the Durable Object's storage, so the conversation outlives
+the container, bounded then by the workspace's own retention. A session's edits and
+its transcript reach the workspace by the same pull, so a drained session syncs
+both; a container replaced mid-run syncs only what the last pull carried.
+
+Two constraints on where a host puts it:
+
+- **A reading session cannot have one in the workspace.** Its namespace remounts
+  everything under the workspace read-only and the CLI writes this directory as it
+  runs, so a reader's config dir stays on container disk. That is why `configDir`
+  is per run rather than a config field.
+- **Name the directory `SESSION_STATE_DIR`**, from this package's `./computer`
+  subpath, and put it outside any checkout. It is the name the file tools' walk
+  steps over: a transcript quotes every line the session read, so a `grep` that
+  descended into it would answer a question about the source with the conversation
+  that mentioned it. Outside the checkout also keeps it out of reach of a
+  `git clean -ffdx`.
 
 ## Updating Claude Code
 
@@ -490,6 +584,7 @@ not alternatives:
 | `default`           | read only — everything else is auto-denied                                                             |
 | `acceptEdits`       | edit files; `npm ci`, `git` and the test suite still denied                                            |
 | `dontAsk`           | "deny if not pre-approved" — the default's behaviour, named                                            |
+| `manual`            | documented by the CLI and unexercised here — whatever it would prompt for, headless denies             |
 | `plan`              | reads and produces a plan, changing nothing — and there is no interactive session here to approve it   |
 | `auto`              | a model classifier rules on each call, spending the same subscription bucket the session is drawing on |
 | `bypassPermissions` | the whole job                                                                                          |
@@ -552,12 +647,14 @@ worth more than two that half-finish — but it is bought, not free.
 
 ## What this deliberately does not do
 
-- **No `--bare`, no `--settings` override, no `CLAUDE_CONFIG_DIR`.** A cloned
-  repository's `CLAUDE.md`, skills and hooks are exactly the material that makes
-  the agent good at that repository. The container already runs the repo's
-  `postinstall` and its test suite, so suppressing `.claude/` closes one door
-  while the others stand open by design — it costs the agent its context and buys
-  nothing. Containment is the credential swap.
+- **No `--bare` and no `--settings` override.** A cloned repository's `CLAUDE.md`,
+  skills and hooks are exactly the material that makes the agent good at that
+  repository. The container already runs the repo's `postinstall` and its test
+  suite, so suppressing `.claude/` closes one door while the others stand open by
+  design — it costs the agent its context and buys nothing. Containment is the
+  credential swap. `CLAUDE_CONFIG_DIR` is not one of these: it moves where the
+  _client_ keeps its own state and touches nothing a repository ships, which is
+  why a host may set it — see above.
 - **No claude.ai login flow, ever.** Credentials are BYO-paste from
   `claude setup-token`. Anthropic does not allow third-party developers to offer
   claude.ai login or subscription rate limits for their products.

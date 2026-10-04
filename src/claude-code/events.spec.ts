@@ -350,6 +350,60 @@ describe("parseStream", () => {
       expect(event.result.costUsd).toBe(0);
       expect(event.result.text).toBe("");
     });
+
+    /**
+     * A `--resume` naming a conversation the config directory does not hold.
+     * The CLI gives up in milliseconds, having called nothing and spent nothing,
+     * and this line is the entire account of why — so a caller that cannot read
+     * `errors` reports a session that failed for no stated reason, when what
+     * actually happened is that there was nothing to resume.
+     */
+    it("reads the errors a refused resume reports, since nothing else explains it", () => {
+      const { events } = parseStream(
+        line({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["No conversation found with session ID: sess-gone"],
+          session_id: "sess-new",
+          api_error_status: null
+        })
+      );
+      const event = events[0] as Extract<ClaudeCodeEvent, { kind: "result" }>;
+
+      expect(event.result.errors).toEqual([
+        "No conversation found with session ID: sess-gone"
+      ]);
+      expect(event.result.text).toBe("");
+    });
+
+    it("says nothing about errors on a run that had none", () => {
+      const { events } = parseStream(line(RESULT));
+      const event = events[0] as Extract<ClaudeCodeEvent, { kind: "result" }>;
+      expect(event.result.errors).toBeUndefined();
+    });
+
+    /**
+     * The field is a vendor's, and an entry carrying a code and a message is a
+     * likely shape for it. Dropping one would throw away the only account of the
+     * failure it describes.
+     */
+    it("keeps an entry that is not a string rather than dropping it", () => {
+      const { events } = parseStream(
+        line({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: [{ code: "ENOENT", message: "no such conversation" }, "", 7]
+        })
+      );
+      const event = events[0] as Extract<ClaudeCodeEvent, { kind: "result" }>;
+
+      expect(event.result.errors).toEqual([
+        '{"code":"ENOENT","message":"no such conversation"}',
+        "7"
+      ]);
+    });
   });
 });
 
@@ -589,6 +643,15 @@ describe("a session launched with a JSON Schema", () => {
  */
 describe("the verified version's recorded runs", () => {
   const runs = Object.entries(capture.runs);
+  /**
+   * The one recorded run that is meant to fail: a `--resume` naming a
+   * conversation the config directory does not hold. It answers none of the
+   * questions below about a reply or its cost, and answers one of its own.
+   */
+  const REFUSED = "unresumable";
+  const answered = runs.filter(([run]) => run !== REFUSED);
+  const parse = (lines: string[]) =>
+    parseStream(lines.map((l) => `${l}\n`).join(""));
 
   /** The two are written together; a partial record or a merge can part them. */
   it("are the verified version's", () => {
@@ -596,29 +659,46 @@ describe("the verified version's recorded runs", () => {
   });
 
   it.each(runs)("reads every line of the %s run", (_, lines) => {
-    const parsed = parseStream(lines.map((l) => `${l}\n`).join(""));
+    const parsed = parse(lines);
     expect(parsed.skipped).toBe(0);
     expect(parsed.sample).toBeUndefined();
   });
 
-  it.each(runs)("reads the %s run's result, counts included", (run, lines) => {
-    const { events } = parseStream(lines.map((l) => `${l}\n`).join(""));
+  /**
+   * What a host has to report as "not resumable" rather than as a failed
+   * session: the run cost nothing, so the only thing to pass on is this.
+   */
+  it("reads the refused resume's reason off its result line", () => {
+    const { events } = parse(capture.runs[REFUSED]);
     const result = events.find((event) => event.kind === "result");
-    const { usage, reply, structured } = capture.fake;
 
-    expect(result?.kind === "result" && result.result).toMatchObject({
-      isError: false,
-      // The structured run answers through `StructuredOutput`, and its text is
-      // that answer as JSON.
-      ...(run === "structured"
-        ? { structured, text: JSON.stringify(structured) }
-        : { text: reply }),
-      usage: {
-        input: usage.input_tokens,
-        output: usage.output_tokens,
-        cacheRead: usage.cache_read_input_tokens,
-        cacheWrite: usage.cache_creation_input_tokens
-      }
-    });
+    expect(result?.kind === "result" && result.result.isError).toBe(true);
+    expect(
+      result?.kind === "result" && result.result.errors?.length
+    ).toBeGreaterThan(0);
   });
+
+  it.each(answered)(
+    "reads the %s run's result, counts included",
+    (run, lines) => {
+      const { events } = parse(lines);
+      const result = events.find((event) => event.kind === "result");
+      const { usage, reply, structured } = capture.fake;
+
+      expect(result?.kind === "result" && result.result).toMatchObject({
+        isError: false,
+        // The structured run answers through `StructuredOutput`, and its text is
+        // that answer as JSON.
+        ...(run === "structured"
+          ? { structured, text: JSON.stringify(structured) }
+          : { text: reply }),
+        usage: {
+          input: usage.input_tokens,
+          output: usage.output_tokens,
+          cacheRead: usage.cache_read_input_tokens,
+          cacheWrite: usage.cache_creation_input_tokens
+        }
+      });
+    }
+  );
 });

@@ -16,7 +16,10 @@
  * egress does, done locally. Every request goes through the real
  * `claudeCodeEgress`, and on to a fake Anthropic that streams a canned reply,
  * or with `--live` to the real API on `CLAUDE_CODE_OAUTH_TOKEN`. A session is
- * run once and then resumed, as a writer's warning turn is.
+ * run once, resumed as a writer's warning turn is, forked as a change of kind
+ * resumes, run once more with a `jsonSchema`, and finally asked to resume a
+ * conversation that does not exist — which is what a host hits when the
+ * container that held one is gone, and which must cost nothing.
  *
  * A failed check exits 1. What differs from the recorded capture is reported
  * and is not a failure: it is what a reviewer reads before taking the bump.
@@ -31,7 +34,7 @@
  * builds first.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -70,6 +73,12 @@ const SCHEMA = {
 const STRUCTURED = { answer: REPLY };
 /** The tool `--json-schema` gives the model, by the name the CLI gives it. */
 const STRUCTURED_TOOL = "StructuredOutput";
+/**
+ * A session id no transcript can be under: a fresh uuid, in a config directory
+ * this run created. What a host's resume hits when the container that held the
+ * conversation is gone.
+ */
+const UNKNOWN_SESSION = randomUUID();
 /** Carries a request's index through the gateway; removed before upstream. */
 const PROBE_ID = "x-claude-code-probe-id";
 
@@ -227,8 +236,20 @@ try {
         resume: first.result.sessionId
       })
     : undefined;
+  const forked = first.result?.sessionId
+    ? await runSession(bin, proxyUrl, certs.ca, {
+        resume: first.result.sessionId,
+        fork: true
+      })
+    : undefined;
   const structured = await runSession(bin, proxyUrl, certs.ca, {
     jsonSchema: SCHEMA
+  });
+  // Last, and the count is taken before it: this one must reach the API not at
+  // all, and a request made after it could only be its own.
+  const calledBefore = requests.length;
+  const unresumable = await runSession(bin, proxyUrl, certs.ca, {
+    resume: UNKNOWN_SESSION
   });
   proxy.close();
 
@@ -243,7 +264,54 @@ try {
   } else {
     check("the resumed run ran", false, "the first run reported no session id");
   }
+  if (forked) {
+    checkRun("forked run", forked);
+    /**
+     * A fork is what a change of kind resumes with, and it is only worth
+     * anything if the conversation it forked stays whole — so the id has to be a
+     * new one rather than the original continuing under another name.
+     */
+    check(
+      "the forked run starts a session of its own",
+      Boolean(forked.result?.sessionId) &&
+        forked.result.sessionId !== first.result.sessionId,
+      `${first.result.sessionId} → ${forked.result?.sessionId}`
+    );
+  } else {
+    check("the forked run ran", false, "the first run reported no session id");
+  }
   checkRun("structured run", structured, { structured: true });
+  /**
+   * A resume of a conversation that is not there. This has to stay cheap and
+   * legible, because it is the fallback for every check a host skips: a
+   * `result` line naming the reason, no API call, nothing spent. A version that
+   * started a fresh session instead would silently do unrelated work under a
+   * caller's "continue this" — which is why this is a check and not a note.
+   */
+  check(
+    "a resume with nothing to resume says so on the result line",
+    unresumable.parsed.skipped === 0 &&
+      unresumable.result?.isError === true &&
+      (unresumable.result.errors?.length ?? 0) > 0,
+    JSON.stringify({
+      code: unresumable.code,
+      subtype: unresumable.result?.subtype,
+      errors: unresumable.result?.errors
+    })
+  );
+  /**
+   * **No model call**, rather than no request at all: the client still makes its
+   * own startup requests before it looks for the conversation. Nothing is
+   * inferred and nothing is billed, which is what makes a refused resume
+   * something a host can simply report and retry without one.
+   */
+  const afterRefusal = requests.slice(calledBefore);
+  check(
+    "and makes no model call doing it",
+    afterRefusal.every((r) => !r.path.startsWith("/v1/messages")),
+    afterRefusal.map((r) => `${r.method} ${r.path}`).join(", ") ||
+      "no request at all"
+  );
 
   // Every intercepted request, not the ones that got through: a request the
   // gateway refused never reaches upstream, and would otherwise go unseen.
@@ -279,7 +347,9 @@ try {
     runs: {
       first: normalizeLines(first.lines),
       resumed: normalizeLines(second?.lines ?? []),
-      structured: normalizeLines(structured.lines)
+      forked: normalizeLines(forked?.lines ?? []),
+      structured: normalizeLines(structured.lines),
+      unresumable: normalizeLines(unresumable.lines)
     }
   };
 
@@ -525,11 +595,12 @@ function listen(gateway, certs, requests, refused) {
 }
 
 /** One session, launched as `buildLaunch` launches it, and its stream parsed. */
-function runSession(bin, proxyUrl, ca, { resume, jsonSchema } = {}) {
+function runSession(bin, proxyUrl, ca, { resume, fork, jsonSchema } = {}) {
   const launch = buildLaunch({
     prompt: `Reply with exactly: ${REPLY}`,
     dir: work,
     ...(resume ? { resume } : {}),
+    ...(fork ? { fork: true } : {}),
     ...(jsonSchema ? { jsonSchema } : {})
   });
   if (!launch.command.startsWith("claude ")) {

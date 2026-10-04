@@ -14,9 +14,23 @@
  * the exact failure this option exists to end. The CLI validates the value too,
  * but it does so by exiting 1 with a message on stderr, and stderr reaches an
  * operator far less reliably than a type error reaches a developer.
+ *
+ * Two of these are worth knowing about before picking one. `default` is not
+ * among the choices the pinned CLI documents, and is accepted and echoed back as
+ * `permissionMode: "default"` anyway — so it stays. `manual` is the reverse: the
+ * CLI documents it and no session here has been run under it, so it is spellable
+ * rather than recommended, and whatever it prompts for the headless path denies.
+ * See {@link ClaudeCodeConfig.permissionMode} for why the default is the
+ * permissive one.
  */
 export type PermissionMode =
-  "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto";
+  | "default"
+  | "acceptEdits"
+  | "bypassPermissions"
+  | "plan"
+  | "dontAsk"
+  | "manual"
+  | "auto";
 
 /**
  * What a session runs under when a deployment says nothing.

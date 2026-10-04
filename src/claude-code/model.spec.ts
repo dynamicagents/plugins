@@ -3,7 +3,8 @@ import { shellQuote, type WorkspaceRuntimeEvent } from "@cloudflare/computer";
 import {
   claudeCodeModel,
   type ClaudeCodeModelOptions,
-  type SessionOutcome
+  type SessionOutcome,
+  type SessionRecord
 } from "./model.js";
 import { execIdFor, followUpExecIdFor, type SessionRuntime } from "./run.js";
 import type { WorkspaceAdvisory } from "../workspace/advisory.js";
@@ -49,6 +50,18 @@ const result = (id: string, seq: number, text = "done"): Event => ({
     usage: {}
   })
 });
+/** The line that names the session — the handle a later run resumes. */
+const started = (id: string, seq: number, sessionId = "sess-1"): Event => ({
+  id,
+  seq,
+  name: "stdout",
+  value: line({
+    type: "system",
+    subtype: "init",
+    session_id: sessionId,
+    model: "opus"
+  })
+});
 const exit = (id: string, seq: number, code = 0): Event => ({
   id,
   seq,
@@ -80,7 +93,11 @@ interface Script {
  */
 function container(scripts: Record<string, Script>) {
   const calls = {
-    exec: [] as { id: string; command: string }[],
+    exec: [] as {
+      id: string;
+      command: string;
+      env?: Record<string, string>;
+    }[],
     getExec: [] as { id: string; resume: unknown }[],
     killed: [] as string[]
   };
@@ -110,8 +127,11 @@ function container(scripts: Record<string, Script>) {
   };
 
   const runtime = {
-    exec: async (command: string, options: { id: string }) => {
-      calls.exec.push({ id: options.id, command });
+    exec: async (
+      command: string,
+      options: { id: string; env?: Record<string, string> }
+    ) => {
+      calls.exec.push({ id: options.id, command, env: options.env });
       if (busy.has(options.id))
         throw Object.assign(new Error("execution is running"), {
           code: "EEXEC_BUSY"
@@ -542,6 +562,148 @@ describe("claudeCodeModel", () => {
 
     await expect(running).rejects.toThrow(/cancelled/);
     expect(box.calls.killed).toEqual([FOLLOW_UP, SESSION]);
+  });
+
+  /**
+   * What a host records, and when. A session's id is the only way back into its
+   * conversation, so the question each of these asks is whether the host has it
+   * in time to be of use.
+   */
+  describe("the session's handle", () => {
+    const recording = (over: Partial<ClaudeCodeModelOptions> = {}) => {
+      const records: SessionRecord[] = [];
+      return {
+        records,
+        over: {
+          onSession: async (record: SessionRecord) => {
+            records.push(record);
+          },
+          ...over
+        }
+      };
+    };
+
+    it("reports the id as soon as the session names it, then again with its end", async () => {
+      const box = container({
+        [SESSION]: {
+          events: [
+            started(SESSION, 1),
+            say(SESSION, 2, "working"),
+            result(SESSION, 3),
+            exit(SESSION, 4)
+          ]
+        }
+      });
+      const { records, over } = recording();
+      const { model } = harness(box, over);
+
+      await streamed(model);
+
+      // Twice: the first call is what makes a session about to be killed
+      // resumable at all, the second says how the conversation it left stands.
+      expect(records.map((r) => [r.sessionId, r.end?.exitCode])).toEqual([
+        ["sess-1", undefined],
+        ["sess-1", 0]
+      ]);
+      expect(records[1]?.end?.result?.text).toBe("done");
+    });
+
+    /**
+     * The run this whole handle exists for: a session stopped from outside
+     * reports no result, and its half-finished conversation is worth continuing
+     * precisely because nobody got a report out of it.
+     */
+    it("reports a handle for a session that ended without a result", async () => {
+      const box = container({
+        [SESSION]: { events: [started(SESSION, 1), exit(SESSION, 2, 143)] }
+      });
+      const { records, over } = recording();
+      const { model, reports } = harness(box, over);
+
+      await streamed(model);
+
+      expect(reports[0]?.session.result).toBeUndefined();
+      expect(reports[0]?.session.sessionId).toBe("sess-1");
+      expect(records.at(-1)?.end?.sessionId).toBe("sess-1");
+    });
+
+    /** Recording a handle is worth less than the session it would fail. */
+    it("goes on with the run when the handle cannot be recorded", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const box = container({
+          [SESSION]: {
+            events: [started(SESSION, 1), result(SESSION, 2), exit(SESSION, 3)]
+          }
+        });
+        const { model } = harness(box, {
+          onSession: async () => {
+            throw new Error("the storage went away");
+          }
+        });
+
+        expect(textOf(await streamed(model))).toBe("report 1");
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("launches a resumed run as a continuation, under the directory holding its transcript", async () => {
+      const box = container({
+        [SESSION]: {
+          events: [
+            started(SESSION, 1, "sess-forked"),
+            result(SESSION, 2),
+            exit(SESSION, 3)
+          ]
+        }
+      });
+      const { records, over } = recording({
+        resume: { sessionId: "sess-plan", fork: true },
+        configDir: "/workspace/.claude-sessions"
+      });
+      const { model } = harness(box, over);
+
+      await streamed(model);
+
+      expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION]);
+      expect(box.calls.exec[0]?.command).toContain(
+        "--resume sess-plan --fork-session"
+      );
+      expect(box.calls.exec[0]?.env?.CLAUDE_CONFIG_DIR).toBe(
+        "/workspace/.claude-sessions"
+      );
+      // A fork's own id, not the one it continued: the plan's conversation stays
+      // whole and resumable, and this run has a handle of its own.
+      expect(records[0]?.sessionId).toBe("sess-forked");
+    });
+
+    /**
+     * A session that was stopped still has a conversation, and a host that asks
+     * for one more turn — to commit what the session left — needs it resumed
+     * where its transcript is.
+     */
+    it("follows up on a session that reported no result, where its transcript is", async () => {
+      const box = container({
+        [SESSION]: { events: [started(SESSION, 1), exit(SESSION, 2, 143)] },
+        [FOLLOW_UP]: {
+          events: [result(FOLLOW_UP, 1, "committed"), exit(FOLLOW_UP, 2)]
+        }
+      });
+      const { model, reports } = harness(box, {
+        configDir: "/workspace/.claude-sessions",
+        followUp: async () => "commit what you left"
+      });
+
+      await streamed(model);
+
+      expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, FOLLOW_UP]);
+      expect(box.calls.exec[1]?.command).toContain("--resume sess-1");
+      expect(box.calls.exec[1]?.env?.CLAUDE_CONFIG_DIR).toBe(
+        "/workspace/.claude-sessions"
+      );
+      expect(reports[0]?.followUp?.result?.text).toBe("committed");
+    });
   });
 
   /**
