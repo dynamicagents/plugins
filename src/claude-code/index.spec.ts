@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CLAUDE_CODE_AGENT,
-  CLAUDE_CODE_READER_AGENT,
   claudeCodeModel,
   claudeCodeSession
 } from "./index.js";
@@ -26,27 +25,22 @@ const config = (over: Partial<ClaudeCodeConfig> = {}): ClaudeCodeConfig => ({
 });
 
 /**
- * The two specs, as the parent's model sees them. `prepare` and `settle` are
- * the host's, so a spec here carries neither.
+ * The spec, as the parent's model sees it. `prepare` and `settle` are the
+ * host's, so the spec carries neither.
  */
-describe("the sub-agent specs", () => {
-  it("offers the writer and the reader under their own names", () => {
+describe("the sub-agent spec", () => {
+  it("offers the writer under its own name", () => {
     expect(CLAUDE_CODE_AGENT.name).toBe("claude_code");
-    expect(CLAUDE_CODE_READER_AGENT.name).toBe("claude_code_read");
   });
 
   /** A session runs for up to its `timeoutMs`, past a parent's turn. */
-  it("runs both detached", () => {
+  it("runs detached", () => {
     expect(CLAUDE_CODE_AGENT.detached).toBe(true);
-    expect(CLAUDE_CODE_READER_AGENT.detached).toBe(true);
   });
 
-  it("lets the writer name a branch to continue, and the reader not", () => {
+  it("lets the writer name a branch to continue", () => {
     const write = CLAUDE_CODE_AGENT.inputSchema as unknown as {
       parse: (v: unknown) => unknown;
-    };
-    const read = CLAUDE_CODE_READER_AGENT.inputSchema as unknown as {
-      shape: Record<string, unknown>;
     };
     expect(write.parse({ task: "t" })).toEqual({ task: "t" });
     expect(
@@ -55,7 +49,6 @@ describe("the sub-agent specs", () => {
       task: "t",
       continue: "anthropic-coding/t/1"
     });
-    expect(Object.keys(read.shape)).toEqual(["task"]);
   });
 
   /** The session reads the task; the branch is the host's `prepare`'s. */
@@ -63,48 +56,19 @@ describe("the sub-agent specs", () => {
     expect(
       CLAUDE_CODE_AGENT.formatInput!({ task: "add the flag", continue: "b" })
     ).toBe("add the flag");
-    expect(CLAUDE_CODE_READER_AGENT.formatInput!({ task: "why?" })).toBe(
-      "why?"
-    );
-  });
-
-  it("tells the parent a reader's edits are discarded", () => {
-    expect(CLAUDE_CODE_READER_AGENT.description).toContain(
-      "Nothing it changes reaches your"
-    );
   });
 });
 
 /**
- * Where a session actually runs, read off the calls `start` makes.
- *
- * Asserted at the launch boundary rather than on a helper, because "a host could
- * leave it out" is the failure that matters and only this boundary can rule it
- * out: a reading session launched in the parent's tree would write where its
- * parent and every other reader are reading, and report that as success.
+ * Where and how a session actually runs, read off the calls `start` makes —
+ * the launch boundary, which is the one place a mode or a directory a host did
+ * not mean could still slip in.
  */
 describe("where a session runs", () => {
   type Runtime = Parameters<ReturnType<typeof claudeCodeSession>["start"]>[0];
 
-  const COPIED = "/var/tmp/claude-read/claude-code-run_1/tree";
-
-  /** A finished exec that printed `out`. */
-  function finished(id: string, out: string, code = 0) {
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue({ id, seq: 1, name: "stdout", value: out });
-        controller.enqueue({ id, seq: 2, name: "exit", code });
-        controller.close();
-      }
-    });
-    return Object.assign(stream, { id, [Symbol.dispose]: () => {} });
-  }
-
-  /**
-   * Answers the copy scripts, and refuses the launch once it has recorded it —
-   * the launch is what is under test.
-   */
-  function launchRecorder(isolated = true) {
+  /** Refuses the launch once it has recorded it — the launch is what is under test. */
+  function launchRecorder() {
     const calls: {
       command: string;
       options: { id?: string; cwd?: string; env?: Record<string, string> };
@@ -119,12 +83,6 @@ describe("where a session runs", () => {
           options: (typeof calls)[number]["options"]
         ) => {
           calls.push({ command, options });
-          if (options.id?.endsWith(":copy"))
-            return finished(
-              options.id,
-              `tree=${COPIED}\ndeps=1/1\nupper=disk\nisolated=${isolated ? "yes" : "no"}\n`
-            );
-          if (options.id?.endsWith(":uncopy")) return finished(options.id, "");
           throw new Error("stop here — the launch is what is under test");
         },
         getExec: async () => {
@@ -137,83 +95,15 @@ describe("where a session runs", () => {
     };
   }
 
-  it("puts a reading session in a copy of the checkout, never the checkout", async () => {
+  it("launches a session in its checkout, under the config's mode", async () => {
     const { calls, runtime } = launchRecorder();
     const session = claudeCodeSession(config());
 
     await session
-      .start(runtime, "1", "read", "look at this", "/workspace/r")
-      .catch(() => {});
-
-    expect(calls.map((c) => c.options.id)).toEqual([
-      "claude-code-run:1:copy",
-      "claude-code-run:1"
-    ]);
-    expect(calls[0]?.options.env?.SRC).toBe("/workspace/r");
-    // An exec's cwd is resolved against the workspace's filesystem, where the
-    // copy — on container disk — does not exist. It starts in the original and
-    // the command moves into the copy before it becomes claude.
-    expect(calls[1]?.options.cwd).toBe("/workspace/r");
-    expect(calls[1]?.options.env?.CLAUDE_WORKDIR).toBe(COPIED);
-    // Told where it is, since its edits are discarded and its report is not.
-    expect(calls[1]?.command).toContain("throwaway copy");
-  });
-
-  /**
-   * A working directory is not a boundary: the session runs as root, and its
-   * brief may name the original by absolute path.
-   */
-  it("launches a reading session where the workspace is read-only", async () => {
-    const { calls, runtime } = launchRecorder();
-
-    await claudeCodeSession(config())
-      .start(runtime, "1", "read", "look at this", "/workspace/r")
-      .catch(() => {});
-
-    expect(calls[1]?.command).toMatch(
-      /^unshare --mount --propagation private -- sh -c '.*' sh claude -p /
-    );
-    expect(calls[1]?.options.env?.CLAUDE_READ_ONLY).toBe("/workspace");
-  });
-
-  it("launches it in the copy alone where the container refuses the namespace", async () => {
-    const { calls, runtime } = launchRecorder(false);
-
-    await claudeCodeSession(config())
-      .start(runtime, "1", "read", "look at this", "/workspace/r")
-      .catch(() => {});
-
-    expect(calls[1]?.command).toMatch(
-      /^cd "\$CLAUDE_WORKDIR" && exec claude -p /
-    );
-    expect(calls[1]?.options.env?.CLAUDE_WORKDIR).toBe(COPIED);
-    expect(calls[1]?.command).toContain("Do not write under");
-  });
-
-  /**
-   * The copy and the read-only namespace are the isolation, so a reading session
-   * needs no mode that refuses edits — and every such mode refuses the suite and
-   * the build too.
-   */
-  it("launches a reading session under the same mode as a writing one", async () => {
-    const { calls, runtime } = launchRecorder();
-    const session = claudeCodeSession(config());
-
-    await session
-      .start(runtime, "1", "read", "look at this", "/workspace/r")
-      .catch(() => {});
-
-    expect(calls[1]?.command).toContain(
-      `--permission-mode ${DEFAULT_PERMISSION_MODE}`
-    );
-  });
-
-  it("launches a writing session in its own checkout, with no copy", async () => {
-    const { calls, runtime } = launchRecorder();
-    const session = claudeCodeSession(config());
-
-    await session
-      .start(runtime, "1", "write", "change this", "/workspace/r")
+      .start(runtime, "1", {
+        prompt: "change this",
+        dir: "/workspace/r"
+      })
       .catch(() => {});
 
     expect(calls).toHaveLength(1);
@@ -222,7 +112,29 @@ describe("where a session runs", () => {
     expect(calls[0]?.command).toContain(
       `--permission-mode ${DEFAULT_PERMISSION_MODE}`
     );
-    expect(calls[0]?.command).not.toContain("throwaway copy");
+    expect(calls[0]?.options.env?.IS_SANDBOX).toBe("1");
+  });
+
+  /**
+   * A planning run is a writing session under `plan`. The run's mode wins over
+   * the config's, and `IS_SANDBOX` goes with `bypassPermissions` alone.
+   */
+  it("launches a planning run under plan, over the config's mode", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await claudeCodeSession(config({ permissionMode: "acceptEdits" }))
+      .start(runtime, "1", {
+        prompt: "work out how",
+        dir: "/workspace/r",
+        permissionMode: "plan",
+        jsonSchema: { type: "object" }
+      })
+      .catch(() => {});
+
+    expect(calls[0]?.command).toContain("--permission-mode plan");
+    expect(calls[0]?.command).not.toContain("acceptEdits");
+    expect(calls[0]?.command).toContain("--json-schema");
+    expect(calls[0]?.options.env?.IS_SANDBOX).toBeUndefined();
   });
 
   /**
@@ -249,14 +161,20 @@ describe("where a session runs", () => {
     try {
       const session = claudeCodeSession(config());
       await expect(
-        session.start(runtime, "1", "write", "work", "/workspace/r", {
-          signal: replaced.signal
-        })
+        session.start(
+          runtime,
+          "1",
+          { prompt: "work", dir: "/workspace/r" },
+          { signal: replaced.signal }
+        )
       ).rejects.toThrow(/live subscriber/);
       await expect(
-        session.followUp(runtime, "1", "session-1", "more", "/workspace/r", {
-          signal: replaced.signal
-        })
+        session.followUp(
+          runtime,
+          "1",
+          { sessionId: "session-1", prompt: "more", dir: "/workspace/r" },
+          { signal: replaced.signal }
+        )
       ).rejects.toThrow(/live subscriber/);
       expect(looks).toBe(2);
     } finally {
@@ -264,81 +182,15 @@ describe("where a session runs", () => {
     }
   });
 
-  /** Falling back to the checkout is the one thing it must never do. */
-  it("fails a reading session whose copy could not be made, without launching", async () => {
-    const calls: string[] = [];
-    const runtime = {
-      exec: async (_command: string, options: { id: string }) => {
-        calls.push(options.id);
-        return finished(options.id, "", 1);
-      },
-      getExec: async () => {
-        throw new Error("not called");
-      },
-      killExec: async () => {}
-    } as unknown as Runtime;
-
-    await expect(
-      claudeCodeSession(config()).start(
-        runtime,
-        "1",
-        "read",
-        "look",
-        "/workspace/r"
-      )
-    ).rejects.toThrow(/could not make a copy/);
-    expect(calls).toEqual(["claude-code-run:1:copy"]);
-  });
-
-  it("deletes the copy when a resumed reading session ends", async () => {
-    const calls: string[] = [];
-    const runtime = {
-      exec: async (_command: string, options: { id: string }) => {
-        calls.push(options.id);
-        return finished(options.id, "");
-      },
-      getExec: async (id: string) => finished(id, ""),
-      killExec: async () => {}
-    } as unknown as Runtime;
-
-    const outcome = await claudeCodeSession(config()).resume(runtime, {
-      execId: "claude-code-run:1",
-      seq: 0,
-      carry: "",
-      emitted: 0,
-      copy: true
-    });
-
-    expect(outcome.done).toBe(true);
-    expect(calls).toEqual(["claude-code-run:1:uncopy"]);
-  });
-
-  it("leaves a writing session's checkout alone when it ends", async () => {
-    const calls: string[] = [];
-    const runtime = {
-      exec: async (_command: string, options: { id: string }) => {
-        calls.push(options.id);
-        return finished(options.id, "");
-      },
-      getExec: async (id: string) => finished(id, ""),
-      killExec: async () => {}
-    } as unknown as Runtime;
-
-    await claudeCodeSession(config()).resume(runtime, {
-      execId: "claude-code-run:1",
-      seq: 0,
-      carry: "",
-      emitted: 0
-    });
-
-    expect(calls).toEqual([]);
-  });
-
   it("resumes a finished session under its own id, in the checkout", async () => {
     const { calls, runtime } = launchRecorder();
 
     await claudeCodeSession(config())
-      .followUp(runtime, "1", "sess-1", "one more thing", "/workspace/r")
+      .followUp(runtime, "1", {
+        sessionId: "sess-1",
+        prompt: "one more thing",
+        dir: "/workspace/r"
+      })
       .catch(() => {});
 
     expect(calls.map((c) => c.options.id)).toEqual([
@@ -349,23 +201,80 @@ describe("where a session runs", () => {
     expect(calls[0]?.command).toContain("'one more thing'");
   });
 
+  /**
+   * A run given a conversation to continue has no first session of its own, so
+   * the continuation is its **own** exec — not the follow-up's, which exists to
+   * follow a session this run ran.
+   */
+  it("continues a conversation on the run's own exec, in the checkout", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await claudeCodeSession(config())
+      .start(runtime, "1", {
+        prompt: "carry on",
+        dir: "/workspace/r",
+        resume: { sessionId: "sess-1", fork: true }
+      })
+      .catch(() => {});
+
+    expect(calls.map((c) => c.options.id)).toEqual(["claude-code-run:1"]);
+    expect(calls[0]?.options.cwd).toBe("/workspace/r");
+    expect(calls[0]?.command).toContain("--resume sess-1 --fork-session");
+    expect(calls[0]?.options.env?.CLAUDE_CONFIG_DIR).toBe(
+      "/workspace/.claude-sessions"
+    );
+  });
+
+  /** A follow-up finds the transcript where every session wrote its own. */
+  it("gives a follow-up the directory the session's transcript is in", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await claudeCodeSession(config())
+      .followUp(runtime, "1", {
+        sessionId: "sess-1",
+        prompt: "commit what you left",
+        dir: "/workspace/r"
+      })
+      .catch(() => {});
+
+    expect(calls[0]?.options.env?.CLAUDE_CONFIG_DIR).toBe(
+      "/workspace/.claude-sessions"
+    );
+    expect(calls[0]?.command).toContain("--resume sess-1");
+    // One more turn of the same conversation is the opposite of a fork.
+    expect(calls[0]?.command).not.toContain("--fork-session");
+  });
+
+  /** One more turn of a planning session is still a turn of planning. */
+  it("runs a follow-up under the session's own mode", async () => {
+    const { calls, runtime } = launchRecorder();
+
+    await claudeCodeSession(config())
+      .followUp(runtime, "1", {
+        sessionId: "sess-1",
+        prompt: "and the tests?",
+        dir: "/workspace/r",
+        permissionMode: "plan"
+      })
+      .catch(() => {});
+
+    expect(calls[0]?.command).toContain("--permission-mode plan");
+  });
+
   it("refuses a follow-up with no session id rather than starting a new session", async () => {
     const { calls, runtime } = launchRecorder();
 
     await expect(
-      claudeCodeSession(config()).followUp(
-        runtime,
-        "1",
-        "",
-        "more",
-        "/workspace/r"
-      )
+      claudeCodeSession(config()).followUp(runtime, "1", {
+        sessionId: "",
+        prompt: "more",
+        dir: "/workspace/r"
+      })
     ).rejects.toThrow(/needs the session id/);
     expect(calls).toEqual([]);
   });
 
-  /** A session stopped with no drain attached has nobody else to close it. */
-  it("deletes the copy when a session is stopped", async () => {
+  it("stops a session's follow-up with it", async () => {
     const { calls, killed, runtime } = launchRecorder();
 
     await claudeCodeSession(config()).stop(runtime, "1");
@@ -375,9 +284,7 @@ describe("where a session runs", () => {
       "claude-code-run:1:follow-up",
       "claude-code-run:1"
     ]);
-    expect(calls.map((c) => c.options.id)).toEqual([
-      "claude-code-run:1:uncopy"
-    ]);
+    expect(calls).toEqual([]);
   });
 });
 
@@ -396,10 +303,8 @@ describe("construction", () => {
       workspace: async () => {
         throw new Error("not opened");
       },
-      advisories: async () => [],
       storage: {} as DurableObjectStorage,
       runId: "r",
-      kind: "write",
       dir: "/workspace/r",
       note: async () => {},
       report: async () => ""

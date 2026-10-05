@@ -16,19 +16,24 @@ and Haiku 4.5 all answer, at `service_tier: standard`. **The harness is the
 unlock, not the credential.** So the way to reach those models on a subscription
 is to run the sanctioned client, which is what this plugin makes delegable.
 
-## The shape: a writer and a reader, and the session is their model
+## The shape: a writer, and the session is its model
 
 Unusual for this package, and it is the whole design. Claude Code brings its own
 tools, its own loop and its own context management, so there is nothing for an
-agent loop to drive. So this package exports no plugin: it exports a writer's and a
-reader's `SubAgentSpec` — `CLAUDE_CODE_AGENT` (`claude_code`, which writes) and
-`CLAUDE_CODE_READER_AGENT` (`claude_code_read`, which works in a throwaway copy) —
-and `claudeCodeModel`, a language model whose one call runs a session. A host binds
-each spec to a `SubAgent` whose `getModel()` returns one, and Think's recovery does
-the rest: a turn cut by an eviction or a deploy is continued, and the model resumes
-the session from where it was.
+agent loop to drive. So this package exports no plugin: it exports a writer's
+`SubAgentSpec` — `CLAUDE_CODE_AGENT` (`claude_code`) — and `claudeCodeModel`, a
+language model whose one call runs a session. A host binds the spec to a `SubAgent`
+whose `getModel()` returns one, and Think's recovery does the rest: a turn cut by
+an eviction or a deploy is continued, and the model resumes the session from where
+it was.
 
-Both run **detached**: the parent's call returns at once, and the report arrives
+**A planner is a writer under `plan`.** The same spec under another name,
+description and input, in a worktree of its own, whose model sets
+`permissionMode: "plan"` and a `jsonSchema`: it reads, edits nothing, and answers
+as data. Carrying the plan out is a later run that resumes it — see
+[A session has a handle](#a-session-has-a-handle-and-a-later-run-may-continue-it).
+
+It runs **detached**: the parent's call returns at once, and the report arrives
 as a later turn. A session runs for up to its `timeoutMs`, past a parent's turn.
 
 **One sub-agent run is one `claude -p` session.** Not one turn, and not one tool
@@ -369,14 +374,14 @@ export class AnthropicCodingWriterChild extends SubAgent<Env> {
     return claudeCodeModel({
       config: CLAUDE_CODE_SESSION,
       workspace: () => openWorkspace(stub) as Promise<SessionWorkspace>,
-      // What is true about the workspace. A reading session waits out an
-      // install in flight before its copy is made.
-      advisories: () => stub.advisories(),
       storage: this.ctx.storage,
       runId: this.name,
-      kind: "write",
       dir,
       note: (key, text) => this.note(key, text),
+      // The session's handle, as soon as it has one and again when it ends. It
+      // goes in the workspace object that ran the session, because the id names
+      // a transcript in that container — see "A session has a handle" below.
+      onSession: (record) => stub.noteSession(record),
       // Once per run, before the session starts. A throw fails the run with its
       // message — how a host refuses a run its credentials cannot pay for.
       brief: async (task) => this.#brief(task, stub),
@@ -408,8 +413,9 @@ on field by field rather than passing along: `report` reads it as the result's
 `structured`. `LaunchOptions.jsonSchema` in `./run.ts` has how the CLI gets it.
 
 **The follow-up is a second exec.** `claude -p --resume` under an exec id of its
-own, so its cursor and its notes are its own. The transcript is on the container's
-disk, so it runs in the workspace the session did. `stop` ends it with the session.
+own, so its cursor and its notes are its own. It runs in the workspace the session
+did, because that is where the transcript it is continuing can be found, and under
+the session's own `permissionMode`. `stop` ends it with the session.
 
 **The cursor is stored behind the notes.** It rides the same chain as the notes it
 counts, so a stored position never names a note that was not filed; a drain that
@@ -423,12 +429,12 @@ workspace instead of failing the run — failing it would stop a session that is
 still running. `drain` in `./model.ts` has when it gives up.
 
 **`runId` namespaces the exec id, and it is not optional.** Runs are concurrent —
-reading runs share their parent's container — so two sessions sharing an id would
+sessions in a scratchpad share their parent's container — so two sessions sharing an id would
 spawn over each other, each drain would attach to whichever won, and `stop` would
 kill the wrong one.
 
-**A cancelled turn stops the session.** The model's abort signal stops the drain,
-kills both execs and deletes a reading run's copy.
+**A cancelled turn stops the session.** The model's abort signal stops the drain
+and kills both execs.
 
 **`runtime()` is where the workspace comes from.** The spec's `prepare` runs on the
 parent, where the caller is known, and returns the workspace name and the
@@ -449,6 +455,93 @@ session's edits reaching the checkout — anything that then commits or pushes f
 the workspace side — should drive `workspace.pull()` to completion before it
 reads, and certainly before it stops the container. A session that wrote an
 install's dependency tree makes that pull a large one.
+
+## A session has a handle, and a later run may continue it
+
+Every session's `init` line names it, within seconds of starting. That id is the
+handle to the whole conversation, and it reaches a host two ways:
+
+- on the drain's **cursor** (`DrainCursor.sessionId`), and so on `SessionEnd` —
+  which is the half that matters, because the sessions worth continuing are often
+  the ones that never reach a `result` line. A time limit, a cancel or a container
+  rollout ends a session with no result at all;
+- through **`onSession`**, called with the id the moment it appears and again with
+  the session's end. The first call is what makes a session that is about to be
+  killed resumable; the second says how the conversation it left stands. The drain
+  offers its cursor as soon as the id appears rather than waiting out its
+  checkpoint interval, which is what makes the first call early enough to matter.
+
+`onSession` is best-effort, like `note` — a throw is logged and the run goes on.
+Where the record lives is the host's: the id describes a transcript in one
+workspace's container, so the workspace object that ran the session is the place
+that can answer for it. A host keys its record on the id and keeps an `end` once it
+has one; a recovered turn can report the same id again without one.
+
+**A run continues a conversation with `resume`**, which the host resolves in
+`prepare` — which conversations exist in a workspace, and which a caller may
+continue, are its questions, not the model's. The run's prompt is then the next
+user turn: the session already holds the conversation, so a brief that restates it
+pays for it twice. `fork` continues it under a **new** id and leaves the original
+whole, which is what a change of mode wants — a planning session, run under
+`plan`, continued under the mode that writes, with the plan's own conversation
+still resumable for an edit. Continuing in the same mode takes no fork: one
+conversation accumulating is what continuing means.
+
+Measured against the pinned CLI, and all of it load-bearing here:
+
+- `--resume <id>` is **not scoped to the working directory**. A session recorded
+  against one cwd resumes under another, reports the original id, and goes on
+  appending to the original transcript. So what decides whether a resume works is
+  where the transcript is, not where the session runs.
+- `--resume <id> --permission-mode <other>` is accepted, and the `init` line
+  reports the **new** mode. A resume can therefore change mode, which is the whole
+  of "going from a plan to doing the work" at the CLI level.
+- `--resume <unknown-id>` is **not a failed session**: the CLI prints
+  `No conversation found with session ID: …` and emits a `result` line —
+  `error_during_execution`, `is_error: true`, the sentence in `errors`, no reply —
+  then exits 1 in milliseconds. Its client still makes its own startup requests,
+  but nothing is inferred and nothing is billed. Report it as "not resumable" and
+  delegate again without `resume`; `ClaudeCodeResult.errors` is the only account
+  there is of it.
+- **`--session-id` is deliberately not used.** Naming the id up front would make
+  the handle known before launch, and its failure mode is worse than its benefit: a
+  relaunch inside the same container exits 1 with `Session ID … is already in use`
+  on stderr and nothing on stdout — the class of death that reports nothing. The
+  `init` line's id gives the same handle and adds no failure.
+
+### How long a conversation stays resumable
+
+The transcript is a file, and every session writes it to the same place:
+`/workspace/.claude-sessions/projects/<cwd-with-/-as-->/<session-id>.jsonl`.
+`buildLaunch` sets `CLAUDE_CONFIG_DIR` to `SESSION_CONFIG_DIR` on every launch, and
+**it is not a host's to choose**: a transcript is found only where it was written, so
+a second place to write one is a resume that cannot find it. A host's `env` that
+sets the variable is refused when the session launches.
+
+The variable relocates the whole config directory, creating it if absent — the
+transcripts, the session index, `.claude.json` (which carries no credential) and the
+client's auto-memory directory. Under the workspace mount it is the Durable Object's
+storage, so the conversation outlives the container — a deploy, a rollout, a release
+at task settle or the workspace's own idle timer — bounded then by the workspace's
+own retention. The auto-memory goes with it: a later session in the same workspace
+reads what an earlier one remembered.
+
+What that does not buy is reach across workspaces. A conversation lives in the
+workspace object that ran it, so **a run continues it only from that same
+workspace**: a host that gives each run a workspace of its own has to send a run
+that resumes one back to the workspace that ran it. Anywhere else, the resume is the
+refusal above — and the branch and its commits are untouched by it: what is missing
+is the conversation, not the work.
+
+A session's edits and its transcript reach the workspace by the same pull, so a
+drained session syncs both; a container replaced mid-run syncs only what the last
+pull carried.
+
+The directory is named `SESSION_STATE_DIR` — the name `./computer`'s file tools'
+walk steps over. A transcript quotes every line the session read, so a `grep` that
+descended into it would answer a question about the source with the conversation
+that mentioned it. It sits at the workspace root, outside any checkout, which also
+keeps it out of reach of a `git clean -ffdx`.
 
 ## Updating Claude Code
 
@@ -490,7 +583,8 @@ not alternatives:
 | `default`           | read only — everything else is auto-denied                                                             |
 | `acceptEdits`       | edit files; `npm ci`, `git` and the test suite still denied                                            |
 | `dontAsk`           | "deny if not pre-approved" — the default's behaviour, named                                            |
-| `plan`              | reads and produces a plan, changing nothing — and there is no interactive session here to approve it   |
+| `manual`            | documented by the CLI and unexercised here — whatever it would prompt for, headless denies             |
+| `plan`              | reads and produces a plan, changing nothing — a planning run's mode, answering through `jsonSchema`    |
 | `auto`              | a model classifier rules on each call, spending the same subscription bucket the session is drawing on |
 | `bypassPermissions` | the whole job                                                                                          |
 
@@ -501,17 +595,12 @@ cloned repository's `postinstall` and its test suite, which is arbitrary code
 execution by design. Gating the agent's own edits while those doors stand open
 costs the agent its job and buys nothing. Containment is the credential swap.
 
-**A reading session runs under the same mode.** What keeps it from touching
-anything is where it runs, not what it may do: a copy of the parent's checkout on
-container disk, outside the workspace mount, deleted when the session ends — see
-`copy.ts`. Every mode that refuses an edit also refuses the commands a question
-usually needs answered.
-
-**A reading session waits for an install in flight.** Its copy takes the
-parent's dependency trees as they are when it is made, so the model polls
-`advisories` first and makes the brief and the copy once no install is running
-— bounded by the session's `timeoutMs`. `untilInstalled` in `./model.ts` has the
-rest.
+**A planning run is the one place another mode belongs**, and it is set per run
+— `ClaudeCodeModelOptions.permissionMode` — over the deployment's. Under `plan` a
+session reads, edits nothing, and is denied what would change the tree, the test
+suite included; there is nobody to approve its plan, so it answers through a
+`jsonSchema` instead. A follow-up of it runs under the same mode, and carrying the
+plan out is a later run that resumes it with `fork` under the deployment's mode.
 
 > **The container runs as root, and that changes how the flag has to be passed.**
 > The CLI refuses to bypass its permission checks under uid 0 unless `IS_SANDBOX=1`
@@ -552,12 +641,14 @@ worth more than two that half-finish — but it is bought, not free.
 
 ## What this deliberately does not do
 
-- **No `--bare`, no `--settings` override, no `CLAUDE_CONFIG_DIR`.** A cloned
-  repository's `CLAUDE.md`, skills and hooks are exactly the material that makes
-  the agent good at that repository. The container already runs the repo's
-  `postinstall` and its test suite, so suppressing `.claude/` closes one door
-  while the others stand open by design — it costs the agent its context and buys
-  nothing. Containment is the credential swap.
+- **No `--bare` and no `--settings` override.** A cloned repository's `CLAUDE.md`,
+  skills and hooks are exactly the material that makes the agent good at that
+  repository. The container already runs the repo's `postinstall` and its test
+  suite, so suppressing `.claude/` closes one door while the others stand open by
+  design — it costs the agent its context and buys nothing. Containment is the
+  credential swap. `CLAUDE_CONFIG_DIR` is not one of these: it moves where the
+  _client_ keeps its own state and touches nothing a repository ships, which is
+  why the plugin sets it on every session — see above. A host cannot.
 - **No claude.ai login flow, ever.** Credentials are BYO-paste from
   `claude setup-token`. Anthropic does not allow third-party developers to offer
   claude.ai login or subscription rate limits for their products.

@@ -3,10 +3,10 @@ import { shellQuote, type WorkspaceRuntimeEvent } from "@cloudflare/computer";
 import {
   claudeCodeModel,
   type ClaudeCodeModelOptions,
-  type SessionOutcome
+  type SessionOutcome,
+  type SessionRecord
 } from "./model.js";
 import { execIdFor, followUpExecIdFor, type SessionRuntime } from "./run.js";
-import type { WorkspaceAdvisory } from "../workspace/advisory.js";
 
 /**
  * The session as a sub-agent's model, against a scripted container.
@@ -49,6 +49,18 @@ const result = (id: string, seq: number, text = "done"): Event => ({
     usage: {}
   })
 });
+/** The line that names the session — the handle a later run resumes. */
+const started = (id: string, seq: number, sessionId = "sess-1"): Event => ({
+  id,
+  seq,
+  name: "stdout",
+  value: line({
+    type: "system",
+    subtype: "init",
+    session_id: sessionId,
+    model: "opus"
+  })
+});
 const exit = (id: string, seq: number, code = 0): Event => ({
   id,
   seq,
@@ -80,7 +92,11 @@ interface Script {
  */
 function container(scripts: Record<string, Script>) {
   const calls = {
-    exec: [] as { id: string; command: string }[],
+    exec: [] as {
+      id: string;
+      command: string;
+      env?: Record<string, string>;
+    }[],
     getExec: [] as { id: string; resume: unknown }[],
     killed: [] as string[]
   };
@@ -110,8 +126,11 @@ function container(scripts: Record<string, Script>) {
   };
 
   const runtime = {
-    exec: async (command: string, options: { id: string }) => {
-      calls.exec.push({ id: options.id, command });
+    exec: async (
+      command: string,
+      options: { id: string; env?: Record<string, string> }
+    ) => {
+      calls.exec.push({ id: options.id, command, env: options.env });
       if (busy.has(options.id))
         throw Object.assign(new Error("execution is running"), {
           code: "EEXEC_BUSY"
@@ -167,10 +186,8 @@ function harness(
       runtime: box.runtime,
       [Symbol.dispose]: () => {}
     }),
-    advisories: async () => [],
     storage,
     runId: RUN,
-    kind: "write",
     dir: "/workspace/repo",
     note: async (key, text) => {
       notes.push({ key, text });
@@ -471,6 +488,35 @@ describe("claudeCodeModel", () => {
     );
   });
 
+  /**
+   * A planning run: a writing session under `plan`, over the config's mode, and
+   * a follow-up of it is one more turn of planning.
+   */
+  it("launches the session and its follow-up under the run's own mode", async () => {
+    const box = container({
+      [SESSION]: { events: [result(SESSION, 1), exit(SESSION, 2)] },
+      [FOLLOW_UP]: {
+        events: [result(FOLLOW_UP, 1, "revised"), exit(FOLLOW_UP, 2)]
+      }
+    });
+    const { model } = harness(box, {
+      config: {
+        credentials: () => ["sk-ant-oat01-REAL"],
+        permissionMode: "bypassPermissions"
+      },
+      permissionMode: "plan",
+      followUp: async () => "and the migration?"
+    });
+
+    await streamed(model);
+
+    expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, FOLLOW_UP]);
+    for (const exec of box.calls.exec) {
+      expect(exec.command).toContain("--permission-mode plan");
+      expect(exec.env?.IS_SANDBOX).toBeUndefined();
+    }
+  });
+
   it("asks for a follow-up once, and resumes it rather than asking again", async () => {
     const box = container({
       [SESSION]: { events: [result(SESSION, 1), exit(SESSION, 2)] },
@@ -545,6 +591,170 @@ describe("claudeCodeModel", () => {
   });
 
   /**
+   * What a host records, and when. A session's id is the only way back into its
+   * conversation, so the question each of these asks is whether the host has it
+   * in time to be of use.
+   */
+  describe("the session's handle", () => {
+    const recording = (over: Partial<ClaudeCodeModelOptions> = {}) => {
+      const records: SessionRecord[] = [];
+      return {
+        records,
+        over: {
+          onSession: async (record: SessionRecord) => {
+            records.push(record);
+          },
+          ...over
+        }
+      };
+    };
+
+    it("reports the id as soon as the session names it, then again with its end", async () => {
+      const box = container({
+        [SESSION]: {
+          events: [
+            started(SESSION, 1),
+            say(SESSION, 2, "working"),
+            result(SESSION, 3),
+            exit(SESSION, 4)
+          ]
+        }
+      });
+      const { records, over } = recording();
+      const { model } = harness(box, over);
+
+      await streamed(model);
+
+      // Twice: the first call is what makes a session about to be killed
+      // resumable at all, the second says how the conversation it left stands.
+      expect(records.map((r) => [r.sessionId, r.end?.exitCode])).toEqual([
+        ["sess-1", undefined],
+        ["sess-1", 0]
+      ]);
+      expect(records[1]?.end?.result?.text).toBe("done");
+    });
+
+    /**
+     * The run this whole handle exists for: a session stopped from outside
+     * reports no result, and its half-finished conversation is worth continuing
+     * precisely because nobody got a report out of it.
+     */
+    it("reports a handle for a session that ended without a result", async () => {
+      const box = container({
+        [SESSION]: { events: [started(SESSION, 1), exit(SESSION, 2, 143)] }
+      });
+      const { records, over } = recording();
+      const { model, reports } = harness(box, over);
+
+      await streamed(model);
+
+      expect(reports[0]?.session.result).toBeUndefined();
+      expect(reports[0]?.session.sessionId).toBe("sess-1");
+      expect(records.at(-1)?.end?.sessionId).toBe("sess-1");
+    });
+
+    /**
+     * A turn cut after the end was stored and before the host was told: the
+     * next attempt finds the end and starts nothing, so it is the only chance
+     * left to say how the session finished.
+     */
+    it("reports a stored end the host was never told, without starting anything", async () => {
+      const box = container({});
+      const { records, over } = recording();
+      const { model, map, reports } = harness(box, over);
+      map.set(`claude-code:${RUN}:session`, {
+        exitCode: 0,
+        result: { sessionId: "sess-1" },
+        sessionId: "sess-1"
+      });
+
+      await streamed(model);
+
+      expect(box.calls.exec).toEqual([]);
+      expect(records).toEqual([
+        { sessionId: "sess-1", end: expect.objectContaining({ exitCode: 0 }) }
+      ]);
+      expect(reports[0]?.session.sessionId).toBe("sess-1");
+    });
+
+    /** Recording a handle is worth less than the session it would fail. */
+    it("goes on with the run when the handle cannot be recorded", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const box = container({
+          [SESSION]: {
+            events: [started(SESSION, 1), result(SESSION, 2), exit(SESSION, 3)]
+          }
+        });
+        const { model } = harness(box, {
+          onSession: async () => {
+            throw new Error("the storage went away");
+          }
+        });
+
+        expect(textOf(await streamed(model))).toBe("report 1");
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("launches a resumed run as a continuation, under the directory holding its transcript", async () => {
+      const box = container({
+        [SESSION]: {
+          events: [
+            started(SESSION, 1, "sess-forked"),
+            result(SESSION, 2),
+            exit(SESSION, 3)
+          ]
+        }
+      });
+      const { records, over } = recording({
+        resume: { sessionId: "sess-plan", fork: true }
+      });
+      const { model } = harness(box, over);
+
+      await streamed(model);
+
+      expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION]);
+      expect(box.calls.exec[0]?.command).toContain(
+        "--resume sess-plan --fork-session"
+      );
+      expect(box.calls.exec[0]?.env?.CLAUDE_CONFIG_DIR).toBe(
+        "/workspace/.claude-sessions"
+      );
+      // A fork's own id, not the one it continued: the plan's conversation stays
+      // whole and resumable, and this run has a handle of its own.
+      expect(records[0]?.sessionId).toBe("sess-forked");
+    });
+
+    /**
+     * A session that was stopped still has a conversation, and a host that asks
+     * for one more turn — to commit what the session left — needs it resumed
+     * where its transcript is.
+     */
+    it("follows up on a session that reported no result, where its transcript is", async () => {
+      const box = container({
+        [SESSION]: { events: [started(SESSION, 1), exit(SESSION, 2, 143)] },
+        [FOLLOW_UP]: {
+          events: [result(FOLLOW_UP, 1, "committed"), exit(FOLLOW_UP, 2)]
+        }
+      });
+      const { model, reports } = harness(box, {
+        followUp: async () => "commit what you left"
+      });
+
+      await streamed(model);
+
+      expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, FOLLOW_UP]);
+      expect(box.calls.exec[1]?.command).toContain("--resume sess-1");
+      expect(box.calls.exec[1]?.env?.CLAUDE_CONFIG_DIR).toBe(
+        "/workspace/.claude-sessions"
+      );
+      expect(reports[0]?.followUp?.result?.text).toBe("committed");
+    });
+  });
+
+  /**
    * A continued turn's prompt ends with the interrupted assistant message, so
    * the task is the last *user* message, not the last message.
    */
@@ -565,154 +775,5 @@ describe("claudeCodeModel", () => {
     );
 
     expect(brief).toHaveBeenCalledWith("fix the parser");
-  });
-});
-
-/**
- * A reading session's copy takes the parent's dependency trees as they are when
- * it is made, so an install still running then is one the session never sees.
- */
-describe("a reading session", () => {
-  const COPY = `${SESSION}:copy`;
-  const building: WorkspaceAdvisory = {
-    kind: "deps-building",
-    command: "npm ci",
-    startedAt: 0
-  };
-  const scripts = (): Record<string, Script> => ({
-    [COPY]: {
-      events: [
-        {
-          id: COPY,
-          seq: 1,
-          name: "stdout",
-          value:
-            "tree=/var/tmp/claude-read/run/tree\ndeps=1/1\nupper=disk\nisolated=yes\n"
-        },
-        exit(COPY, 2)
-      ]
-    },
-    [SESSION]: { events: [result(SESSION, 1), exit(SESSION, 2)] }
-  });
-
-  /** Runs `body` on a fake clock, draining every timer it leaves. */
-  async function timed<T>(body: () => Promise<T>): Promise<T> {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    try {
-      const running = body();
-      await vi.runAllTimersAsync();
-      return await running;
-    } finally {
-      vi.useRealTimers();
-    }
-  }
-
-  it("waits out an install in flight before its brief and its copy", async () => {
-    const order: string[] = [];
-    let polls = 0;
-    const box = container(scripts());
-    const { model, reports } = harness(box, {
-      kind: "read",
-      advisories: async () => {
-        order.push("advisories");
-        return ++polls < 3 ? [building] : [];
-      },
-      brief: async (task) => {
-        order.push("brief");
-        return task;
-      }
-    });
-
-    await timed(() => streamed(model));
-
-    expect(order).toEqual(["advisories", "advisories", "advisories", "brief"]);
-    expect(box.calls.exec.map((c) => c.id)).toEqual([
-      COPY,
-      SESSION,
-      `${SESSION}:uncopy`
-    ]);
-    expect(reports).toHaveLength(1);
-  });
-
-  it("copies as the workspace is once the session's ceiling has passed", async () => {
-    const advisories = vi.fn(async () => [building]);
-    const box = container(scripts());
-    const { model, reports } = harness(box, {
-      kind: "read",
-      config: { credentials: () => ["sk-ant-oat01-REAL"], timeoutMs: 12_000 },
-      advisories
-    });
-
-    await timed(() => streamed(model));
-
-    expect(advisories.mock.calls.length).toBeGreaterThan(1);
-    expect(box.calls.exec[0]?.id).toBe(COPY);
-    expect(reports).toHaveLength(1);
-  });
-
-  it("copies as the workspace is when its install cannot be read", async () => {
-    const advisories = vi.fn(async (): Promise<WorkspaceAdvisory[]> => {
-      throw new Error("the workspace object is overloaded");
-    });
-    const box = container(scripts());
-    const { model, reports } = harness(box, { kind: "read", advisories });
-
-    await streamed(model);
-
-    expect(advisories).toHaveBeenCalledTimes(1);
-    expect(box.calls.exec[0]?.id).toBe(COPY);
-    expect(reports).toHaveLength(1);
-  });
-
-  it("does not wait once its session has started", async () => {
-    const advisories = vi.fn(async () => [building]);
-    const box = container(scripts());
-    const { model, reports, map } = harness(box, { kind: "read", advisories });
-    map.set(`claude-code:${RUN}:brief`, "the brief");
-    map.set(`claude-code:${RUN}:cursor`, {
-      execId: SESSION,
-      seq: 0,
-      carry: "",
-      emitted: 0,
-      copy: true
-    });
-
-    await streamed(model);
-
-    expect(advisories).not.toHaveBeenCalled();
-    expect(box.calls.getExec).toEqual([{ id: SESSION, resume: 0 }]);
-    expect(reports).toHaveLength(1);
-  });
-
-  it("stops waiting when the turn is cancelled mid-read", async () => {
-    const cancel = new AbortController();
-    let asked = false;
-    const box = container(scripts());
-    const { model, reports } = harness(box, {
-      kind: "read",
-      advisories: () => {
-        asked = true;
-        return new Promise(() => {});
-      }
-    });
-
-    const running = streamed(model, call(undefined, cancel.signal));
-    await vi.waitFor(() => expect(asked).toBe(true));
-    cancel.abort(new Error("cancelled"));
-
-    await expect(running).rejects.toThrow(/cancelled/);
-    expect(box.calls.exec).toEqual([]);
-    expect(reports).toEqual([]);
-  });
-
-  it("is a writing session's host's concern, not its own", async () => {
-    const advisories = vi.fn(async () => [building]);
-    const box = container(scripts());
-    const { model, reports } = harness(box, { advisories });
-
-    await streamed(model);
-
-    expect(advisories).not.toHaveBeenCalled();
-    expect(reports).toHaveLength(1);
   });
 });

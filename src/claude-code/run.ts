@@ -80,8 +80,8 @@ export const CLAUDE_EXEC_PREFIX = "claude-code-run";
  * The exec id one session occupies.
  *
  * **Per run, not fixed**, and the difference is load-bearing. A workspace is
- * one Durable Object and one container, but runs are concurrent — reading runs
- * share their parent's container — so under a single shared id they would spawn
+ * one Durable Object and one container, but runs are concurrent — sessions in a
+ * scratchpad share their parent's container — so under a single shared id they would spawn
  * over one another, each drain would attach to whichever exec won, and
  * `killRun` would stop somebody else's session. That is the displacement bug the
  * coder's install guard exists to prevent, in a new place; here the answer is
@@ -127,23 +127,49 @@ export const CREDENTIAL_PLACEHOLDER = "sk-ant-oat01-" + "0".repeat(24);
  */
 const RESERVED_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
 
+/**
+ * The workspace mount, `/workspace` in every image this plugin runs in.
+ * Whatever a session writes under it is synced into the workspace's Durable
+ * Object; whatever it writes anywhere else dies with the container.
+ */
+const WORKSPACE_MOUNT = "/workspace";
+
+/**
+ * Where every session keeps Claude Code's own state — its `CLAUDE_CONFIG_DIR`.
+ *
+ * The whole config directory moves, created if absent: the transcripts under
+ * `projects/<cwd-with-/-as-->/<session-id>.jsonl`, the session index,
+ * `.claude.json` and the auto-memory directory. None of it is a credential.
+ *
+ * This is what decides how long a session stays resumable. The CLI's own
+ * `$HOME/.claude` is on the container's disk, so a conversation there dies with
+ * the container — which a deploy, a rollout and the workspace's own idle timer
+ * all end. Under the workspace mount it is the Durable Object's storage, and the
+ * conversation outlives the container that held it; a later run can continue it
+ * from that same workspace object, and from no other.
+ *
+ * **Fixed, and never a host's to choose.** A transcript is found only where it
+ * was written, so every second place a session could write one is a resume that
+ * cannot find it. `env` cannot move it either: {@link buildLaunch} refuses the
+ * key.
+ *
+ * The directory is named {@link file://../computer/paths.ts SESSION_STATE_DIR},
+ * which is the name the file tools' walk steps over: a transcript records every
+ * line the session read, so a walk that descended into it would answer the
+ * parent's `grep` for a line of source with the session that quoted it. The
+ * name is written out here rather than imported, because `/claude-code` does
+ * not reach `/computer` — a spec holds the two to the same spelling.
+ */
+export const SESSION_CONFIG_DIR = `${WORKSPACE_MOUNT}/.claude-sessions`;
+
+/** The environment key {@link SESSION_CONFIG_DIR} travels as. */
+const CONFIG_DIR_ENV_KEY = "CLAUDE_CONFIG_DIR";
+
 export interface LaunchOptions {
   /** The run's prompt — the whole of what this session is asked to do. */
   prompt: string;
-  /**
-   * Where the checkout is. The session runs with this as its cwd, unless
-   * {@link LaunchOptions.workdir} says otherwise.
-   */
+  /** Where the checkout is. The session runs with this as its cwd. */
   dir: string;
-  /**
-   * Where the session runs when that is not somewhere the exec can start.
-   *
-   * An exec's cwd is resolved against the workspace's own filesystem before
-   * anything spawns, so a directory on container disk — a reading session's
-   * copy — is refused there as "no such path". The exec starts in `dir` and the
-   * command changes into this before it becomes claude.
-   */
-  workdir?: string;
   model?: string;
   /**
    * How hard the model thinks, per turn. Unset, the model's own default.
@@ -182,17 +208,6 @@ export interface LaunchOptions {
   author?: { name: string; email: string };
 
   /**
-   * A path the session must not be able to write under, however it names it.
-   *
-   * Set for a reading session, whose working directory is a throwaway copy while
-   * the tree it copied — and every other checkout — stays mounted where its brief
-   * may name it by absolute path. The session runs in a mount namespace of its
-   * own in which every mount under this path is read-only; see
-   * {@link READ_ONLY_LAUNCH}.
-   */
-  readOnly?: string;
-
-  /**
    * A JSON Schema the session's answer must match, as `--json-schema`. The CLI
    * gives the model a `StructuredOutput` tool and holds the run until it is
    * called, and the result line carries the call's input as
@@ -201,36 +216,43 @@ export interface LaunchOptions {
   jsonSchema?: Record<string, unknown>;
 
   /**
-   * A session id to continue, from an earlier session's `result` line.
+   * A Claude Code session id to continue — the handle an earlier session left on
+   * its {@link DrainCursor}, or reported on its `result` line.
    *
-   * The transcript lives on the container's disk, so this only resumes a session
-   * that ran in the same container. {@link LaunchOptions.prompt} is then the next
-   * user turn rather than a new task.
+   * {@link LaunchOptions.prompt} is then the **next user turn** rather than a new
+   * task: the conversation is already in the session's context, so a brief that
+   * restates it pays for it twice.
+   *
+   * Not scoped to the working directory — a session recorded against one cwd
+   * resumes under another and goes on appending to the original transcript — so
+   * what decides whether this works is where the transcript is, which is
+   * {@link SESSION_CONFIG_DIR} in the workspace the session ran in.
+   *
+   * **An id whose transcript is not there is not a failed session.** The CLI
+   * prints `No conversation found with session ID`, emits a `result` line
+   * carrying that as {@link file://./events.ts ClaudeCodeResult.errors}, and
+   * exits in milliseconds; its client still makes its own startup requests, but
+   * nothing is inferred and nothing is billed. The honest report is "not
+   * resumable", and the retry is the same delegation without this.
+   *
+   * **An empty id is refused rather than dropped.** That retry is launching
+   * without this option, not passing it empty.
    */
   resume?: string;
-}
 
-/**
- * Remount everything under `$CLAUDE_READ_ONLY` read-only, then become the command
- * after it.
- *
- * Run inside `unshare --mount --propagation private`, so the remount is this
- * process tree's view alone: the parent's tools, other sessions and the workspace
- * sync see the same mounts, writable, as before. `remount,bind` changes only the
- * per-mount flag, so it applies to the workspace's FUSE mount and to each
- * dependency tree bound under it alike, and never touches what they hold.
- *
- * No single quote anywhere in it, because it travels inside one.
- */
-export const READ_ONLY_LAUNCH =
-  'while read -r _ mnt _; do case "$mnt" in "$CLAUDE_READ_ONLY"|"$CLAUDE_READ_ONLY"/*) ' +
-  'mount -o remount,bind,ro "$mnt" || { echo "claude-read: could not make $mnt read-only" >&2; exit 97; };; ' +
-  "esac; done < /proc/self/mounts; " +
-  'cd "${CLAUDE_WORKDIR:-.}" || exit 96; exec "$@"';
-
-/** `command`, run in a namespace where `readOnly`'s mounts cannot be written. */
-export function readOnlyLaunch(command: string): string {
-  return `unshare --mount --propagation private -- sh -c '${READ_ONLY_LAUNCH}' sh ${command}`;
+  /**
+   * Fork the resumed conversation: continue it under a **new** session id,
+   * leaving the original transcript whole and resumable.
+   *
+   * What a change of mode wants — a planning session, run under `plan`,
+   * continued under the mode that writes — so that the plan's own conversation
+   * can still be resumed for an edit afterwards. Continuing in the same mode
+   * takes no fork: one conversation accumulating is what "continue" means.
+   *
+   * Refused without {@link LaunchOptions.resume}: on its own the flag has no
+   * conversation to fork, and a caller that set it meant to resume one.
+   */
+  fork?: boolean;
 }
 
 export interface Launch {
@@ -273,13 +295,15 @@ function gitIdentityEnv(
  * `--verbose` is required: without it Claude Code emits
  * only the final result even in stream mode.
  *
- * Note what is **absent**. No `--bare`, no `--settings` override, no
- * `CLAUDE_CONFIG_DIR`: a cloned repository's `CLAUDE.md`, skills and hooks are
- * exactly the material that makes the agent good at that repository, and the
- * container is already an arbitrary-code-execution environment by design — the
- * install runs the repo's `postinstall`, the agent runs its test suite. Stripping
- * one door while the others stand open buys nothing and costs the agent its
- * context.
+ * Note what is **absent**. No `--bare` and no `--settings` override: a cloned
+ * repository's `CLAUDE.md`, skills and hooks are exactly the material that makes
+ * the agent good at that repository, and the container is already an
+ * arbitrary-code-execution environment by design — the install runs the repo's
+ * `postinstall`, the agent runs its test suite. Stripping one door while the
+ * others stand open buys nothing and costs the agent its context.
+ * `CLAUDE_CONFIG_DIR` is not that kind of flag, and every session gets it: it
+ * moves where the *client* keeps its own state, touching nothing a repository
+ * ships — see {@link SESSION_CONFIG_DIR}.
  *
  * No `ANTHROPIC_BASE_URL` either: `http-gateway` egress intercepts
  * transparently, so the client talks to the real hostname and the gateway sees
@@ -331,10 +355,45 @@ export function buildLaunch(options: LaunchOptions): Launch {
     );
   }
 
+  /**
+   * Refused for the same reason: a host that set it meant its sessions to keep
+   * their state somewhere else, and a transcript written anywhere but the one
+   * place is a conversation no later run will find.
+   */
+  if (options.env && CONFIG_DIR_ENV_KEY in options.env) {
+    throw new Error(
+      `claude-code: ${CONFIG_DIR_ENV_KEY} cannot be set through \`env\`. Every ` +
+        `session keeps its state in ${SESSION_CONFIG_DIR}, which is where a ` +
+        "later run looks for the conversation it continues."
+    );
+  }
+
+  /**
+   * Refused rather than dropped, both of them: dropped, a caller that asked to
+   * continue or fork a conversation gets a session that started one of its own,
+   * and reports it as the continuation of whatever it was told to continue. An
+   * empty id is the same state {@link file://./session.ts followUp} refuses,
+   * and refusing it here covers every caller of this option rather than that
+   * one path.
+   */
+  if (options.resume === "") {
+    throw new Error(
+      "claude-code: `resume` is the session id of the conversation to " +
+        "continue, so it cannot be empty. Launch without it to start one."
+    );
+  }
+  if (options.fork && !options.resume) {
+    throw new Error(
+      "claude-code: `fork` forks a resumed conversation, so it needs the " +
+        "`resume` session id it is forking."
+    );
+  }
+
   const permissionMode = options.permissionMode ?? DEFAULT_PERMISSION_MODE;
 
   const argv = ["claude", "-p", shellQuote(options.prompt)];
   if (options.resume) argv.push("--resume", shellQuote(options.resume));
+  if (options.fork) argv.push("--fork-session");
   argv.push("--output-format", "stream-json", "--verbose");
   argv.push("--permission-mode", permissionMode);
   if (options.model) argv.push("--model", shellQuote(options.model));
@@ -360,16 +419,11 @@ export function buildLaunch(options: LaunchOptions): Launch {
     );
 
   return {
-    // `exec` in every shape, so the stop signal a session is sent lands on
-    // claude itself rather than on a shell in front of it.
-    command: options.readOnly
-      ? readOnlyLaunch(argv.join(" "))
-      : options.workdir
-        ? `cd "$CLAUDE_WORKDIR" && exec ${argv.join(" ")}`
-        : argv.join(" "),
-    // The last three are applied **after** the host's environment rather than
-    // before it. For the placeholder that makes the guard above a second line
-    // rather than the only one; for `IS_SANDBOX` it means a host cannot unset
+    command: argv.join(" "),
+    // Everything below `options.env` is applied **after** the host's environment
+    // rather than before it. For the placeholder and the config directory that
+    // makes the guards above a second line rather than the only one; for
+    // `IS_SANDBOX` it means a host cannot unset
     // the variable its own permission mode depends on — see the note above.
     //
     // For the identity it is what keeps the four keys one answer. Spread before
@@ -384,8 +438,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
         ? { IS_SANDBOX: "1" }
         : undefined),
       ...gitIdentityEnv(options.author),
-      ...(options.readOnly ? { CLAUDE_READ_ONLY: options.readOnly } : {}),
-      ...(options.workdir ? { CLAUDE_WORKDIR: options.workdir } : {}),
+      [CONFIG_DIR_ENV_KEY]: SESSION_CONFIG_DIR,
       [RESERVED_ENV_KEY]: CREDENTIAL_PLACEHOLDER
     }
   };
@@ -403,6 +456,20 @@ export interface DrainCursor {
   execId: string;
   /** The last event sequence consumed; a resumed drain starts here. */
   seq: number;
+  /**
+   * The Claude Code session id, from the `init` line — the handle that continues
+   * this conversation later.
+   *
+   * Carried here rather than read off the `result` line alone because the runs
+   * that most need continuing are the ones that never reach a result: a session
+   * stopped by its time limit, a cancel or a container rollout reports no result
+   * at all, and without this the conversation it got half-way through would be
+   * unreachable. The `init` line arrives in the first seconds, so a session has a
+   * handle almost from the start — which is why {@link drainRun} offers the
+   * cursor the moment the id appears instead of waiting out
+   * {@link CHECKPOINT_MIN_MS}.
+   */
+  sessionId?: string;
   /** Bytes after the last newline — an incomplete line the next read finishes. */
   carry: string;
   /** Progress notes emitted so far. The base for the positional keys. */
@@ -432,14 +499,6 @@ export interface DrainCursor {
    * event can land either side of an eviction.
    */
   stderr?: string;
-  /**
-   * Whether this session runs in a throwaway copy that has to be deleted when it
-   * ends — a reading session; see {@link file://./copy.ts}.
-   *
-   * Carried because the drain that sees the session end is not always the one
-   * that started it, and it is the only one that can close the copy.
-   */
-  copy?: true;
 }
 
 /** A cursor for a session that has not started yet. */
@@ -786,6 +845,12 @@ export async function drainRun(
   // a resumed session's bucket visible without carrying a stale one forward.
   let rateLimit: RateLimitInfo | undefined;
   let stderr = cursor.stderr ?? "";
+  let sessionId = cursor.sessionId;
+  /**
+   * Set when this drain is the one that learned the session id, and cleared by
+   * the checkpoint it lets through. See {@link DrainCursor.sessionId}.
+   */
+  let newHandle = false;
   let exitCode: number | undefined;
   let checkpointedAt = now();
   /**
@@ -822,6 +887,12 @@ export async function drainRun(
     buffer = parsed.carry;
     for (const event of parsed.events) {
       if (event.kind === "result") result = event.result;
+      // The first one only, and it is the id of whatever this drain is actually
+      // draining: a resumed conversation's own, or the new one a fork starts.
+      if (event.kind === "init" && !sessionId) {
+        sessionId = event.sessionId;
+        newHandle = true;
+      }
       if (event.kind === "rateLimit") {
         /**
          * Logged when the reading **changes**, not per line — and a change is
@@ -902,18 +973,23 @@ export async function drainRun(
     seq,
     carry: buffer,
     emitted,
+    ...(sessionId ? { sessionId } : {}),
     ...(result ? { result } : {}),
-    ...(stderr ? { stderr } : {}),
-    ...(cursor.copy ? { copy: true as const } : {})
+    ...(stderr ? { stderr } : {})
   });
 
   /**
    * Offer the caller a cursor to store, at most every
-   * {@link CHECKPOINT_MIN_MS}.
+   * {@link CHECKPOINT_MIN_MS} — and once more the moment the session id appears.
    *
    * Fire-and-forget onto the same chain the notes ride, so a storage write
    * cannot stall the read loop and cannot land before the notes it claims are
    * already posted.
+   *
+   * **The id does not wait for the interval.** It is the handle to everything
+   * that follows — the one thing that lets a later run continue this
+   * conversation — and a session killed inside the first interval would
+   * otherwise leave none. One extra write per session buys that.
    */
   const offerCheckpoint = (): void => {
     const sink = options.onCheckpoint;
@@ -923,7 +999,8 @@ export async function drainRun(
     // delivered, and a drain dying after it loses them permanently. The
     // documented unsafe combination is one nothing can reach.
     if (!sink || !options.onProgress || rejected) return;
-    if (now() - checkpointedAt < CHECKPOINT_MIN_MS) return;
+    if (newHandle) newHandle = false;
+    else if (now() - checkpointedAt < CHECKPOINT_MIN_MS) return;
     checkpointedAt = now();
     const at = checkpoint();
     // Checked again on the chain: a note queued ahead of this one may yet be

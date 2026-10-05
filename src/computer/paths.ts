@@ -1,7 +1,8 @@
 /**
  * Which paths these tools act on, and the sentence a refused one gets.
  *
- * Both refused directories are also skipped by every walk. `.git` is refused as
+ * Each refused directory is also skipped by every walk, though the walk steps
+ * over more than it refuses — see {@link WALK_SKIPS}. `.git` is refused as
  * policy: a model that edits `.git/HEAD` corrupts a checkout in a way that
  * surfaces much later. `node_modules` is refused as a fact: it lives on the
  * container's disk (see `../workspace/container-deps.ts`), so these tools, which read
@@ -30,11 +31,33 @@ export function isGitInternal(path: string): boolean {
 }
 
 /**
+ * Where a session's own state lives inside a workspace, as a directory name.
+ *
+ * Every Claude Code session keeps its `CLAUDE_CONFIG_DIR` in a directory of
+ * this name at the workspace root — the Durable Object's storage, so a
+ * conversation outlives its container and a later session can continue it. See
+ * {@link file://../claude-code/run.ts SESSION_CONFIG_DIR}.
+ *
+ * **Spelled here as well as in the plugin that sets the variable**, because the
+ * module that has to step over it is the walk below, and neither may import the
+ * other: `/computer` reaching into `/claude-code` would pull a whole plugin into
+ * every agent that installs the file tools, and `/claude-code` reaches no other
+ * subpath — `verify:exports` refuses both. A spec in `/claude-code` holds the
+ * two spellings to one.
+ */
+export const SESSION_STATE_DIR = ".claude-sessions";
+
+/**
  * What every walk steps over, as directory names. Both the workspace's `glob`
  * and the `grep` tool hand these to the store as `**\/<name>` exclusions, which
- * prunes them: neither directory is descended into, so neither costs a read.
+ * prunes them: no directory named here is descended into, so none costs a read.
+ *
+ * {@link SESSION_STATE_DIR} is here for a reason the refused directories do not
+ * share: a transcript is a verbatim record of everything a session read, so a
+ * walk that descended into it would answer a `grep` for a line of source with
+ * the session that quoted it.
  */
-export const WALK_SKIPS = [".git", "node_modules"] as const;
+export const WALK_SKIPS = [".git", "node_modules", SESSION_STATE_DIR] as const;
 
 /** The sentence a `node_modules` path gets. */
 function dependencyTreeNote(path: string, verb: string): string {

@@ -105,17 +105,25 @@ temporary directory, never over the machine's own `claude`, and launched with th
 command and environment `buildLaunch` gives a session. Its HTTPS goes through a proxy
 that terminates TLS for Anthropic with a throwaway CA, the way `http-gateway` egress
 does. Every request then goes through the real `claudeCodeEgress`, and on to a fake
-Anthropic, or with `--live` to the real API. A session is run once, resumed, and
-then run once more with a `jsonSchema`, so every flag the plugin passes is exercised.
+Anthropic, or with `--live` to the real API. A session is run once and resumed; a
+planning run — a `jsonSchema` under `--permission-mode plan` — is then forked under
+the default mode, the way a plan is carried out, so every flag the plugin passes is
+exercised — then asked to resume a conversation that does not exist, which is the
+one run that must make no model call. Its client's own startup requests are
+expected; `/v1/messages` is what it must not reach.
 
 **It fails when:**
 
-- the CLI does not exit 0;
+- the CLI does not exit 0 on a run meant to succeed;
 - a `stream-json` line does not parse;
 - a result's reply, structured answer or token counts do not read back. The fake
   reports a distinct count for each field, because the parser reads a renamed field
   as zero rather than failing;
-- the resumed session is not the same session;
+- the resumed session is not the same session, or the forked one is not a new one;
+- the planning run does not start in `plan`, or its structured answer does not come
+  back through it;
+- a resume of an unknown session does not report itself on a `result` line with
+  `errors`, or spends a model call doing it;
 - a request reaches Anthropic without the real credential, or with the placeholder or
   an `x-api-key` still on it.
 
@@ -148,9 +156,8 @@ depends on the account it ran on.
 
 If the probe fails, the pin stays where it is and the round says which check failed.
 
-**What it cannot see** is the container itself: root with `IS_SANDBOX`, the read-only
-launch, the interception CA in the image, and rotating to another credential after a
-real `429`. A deployment's smoke test covers those after it ships.
+**What it cannot see** is the container itself: root with `IS_SANDBOX`, the
+interception CA in the image, and rotating to another credential after a real `429`. A deployment's smoke test covers those after it ships.
 
 It needs `npm` and `openssl` on the PATH, and no credential unless `--live`. It
 imports the package from `dist/`, so the npm script builds first.

@@ -16,7 +16,11 @@
  * egress does, done locally. Every request goes through the real
  * `claudeCodeEgress`, and on to a fake Anthropic that streams a canned reply,
  * or with `--live` to the real API on `CLAUDE_CODE_OAUTH_TOKEN`. A session is
- * run once and then resumed, as a writer's warning turn is.
+ * run once and resumed as a writer's warning turn is; a planning run — a
+ * `jsonSchema` under `--permission-mode plan` — is forked under the default
+ * mode, the way a plan is carried out; and finally a resume is asked for a
+ * conversation that does not exist — which is what a host hits when the
+ * container that held one is gone, and which must cost nothing.
  *
  * A failed check exits 1. What differs from the recorded capture is reported
  * and is not a failure: it is what a reviewer reads before taking the bump.
@@ -24,14 +28,14 @@
  * offline run may: a live run's traffic depends on the account it ran on.
  *
  * What this cannot see is the container itself — root with `IS_SANDBOX`, the
- * read-only launch, the interception CA in the image, a real 429's rotation.
+ * interception CA in the image, a real 429's rotation.
  * AGENTS.md's "Updating Claude Code" says what covers those.
  *
  * Needs `npm` and `openssl` on the PATH, and reads `dist/`, so the npm script
  * builds first.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -70,6 +74,12 @@ const SCHEMA = {
 const STRUCTURED = { answer: REPLY };
 /** The tool `--json-schema` gives the model, by the name the CLI gives it. */
 const STRUCTURED_TOOL = "StructuredOutput";
+/**
+ * A session id no transcript can be under: a fresh uuid, in a config directory
+ * this run created. What a host's resume hits when the container that held the
+ * conversation is gone.
+ */
+const UNKNOWN_SESSION = randomUUID();
 /** Carries a request's index through the gateway; removed before upstream. */
 const PROBE_ID = "x-claude-code-probe-id";
 
@@ -227,8 +237,23 @@ try {
         resume: first.result.sessionId
       })
     : undefined;
+  // A planning run, as a host launches one: an answer as data, under `plan`.
   const structured = await runSession(bin, proxyUrl, certs.ca, {
-    jsonSchema: SCHEMA
+    jsonSchema: SCHEMA,
+    permissionMode: "plan"
+  });
+  // And the plan carried out: forked, under the mode that writes.
+  const forked = structured.result?.sessionId
+    ? await runSession(bin, proxyUrl, certs.ca, {
+        resume: structured.result.sessionId,
+        fork: true
+      })
+    : undefined;
+  // Last, and the count is taken before it: this one must make no model call,
+  // and a request made after it could only be its own.
+  const calledBefore = requests.length;
+  const unresumable = await runSession(bin, proxyUrl, certs.ca, {
+    resume: UNKNOWN_SESSION
   });
   proxy.close();
 
@@ -243,7 +268,75 @@ try {
   } else {
     check("the resumed run ran", false, "the first run reported no session id");
   }
-  checkRun("structured run", structured, { structured: true });
+  /**
+   * A planning run reads and edits nothing, and has nobody to approve its plan,
+   * so its answer has to come back through `StructuredOutput` under `plan` —
+   * a version that denied the tool there would leave a planner with no way to
+   * answer at all.
+   */
+  checkRun("planning run", structured, { structured: true });
+  check(
+    "the planning run starts in plan mode",
+    initOf(structured)?.permissionMode === "plan",
+    String(initOf(structured)?.permissionMode)
+  );
+  if (forked) {
+    checkRun("forked run", forked);
+    /**
+     * A fork is how a plan is carried out, and it is only worth anything if the
+     * plan's conversation stays whole — so the id has to be a new one rather
+     * than the original continuing under another name, and the mode the one
+     * that writes.
+     */
+    check(
+      "the forked run starts a session of its own",
+      Boolean(forked.result?.sessionId) &&
+        forked.result.sessionId !== structured.result.sessionId,
+      `${structured.result.sessionId} → ${forked.result?.sessionId}`
+    );
+    check(
+      "and leaves plan mode for the mode that writes",
+      initOf(forked)?.permissionMode === "bypassPermissions",
+      String(initOf(forked)?.permissionMode)
+    );
+  } else {
+    check(
+      "the forked run ran",
+      false,
+      "the planning run reported no session id"
+    );
+  }
+  /**
+   * A resume of a conversation that is not there. This has to stay cheap and
+   * legible, because it is the fallback for every check a host skips: a
+   * `result` line naming the reason, no model call, nothing spent. A version
+   * that started a fresh session instead would silently do unrelated work under
+   * a caller's "continue this" — which is why this is a check and not a note.
+   */
+  check(
+    "a resume with nothing to resume says so on the result line",
+    unresumable.parsed.skipped === 0 &&
+      unresumable.result?.isError === true &&
+      (unresumable.result.errors?.length ?? 0) > 0,
+    JSON.stringify({
+      code: unresumable.code,
+      subtype: unresumable.result?.subtype,
+      errors: unresumable.result?.errors
+    })
+  );
+  /**
+   * **No model call**, rather than no request at all: the client still makes its
+   * own startup requests before it looks for the conversation. Nothing is
+   * inferred and nothing is billed, which is what makes a refused resume
+   * something a host can simply report and retry without one.
+   */
+  const afterRefusal = requests.slice(calledBefore);
+  check(
+    "and makes no model call doing it",
+    afterRefusal.every((r) => !r.path.startsWith("/v1/messages")),
+    afterRefusal.map((r) => `${r.method} ${r.path}`).join(", ") ||
+      "no request at all"
+  );
 
   // Every intercepted request, not the ones that got through: a request the
   // gateway refused never reaches upstream, and would otherwise go unseen.
@@ -279,7 +372,9 @@ try {
     runs: {
       first: normalizeLines(first.lines),
       resumed: normalizeLines(second?.lines ?? []),
-      structured: normalizeLines(structured.lines)
+      forked: normalizeLines(forked?.lines ?? []),
+      structured: normalizeLines(structured.lines),
+      unresumable: normalizeLines(unresumable.lines)
     }
   };
 
@@ -525,12 +620,19 @@ function listen(gateway, certs, requests, refused) {
 }
 
 /** One session, launched as `buildLaunch` launches it, and its stream parsed. */
-function runSession(bin, proxyUrl, ca, { resume, jsonSchema } = {}) {
+function runSession(
+  bin,
+  proxyUrl,
+  ca,
+  { resume, fork, jsonSchema, permissionMode } = {}
+) {
   const launch = buildLaunch({
     prompt: `Reply with exactly: ${REPLY}`,
     dir: work,
     ...(resume ? { resume } : {}),
-    ...(jsonSchema ? { jsonSchema } : {})
+    ...(fork ? { fork: true } : {}),
+    ...(jsonSchema ? { jsonSchema } : {}),
+    ...(permissionMode ? { permissionMode } : {})
   });
   if (!launch.command.startsWith("claude ")) {
     throw new Error(
@@ -543,6 +645,10 @@ function runSession(bin, proxyUrl, ca, { resume, jsonSchema } = {}) {
     HOME: home,
     TMPDIR: tmp,
     ...launch.env,
+    // The workspace mount, stood in for: `buildLaunch` names `/workspace`, which
+    // only the container has. Every run shares it, as every session in one
+    // workspace does, so the resume and the fork find the transcripts there.
+    CLAUDE_CONFIG_DIR: path.join(home, ".claude-sessions"),
     HTTPS_PROXY: proxyUrl,
     https_proxy: proxyUrl,
     NODE_EXTRA_CA_CERTS: ca
@@ -594,6 +700,19 @@ function runSession(bin, proxyUrl, ca, { resume, jsonSchema } = {}) {
       });
     });
   });
+}
+
+/** A run's `system`/`init` line, which names the mode it actually started in. */
+function initOf(run) {
+  for (const line of run.lines) {
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed.type === "system" && parsed.subtype === "init") return parsed;
+    } catch {
+      // Not JSON: `checkRun` reports it.
+    }
+  }
+  return undefined;
 }
 
 function checkRun(label, run, { structured = false } = {}) {
@@ -764,9 +883,16 @@ function normalizeHeaders(headers) {
   return out;
 }
 
-/** The run's lines, with this machine's temporary paths taken out. */
+/**
+ * The run's lines, with this machine's temporary paths taken out — in the
+ * spelling the CLI names a project directory with too, every character but a
+ * letter or a digit turned to `-`.
+ */
 function normalizeLines(lines) {
-  return lines.map((line) => line.split(tmp).join("/probe"));
+  const projectSpelling = tmp.replace(/[^A-Za-z0-9]/g, "-");
+  return lines.map((line) =>
+    line.split(tmp).join("/probe").split(projectSpelling).join("-probe")
+  );
 }
 
 /**

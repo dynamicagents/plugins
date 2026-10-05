@@ -582,7 +582,11 @@ describe("grep pruning", () => {
       query: "marker"
     });
 
-    expect(greps[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
+    expect(greps[0]?.exclude).toEqual([
+      "**/.git",
+      "**/node_modules",
+      "**/.claude-sessions"
+    ]);
     // The point of the retirement: one round trip. A filter here needed a second
     // to refill a page its own skips had emptied, and a retry re-scanned every
     // file the first round had already read.
@@ -590,10 +594,18 @@ describe("grep pruning", () => {
     expect(out).toContain("const marker = 1;");
   });
 
-  it("keeps both skipped directories out of the results", async () => {
+  /**
+   * The session directory is skipped for a different reason than the other two:
+   * a transcript quotes every line the session read, so a search that descended
+   * into it would answer a query about the source with the conversation that
+   * happened to mention it.
+   */
+  it("keeps every skipped directory out of the results", async () => {
     const { workspace } = stub({
       "/workspace/repo/node_modules/zod/index.ts": "const marker = 1;\n",
       "/workspace/repo/.git/COMMIT_EDITMSG": "const marker = 2;\n",
+      "/workspace/.claude-sessions/projects/-workspace-repo/s.jsonl":
+        '{"text":"const marker = 2;"}\n',
       [src]: "const marker = 3;\n"
     });
 
@@ -604,6 +616,7 @@ describe("grep pruning", () => {
     expect(out).toContain(src);
     expect(out).not.toContain("node_modules");
     expect(out).not.toContain("COMMIT_EDITMSG");
+    expect(out).not.toContain(".jsonl");
   });
 
   /**
@@ -672,7 +685,11 @@ describe("grep pruning", () => {
     expect(pages).toBeGreaterThan(1);
     // Every page asked the store to prune, not just the first.
     for (const call of greps)
-      expect(call.exclude).toEqual(["**/.git", "**/node_modules"]);
+      expect(call.exclude).toEqual([
+        "**/.git",
+        "**/node_modules",
+        "**/.claude-sessions"
+      ]);
   });
 });
 

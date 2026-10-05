@@ -12,13 +12,12 @@
  *
  * ## What it contributes, and what it does not
  *
- * **A writer's and a reader's sub-agent spec, a model, and no plugin.** Claude Code brings its own
+ * **A writer's sub-agent spec, a model, and no plugin.** Claude Code brings its own
  * tools, its own loop and its own context management, so there is nothing for
  * an agent loop to drive: the session *is* the sub-agent's model —
  * {@link claudeCodeModel} — and Think's recovery drives that. A host binds
- * {@link CLAUDE_CODE_AGENT} and {@link CLAUDE_CODE_READER_AGENT} to `SubAgent`
- * classes whose `getModel()` returns one, and adds the `prepare` and `settle`
- * that claim and release a workspace.
+ * {@link CLAUDE_CODE_AGENT} to a `SubAgent` class whose `getModel()` returns
+ * one, and adds the `prepare` and `settle` that claim and release a workspace.
  *
  * ## The credential never enters the container
  *
@@ -59,17 +58,19 @@ export type {
   ClaudeCodeModelOptions,
   SessionEnd,
   SessionOutcome,
+  SessionRecord,
   SessionWorkspace
 } from "./model.js";
 export { claudeCodeSession } from "./session.js";
-export type { ClaudeCodeSession } from "./session.js";
+export type {
+  ClaudeCodeSession,
+  ResumeSession,
+  StartSession
+} from "./session.js";
 export {
   CLAUDE_CODE_AGENT,
-  CLAUDE_CODE_READER_AGENT,
-  CLAUDE_CODE_READ_INPUT,
   CLAUDE_CODE_WRITE_INPUT,
-  type ClaudeCodeInput,
-  type ClaudeCodeReadInput
+  type ClaudeCodeInput
 } from "./spec.js";
 
 export { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";

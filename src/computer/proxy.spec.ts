@@ -255,13 +255,13 @@ describe("computerWorkspace", () => {
       {
         dir: "/workspace/repo/src",
         pattern: "**/*.ts",
-        exclude: ["**/.git", "**/node_modules"],
+        exclude: ["**/.git", "**/node_modules", "**/.claude-sessions"],
         limit: 201
       },
       {
         dir: "/workspace",
         pattern: "*.md",
-        exclude: ["**/.git", "**/node_modules"],
+        exclude: ["**/.git", "**/node_modules", "**/.claude-sessions"],
         limit: 201
       }
     ]);
