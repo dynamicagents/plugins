@@ -339,12 +339,13 @@ export function claudeCodeModel(
         )
       );
       await storage.put(KEYS.session, ended);
-      // After the end is stored, so a turn that dies here does not report an end
-      // the run has not kept — and the handle is already recorded from the
-      // drain's first checkpoint, so nothing is lost either way.
-      if (ended.sessionId)
-        await announce({ sessionId: ended.sessionId, end: ended });
     }
+    // After the end is stored, so a turn that dies here does not report an end
+    // the run has not kept — and outside the guard above, so a turn cut between
+    // storing the end and telling the host tells it on the next attempt. Telling
+    // it twice is harmless: its record is keyed on the id, see `SessionRecord`.
+    if (ended.sessionId)
+      await announce({ sessionId: ended.sessionId, end: ended });
 
     let followUpEnd = await storage.get<SessionEnd>(KEYS.followUpEnd);
     if (!followUpEnd && options.followUp) {

@@ -648,7 +648,7 @@ worth more than two that half-finish — but it is bought, not free.
   design — it costs the agent its context and buys nothing. Containment is the
   credential swap. `CLAUDE_CONFIG_DIR` is not one of these: it moves where the
   _client_ keeps its own state and touches nothing a repository ships, which is
-  why a host may set it — see above.
+  why the plugin sets it on every session — see above. A host cannot.
 - **No claude.ai login flow, ever.** Credentials are BYO-paste from
   `claude setup-token`. Anthropic does not allow third-party developers to offer
   claude.ai login or subscription rate limits for their products.

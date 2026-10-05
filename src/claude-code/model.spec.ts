@@ -653,6 +653,30 @@ describe("claudeCodeModel", () => {
       expect(records.at(-1)?.end?.sessionId).toBe("sess-1");
     });
 
+    /**
+     * A turn cut after the end was stored and before the host was told: the
+     * next attempt finds the end and starts nothing, so it is the only chance
+     * left to say how the session finished.
+     */
+    it("reports a stored end the host was never told, without starting anything", async () => {
+      const box = container({});
+      const { records, over } = recording();
+      const { model, map, reports } = harness(box, over);
+      map.set(`claude-code:${RUN}:session`, {
+        exitCode: 0,
+        result: { sessionId: "sess-1" },
+        sessionId: "sess-1"
+      });
+
+      await streamed(model);
+
+      expect(box.calls.exec).toEqual([]);
+      expect(records).toEqual([
+        { sessionId: "sess-1", end: expect.objectContaining({ exitCode: 0 }) }
+      ]);
+      expect(reports[0]?.session.sessionId).toBe("sess-1");
+    });
+
     /** Recording a handle is worth less than the session it would fail. */
     it("goes on with the run when the handle cannot be recorded", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
