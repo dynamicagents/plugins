@@ -127,14 +127,9 @@ for (const file of walk(path.join(root, "dist"))) {
  * carrying. It reaches `/workspace`'s client modules, never its barrel, which is
  * what keeps the object — its container backend and its git — out of a bundle
  * that holds only the tools.
- *
- * `/claude-code` is the same case: a session runs in a `/workspace` object's
- * container, and a reading one waits on that object's install, read through its
- * advisories.
  */
 const BUILDS_ON = {
-  "./computer": ["./workspace"],
-  "./claude-code": ["./workspace"]
+  "./computer": ["./workspace"]
 };
 
 /** `./browser` → `dist/browser` — the directory a subpath's files must stay in. */

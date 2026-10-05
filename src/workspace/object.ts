@@ -1189,8 +1189,8 @@ export abstract class WorkspaceObjectBase<
    * Keep the container up for work this object cannot see, until `untilMs` or
    * {@link unhold}.
    *
-   * A session a host starts here — a Claude Code reading session in its copy —
-   * runs detached: nothing calls in while it works, and the runtime cannot list
+   * A Claude Code session a host starts here runs detached: nothing calls in
+   * while it works, and the runtime cannot list
    * what is running. So a host done with the workspace cannot tell that the
    * container is not, and {@link releaseContainer} would stop the session with
    * it. A hold is the host saying so. It defers a release; it is not use, so it

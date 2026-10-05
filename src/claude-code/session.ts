@@ -16,8 +16,11 @@ import {
   type DrainOptions,
   type SessionRuntime
 } from "./run.js";
-import { DEFAULT_TIMEOUT_MS, type ClaudeCodeConfig } from "./config.js";
-import { closeCopy, copyNote, openCopy, WORKSPACE_MOUNT } from "./copy.js";
+import {
+  DEFAULT_TIMEOUT_MS,
+  type ClaudeCodeConfig,
+  type PermissionMode
+} from "./config.js";
 
 /**
  * What continuing an interrupted conversation takes — see
@@ -31,13 +34,16 @@ export interface ResumeSession {
 
 /** What one session needs to be launched: see {@link ClaudeCodeSession.start}. */
 export interface StartSession {
-  /** A reading session runs in a throwaway copy; see {@link file://./copy.ts}. */
-  kind: "write" | "read";
   /** The whole of what this session is asked to do, or its next user turn. */
   prompt: string;
   /** The checkout. */
   dir: string;
   jsonSchema?: Record<string, unknown>;
+  /**
+   * This session's mode, over the config's — see
+   * {@link file://./model.ts ClaudeCodeModelOptions.permissionMode}.
+   */
+  permissionMode?: PermissionMode;
   /** A Claude Code conversation to continue rather than start. */
   resume?: ResumeSession;
   /** Where the client keeps its state — {@link file://./run.ts LaunchOptions.configDir}. */
@@ -73,7 +79,11 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
    */
   type Sinks = DrainOptions;
 
-  const launch = (prompt: string, dir: string) => ({
+  const launch = (
+    prompt: string,
+    dir: string,
+    permissionMode = config.permissionMode
+  ) => ({
     prompt,
     dir,
     ...(config.model ? { model: config.model } : {}),
@@ -86,27 +96,10 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       : { maxConcurrentSubagents: config.maxConcurrentSubagents }),
     // Forwarded only when set, so `buildLaunch` owns the default in one place
     // rather than this line resolving it and the flag being written twice.
-    ...(config.permissionMode ? { permissionMode: config.permissionMode } : {}),
+    ...(permissionMode ? { permissionMode } : {}),
     ...(config.env ? { env: config.env } : {}),
     ...(config.author ? { author: config.author } : {})
   });
-
-  /**
-   * Delete a reading session's copy once its drain reaches the end.
-   *
-   * Here rather than left to a host, because the copy is this package's guarantee:
-   * a host that forgot would leave a copy — and whatever it installed — on the
-   * container's disk until the next sweep.
-   */
-  const settle = async (
-    runtime: SessionRuntime,
-    outcome: DrainOutcome
-  ): Promise<DrainOutcome> => {
-    if (outcome.done && outcome.cursor.copy) {
-      await closeCopy(runtime, outcome.cursor.execId);
-    }
-    return outcome;
-  };
 
   return {
     /**
@@ -115,12 +108,6 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
      * `runId` namespaces the exec id. Runs are concurrent, so two sessions in
      * one workspace under one id would spawn over each other — see
      * {@link execIdFor}.
-     *
-     * A reading session runs in a throwaway copy of `dir`, made here — see
-     * {@link file://./copy.ts}. **Made inside this call, from `kind`, and never
-     * handed in by the caller**: a host able to pass the copy is a host able to
-     * leave it out, and a reading session without one would run in the tree its
-     * parent and every other reader share.
      *
      * `resume` continues a conversation on this session's **own** exec rather
      * than on a second one: a run given a conversation to continue has no first
@@ -132,23 +119,10 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       options: StartSession,
       sinks: Sinks = {}
     ): Promise<DrainOutcome> {
-      const { kind, prompt, dir } = options;
       const execId = execIdFor(runId);
-      const copy =
-        kind === "read"
-          ? await openCopy(runtime, { execId, source: dir, timeoutMs })
-          : undefined;
       // `using`, so the attachment is released even when the drain throws.
       using handle = await startRun(runtime, {
-        ...(copy
-          ? {
-              // Started in the original and moved into the copy by the command:
-              // the copy is on container disk, where no exec can start.
-              ...launch(`${prompt}\n\n${copyNote(copy)}`, dir),
-              workdir: copy.dir,
-              ...(copy.isolated ? { readOnly: WORKSPACE_MOUNT } : {})
-            }
-          : launch(prompt, dir)),
+        ...launch(options.prompt, options.dir, options.permissionMode),
         ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}),
         ...resumption(options.resume),
         ...(options.configDir ? { configDir: options.configDir } : {}),
@@ -156,11 +130,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         timeoutMs,
         signal: sinks.signal
       });
-      const cursor = freshCursor(execId);
-      return await settle(
-        runtime,
-        await drainRun(handle, copy ? { ...cursor, copy: true } : cursor, sinks)
-      );
+      return await drainRun(handle, freshCursor(execId), sinks);
     },
 
     /**
@@ -174,7 +144,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
      * session's.
      *
      * Never forked: a follow-up is one more turn of the same conversation, which
-     * is exactly what a fork is for *not* doing.
+     * is exactly what a fork is for *not* doing. For the same reason it runs
+     * under the session's own `permissionMode`.
      */
     async followUp(
       runtime: SessionRuntime,
@@ -183,6 +154,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         sessionId: string;
         prompt: string;
         dir: string;
+        permissionMode?: PermissionMode;
         configDir?: string;
       },
       sinks: Sinks = {}
@@ -196,17 +168,14 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       }
       const execId = followUpExecIdFor(runId);
       using handle = await startRun(runtime, {
-        ...launch(options.prompt, options.dir),
+        ...launch(options.prompt, options.dir, options.permissionMode),
         resume: options.sessionId,
         ...(options.configDir ? { configDir: options.configDir } : {}),
         execId,
         timeoutMs,
         signal: sinks.signal
       });
-      return await settle(
-        runtime,
-        await drainRun(handle, freshCursor(execId), sinks)
-      );
+      return await drainRun(handle, freshCursor(execId), sinks);
     },
 
     /**
@@ -245,24 +214,15 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         };
       }
       using session = handle;
-      return await settle(runtime, await drainRun(session, cursor, sinks));
+      return await drainRun(session, cursor, sinks);
     },
 
-    /**
-     * Stop a session — `SIGTERM`, so its own process tree goes with it — and
-     * delete its copy if it had one.
-     *
-     * The copy is closed here as well as when a drain reaches the end, because a
-     * session stopped with no drain attached has nobody else to close it. A no-op
-     * for a session that had none.
-     */
+    /** Stop a session — `SIGTERM`, so its own process tree goes with it. */
     async stop(runtime: SessionRuntime, runId: string): Promise<void> {
-      const execId = execIdFor(runId);
       // First, and allowed to fail: most sessions never had a follow-up, and
       // one that did has usually finished its first exec already.
       await killRun(runtime, followUpExecIdFor(runId)).catch(() => {});
-      await killRun(runtime, execId);
-      await closeCopy(runtime, execId);
+      await killRun(runtime, execIdFor(runId));
     },
 
     /**

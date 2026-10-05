@@ -137,6 +137,9 @@ export interface ClaudeCodeConfig {
    *
    * See {@link file://./run.ts buildLaunch} for the root guard this mode trips,
    * which is the other half of making it work.
+   *
+   * A run may set its own, over this one: a planning run's is `plan` — see
+   * {@link file://./model.ts ClaudeCodeModelOptions.permissionMode}.
    */
   permissionMode?: PermissionMode;
 

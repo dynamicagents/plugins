@@ -16,8 +16,9 @@
  * egress does, done locally. Every request goes through the real
  * `claudeCodeEgress`, and on to a fake Anthropic that streams a canned reply,
  * or with `--live` to the real API on `CLAUDE_CODE_OAUTH_TOKEN`. A session is
- * run once, resumed as a writer's warning turn is, forked as a change of kind
- * resumes, run once more with a `jsonSchema`, and finally asked to resume a
+ * run once and resumed as a writer's warning turn is; a planning run — a
+ * `jsonSchema` under `--permission-mode plan` — is forked under the default
+ * mode, the way a plan is carried out; and finally a resume is asked for a
  * conversation that does not exist — which is what a host hits when the
  * container that held one is gone, and which must cost nothing.
  *
@@ -27,7 +28,7 @@
  * offline run may: a live run's traffic depends on the account it ran on.
  *
  * What this cannot see is the container itself — root with `IS_SANDBOX`, the
- * read-only launch, the interception CA in the image, a real 429's rotation.
+ * interception CA in the image, a real 429's rotation.
  * AGENTS.md's "Updating Claude Code" says what covers those.
  *
  * Needs `npm` and `openssl` on the PATH, and reads `dist/`, so the npm script
@@ -236,15 +237,18 @@ try {
         resume: first.result.sessionId
       })
     : undefined;
-  const forked = first.result?.sessionId
+  // A planning run, as a host launches one: an answer as data, under `plan`.
+  const structured = await runSession(bin, proxyUrl, certs.ca, {
+    jsonSchema: SCHEMA,
+    permissionMode: "plan"
+  });
+  // And the plan carried out: forked, under the mode that writes.
+  const forked = structured.result?.sessionId
     ? await runSession(bin, proxyUrl, certs.ca, {
-        resume: first.result.sessionId,
+        resume: structured.result.sessionId,
         fork: true
       })
     : undefined;
-  const structured = await runSession(bin, proxyUrl, certs.ca, {
-    jsonSchema: SCHEMA
-  });
   // Last, and the count is taken before it: this one must make no model call,
   // and a request made after it could only be its own.
   const calledBefore = requests.length;
@@ -264,23 +268,44 @@ try {
   } else {
     check("the resumed run ran", false, "the first run reported no session id");
   }
+  /**
+   * A planning run reads and edits nothing, and has nobody to approve its plan,
+   * so its answer has to come back through `StructuredOutput` under `plan` —
+   * a version that denied the tool there would leave a planner with no way to
+   * answer at all.
+   */
+  checkRun("planning run", structured, { structured: true });
+  check(
+    "the planning run starts in plan mode",
+    initOf(structured)?.permissionMode === "plan",
+    String(initOf(structured)?.permissionMode)
+  );
   if (forked) {
     checkRun("forked run", forked);
     /**
-     * A fork is what a change of kind resumes with, and it is only worth
-     * anything if the conversation it forked stays whole — so the id has to be a
-     * new one rather than the original continuing under another name.
+     * A fork is how a plan is carried out, and it is only worth anything if the
+     * plan's conversation stays whole — so the id has to be a new one rather
+     * than the original continuing under another name, and the mode the one
+     * that writes.
      */
     check(
       "the forked run starts a session of its own",
       Boolean(forked.result?.sessionId) &&
-        forked.result.sessionId !== first.result.sessionId,
-      `${first.result.sessionId} → ${forked.result?.sessionId}`
+        forked.result.sessionId !== structured.result.sessionId,
+      `${structured.result.sessionId} → ${forked.result?.sessionId}`
+    );
+    check(
+      "and leaves plan mode for the mode that writes",
+      initOf(forked)?.permissionMode === "bypassPermissions",
+      String(initOf(forked)?.permissionMode)
     );
   } else {
-    check("the forked run ran", false, "the first run reported no session id");
+    check(
+      "the forked run ran",
+      false,
+      "the planning run reported no session id"
+    );
   }
-  checkRun("structured run", structured, { structured: true });
   /**
    * A resume of a conversation that is not there. This has to stay cheap and
    * legible, because it is the fallback for every check a host skips: a
@@ -595,13 +620,19 @@ function listen(gateway, certs, requests, refused) {
 }
 
 /** One session, launched as `buildLaunch` launches it, and its stream parsed. */
-function runSession(bin, proxyUrl, ca, { resume, fork, jsonSchema } = {}) {
+function runSession(
+  bin,
+  proxyUrl,
+  ca,
+  { resume, fork, jsonSchema, permissionMode } = {}
+) {
   const launch = buildLaunch({
     prompt: `Reply with exactly: ${REPLY}`,
     dir: work,
     ...(resume ? { resume } : {}),
     ...(fork ? { fork: true } : {}),
-    ...(jsonSchema ? { jsonSchema } : {})
+    ...(jsonSchema ? { jsonSchema } : {}),
+    ...(permissionMode ? { permissionMode } : {})
   });
   if (!launch.command.startsWith("claude ")) {
     throw new Error(
@@ -665,6 +696,19 @@ function runSession(bin, proxyUrl, ca, { resume, fork, jsonSchema } = {}) {
       });
     });
   });
+}
+
+/** A run's `system`/`init` line, which names the mode it actually started in. */
+function initOf(run) {
+  for (const line of run.lines) {
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed.type === "system" && parsed.subtype === "init") return parsed;
+    } catch {
+      // Not JSON: `checkRun` reports it.
+    }
+  }
+  return undefined;
 }
 
 function checkRun(label, run, { structured = false } = {}) {

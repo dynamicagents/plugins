@@ -1,7 +1,6 @@
 import type { LanguageModel } from "ai";
 import { isPlatformTransientError } from "agents";
-import { shapeOf, type WorkspaceAdvisory } from "../workspace/advisory.js";
-import { DEFAULT_TIMEOUT_MS, type ClaudeCodeConfig } from "./config.js";
+import type { ClaudeCodeConfig, PermissionMode } from "./config.js";
 import type { ClaudeCodeResult, RateLimitInfo } from "./events.js";
 import { claudeCodeSession, requireCredentials } from "./session.js";
 import {
@@ -102,18 +101,6 @@ export interface ClaudeCodeModelOptions {
   storage: DurableObjectStorage;
   /** The sub-agent's name, which is the run's id. The exec ids derive from it. */
   runId: string;
-  /** A reading session runs in a throwaway copy of `dir`; see `./copy.ts`. */
-  kind: "write" | "read";
-  /**
-   * What is true about the workspace: its object's `advisories()`.
-   *
-   * A reading session waits here while an install is in flight, before its
-   * brief and its copy are made. The copy takes the parent's dependency trees as
-   * they are at that moment, and nothing reaches it after: made a moment
-   * earlier, it has no tree or half of one for the whole session. Required, so
-   * a host cannot leave its reading sessions copying a workspace mid-install.
-   */
-  advisories: () => Promise<readonly WorkspaceAdvisory[]>;
   /** The checkout. */
   dir: string;
   /**
@@ -121,6 +108,17 @@ export interface ClaudeCodeModelOptions {
    * the answer as `structured`, for `report` to read.
    */
   jsonSchema?: Record<string, unknown>;
+  /**
+   * This run's mode, over {@link file://./config.ts ClaudeCodeConfig.permissionMode}.
+   *
+   * A planning run is a writing session under `plan` with a `jsonSchema`: it
+   * reads, edits nothing, and answers through `StructuredOutput` rather than an
+   * approval nobody is there to give. Carrying the plan out is a later run that
+   * resumes it with `fork` under the config's mode — the CLI takes a new
+   * `--permission-mode` on `--resume` — so the plan's own conversation stays
+   * whole for an edit.
+   */
+  permissionMode?: PermissionMode;
   /**
    * A Claude Code conversation for this run to continue instead of starting one
    * — see {@link file://./session.ts StartSession.resume}.
@@ -135,9 +133,6 @@ export interface ClaudeCodeModelOptions {
   /**
    * Where the session's own state goes — see
    * {@link file://./run.ts LaunchOptions.configDir}.
-   *
-   * Per run and the host's, because a reading session cannot have one in the
-   * workspace: its namespace remounts the workspace read-only.
    */
   configDir?: string;
   /** Files one note on the parent's transcript: the sub-agent's `note`. */
@@ -325,19 +320,6 @@ export function claudeCodeModel(
 
     let ended = await storage.get<SessionEnd>(KEYS.session);
     if (!ended) {
-      // Before the brief, so the brief describes the workspace the copy is
-      // made from. Skipped once the session has a cursor: its copy is made.
-      if (
-        options.kind === "read" &&
-        (await storage.get<DrainCursor>(KEYS.cursor)) === undefined
-      ) {
-        await untilInstalled(
-          options.advisories,
-          options.config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-          runId,
-          signal
-        );
-      }
       let prompt = await storage.get<string>(KEYS.brief);
       if (prompt === undefined) {
         const task = lastUserText(call.prompt);
@@ -350,10 +332,12 @@ export function claudeCodeModel(
           runtime,
           runId,
           {
-            kind: options.kind,
             prompt: brief,
             dir: options.dir,
             ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}),
+            ...(options.permissionMode
+              ? { permissionMode: options.permissionMode }
+              : {}),
             ...(options.resume ? { resume: options.resume } : {}),
             ...(options.configDir ? { configDir: options.configDir } : {})
           },
@@ -389,6 +373,9 @@ export function claudeCodeModel(
               sessionId,
               prompt,
               dir: options.dir,
+              ...(options.permissionMode
+                ? { permissionMode: options.permissionMode }
+                : {}),
               ...(options.configDir ? { configDir: options.configDir } : {})
             },
             sinks
@@ -451,95 +438,6 @@ export function claudeCodeModel(
       };
     }
   };
-}
-
-/** How often a waiting reading session asks again. */
-const INSTALL_POLL_MS = 5_000;
-
-/**
- * Wait while the workspace has anything transient to wait out — an install in
- * flight — by the test {@link file://../computer/gate.ts execGate} holds a
- * command on.
- *
- * Bounded by the session's own ceiling: a wait longer than any session could
- * run is not one worth finishing, and the install's own timeout and watchdog
- * end a stuck one before that. A read that fails ends the wait, not the run, and
- * the copy is made as the workspace is. A cancel ends both, mid-read included.
- */
-async function untilInstalled(
-  advisories: () => Promise<readonly WorkspaceAdvisory[]>,
-  ceilingMs: number,
-  runId: string,
-  signal?: AbortSignal
-): Promise<void> {
-  const since = Date.now();
-  let waiting = false;
-  for (;;) {
-    signal?.throwIfAborted();
-    let current: readonly WorkspaceAdvisory[];
-    try {
-      current = await raced(advisories(), signal);
-    } catch (err) {
-      // Open on a failed read, never on a cancel: going on would make the copy
-      // for a run its caller has given up on.
-      if (signal?.aborted) throw err;
-      console.warn("[claude-code] could not read the workspace's install", {
-        runId,
-        err: String(err)
-      });
-      return;
-    }
-    const waitedMs = Date.now() - since;
-    if (!current.some((a) => shapeOf(a).transient)) {
-      if (waiting) {
-        console.info("[claude-code] done waiting for the install", {
-          runId,
-          waitedMs
-        });
-      }
-      return;
-    }
-    if (waitedMs >= ceilingMs) {
-      console.warn("[claude-code] still installing — copying as it is", {
-        runId,
-        waitedMs
-      });
-      return;
-    }
-    if (!waiting) {
-      console.info("[claude-code] waiting for the install", { runId });
-      waiting = true;
-    }
-    await pause(Math.min(INSTALL_POLL_MS, ceilingMs - waitedMs), signal);
-  }
-}
-
-/** `promise`, or `signal`'s reason the moment it aborts. */
-function raced<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    if (signal.aborted) return onAbort();
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise
-      .then(resolve, reject)
-      .finally(() => signal.removeEventListener("abort", onAbort));
-  });
-}
-
-/** `ms`, or until `signal` aborts, which rejects with its reason. */
-function pause(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal?.reason);
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 /**

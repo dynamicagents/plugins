@@ -12,7 +12,6 @@ import {
   freshCursor,
   startRun,
   CREDENTIAL_PLACEHOLDER,
-  READ_ONLY_LAUNCH,
   type DrainCursor,
   type DrainOutcome,
   type SessionRuntime
@@ -274,11 +273,7 @@ describe("buildLaunch", () => {
       expect(launch().env.CLAUDE_CONFIG_DIR).toBeUndefined();
     });
 
-    /**
-     * Where a transcript goes is decided per session — a reading session's
-     * namespace makes the workspace read-only, so only the host knows — and a
-     * deployment-wide `env` must not be able to answer it instead.
-     */
+    /** A deployment-wide `env` must not answer where a transcript goes. */
     it("is not something a host's own environment can redirect", () => {
       expect(
         launch({
@@ -289,51 +284,8 @@ describe("buildLaunch", () => {
     });
   });
 
-  /**
-   * A reading session's copy is its working directory, which is no boundary for
-   * a root process whose brief may name the original by absolute path.
-   */
-  it("runs a read-only launch in a namespace of its own, then becomes claude", () => {
-    const { command, env } = launch({ readOnly: "/workspace" });
-
-    expect(command).toBe(
-      `unshare --mount --propagation private -- sh -c '${READ_ONLY_LAUNCH}' sh ${launch().command}`
-    );
-    expect(env.CLAUDE_READ_ONLY).toBe("/workspace");
-    // `exec`, so the stop signal a session is sent lands on claude itself.
-    expect(READ_ONLY_LAUNCH).toContain('exec "$@"');
-    // It travels inside single quotes.
-    expect(READ_ONLY_LAUNCH).not.toContain("'");
-  });
-
-  /**
-   * An exec's cwd is resolved against the workspace's own filesystem, so one on
-   * container disk is refused before anything spawns. The shell moves there
-   * instead, and `exec`s so a stop signal still lands on claude.
-   */
-  it("moves into a workdir the exec could not have started in", () => {
-    const { command, env } = launch({ workdir: "/var/tmp/claude-read/x/tree" });
-
-    expect(command).toBe(`cd "$CLAUDE_WORKDIR" && exec ${launch().command}`);
-    expect(env.CLAUDE_WORKDIR).toBe("/var/tmp/claude-read/x/tree");
-  });
-
-  it("moves into the workdir inside the read-only namespace too", () => {
-    const { command, env } = launch({
-      readOnly: "/workspace",
-      workdir: "/var/tmp/claude-read/x/tree"
-    });
-
-    expect(command.startsWith("unshare ")).toBe(true);
-    expect(READ_ONLY_LAUNCH).toContain('cd "${CLAUDE_WORKDIR:-.}" || exit 96');
-    expect(env.CLAUDE_WORKDIR).toBe("/var/tmp/claude-read/x/tree");
-  });
-
-  it("leaves an ordinary launch alone", () => {
-    const { command, env } = launch();
-    expect(command.startsWith("claude -p ")).toBe(true);
-    expect(env.CLAUDE_READ_ONLY).toBeUndefined();
-    expect(env.CLAUDE_WORKDIR).toBeUndefined();
+  it("launches claude itself, in the exec's own directory", () => {
+    expect(launch().command.startsWith("claude -p ")).toBe(true);
   });
 
   /**

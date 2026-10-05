@@ -16,19 +16,24 @@ and Haiku 4.5 all answer, at `service_tier: standard`. **The harness is the
 unlock, not the credential.** So the way to reach those models on a subscription
 is to run the sanctioned client, which is what this plugin makes delegable.
 
-## The shape: a writer and a reader, and the session is their model
+## The shape: a writer, and the session is its model
 
 Unusual for this package, and it is the whole design. Claude Code brings its own
 tools, its own loop and its own context management, so there is nothing for an
-agent loop to drive. So this package exports no plugin: it exports a writer's and a
-reader's `SubAgentSpec` — `CLAUDE_CODE_AGENT` (`claude_code`, which writes) and
-`CLAUDE_CODE_READER_AGENT` (`claude_code_read`, which works in a throwaway copy) —
-and `claudeCodeModel`, a language model whose one call runs a session. A host binds
-each spec to a `SubAgent` whose `getModel()` returns one, and Think's recovery does
-the rest: a turn cut by an eviction or a deploy is continued, and the model resumes
-the session from where it was.
+agent loop to drive. So this package exports no plugin: it exports a writer's
+`SubAgentSpec` — `CLAUDE_CODE_AGENT` (`claude_code`) — and `claudeCodeModel`, a
+language model whose one call runs a session. A host binds the spec to a `SubAgent`
+whose `getModel()` returns one, and Think's recovery does the rest: a turn cut by
+an eviction or a deploy is continued, and the model resumes the session from where
+it was.
 
-Both run **detached**: the parent's call returns at once, and the report arrives
+**A planner is a writer under `plan`.** The same spec under another name,
+description and input, in a worktree of its own, whose model sets
+`permissionMode: "plan"` and a `jsonSchema`: it reads, edits nothing, and answers
+as data. Carrying the plan out is a later run that resumes it — see
+[A session has a handle](#a-session-has-a-handle-and-a-later-run-may-continue-it).
+
+It runs **detached**: the parent's call returns at once, and the report arrives
 as a later turn. A session runs for up to its `timeoutMs`, past a parent's turn.
 
 **One sub-agent run is one `claude -p` session.** Not one turn, and not one tool
@@ -369,12 +374,8 @@ export class AnthropicCodingWriterChild extends SubAgent<Env> {
     return claudeCodeModel({
       config: CLAUDE_CODE_SESSION,
       workspace: () => openWorkspace(stub) as Promise<SessionWorkspace>,
-      // What is true about the workspace. A reading session waits out an
-      // install in flight before its copy is made.
-      advisories: () => stub.advisories(),
       storage: this.ctx.storage,
       runId: this.name,
-      kind: "write",
       dir,
       note: (key, text) => this.note(key, text),
       // The session's handle, as soon as it has one and again when it ends. It
@@ -382,8 +383,7 @@ export class AnthropicCodingWriterChild extends SubAgent<Env> {
       // a transcript in that container — see "A session has a handle" below.
       onSession: (record) => stub.noteSession(record),
       // Where the client keeps its state. In the workspace, so the conversation
-      // outlives the container; a reading session's has to stay on container
-      // disk, so leave it unset for one.
+      // outlives the container.
       configDir: `${WORKSPACE_DIR}/${SESSION_STATE_DIR}`,
       // Once per run, before the session starts. A throw fails the run with its
       // message — how a host refuses a run its credentials cannot pay for.
@@ -432,12 +432,12 @@ workspace instead of failing the run — failing it would stop a session that is
 still running. `drain` in `./model.ts` has when it gives up.
 
 **`runId` namespaces the exec id, and it is not optional.** Runs are concurrent —
-reading runs share their parent's container — so two sessions sharing an id would
+sessions in a scratchpad share their parent's container — so two sessions sharing an id would
 spawn over each other, each drain would attach to whichever won, and `stop` would
 kill the wrong one.
 
-**A cancelled turn stops the session.** The model's abort signal stops the drain,
-kills both execs and deletes a reading run's copy.
+**A cancelled turn stops the session.** The model's abort signal stops the drain
+and kills both execs.
 
 **`runtime()` is where the workspace comes from.** The spec's `prepare` runs on the
 parent, where the caller is known, and returns the workspace name and the
@@ -485,10 +485,10 @@ has one; a recovered turn can report the same id again without one.
 continue, are its questions, not the model's. The run's prompt is then the next
 user turn: the session already holds the conversation, so a brief that restates it
 pays for it twice. `fork` continues it under a **new** id and leaves the original
-whole, which is what a change of kind wants — a finished plan session continued as
-a writing one, with the plan's own conversation still resumable for an edit.
-Continuing the same kind takes no fork: one conversation accumulating is what
-continuing means.
+whole, which is what a change of mode wants — a planning session, run under
+`plan`, continued under the mode that writes, with the plan's own conversation
+still resumable for an edit. Continuing in the same mode takes no fork: one
+conversation accumulating is what continuing means.
 
 Measured against the pinned CLI, and all of it load-bearing here:
 
@@ -531,12 +531,8 @@ the container, bounded then by the workspace's own retention. A session's edits 
 its transcript reach the workspace by the same pull, so a drained session syncs
 both; a container replaced mid-run syncs only what the last pull carried.
 
-Two constraints on where a host puts it:
+One constraint on where a host puts it:
 
-- **A reading session cannot have one in the workspace.** Its namespace remounts
-  everything under the workspace read-only and the CLI writes this directory as it
-  runs, so a reader's config dir stays on container disk. That is why `configDir`
-  is per run rather than a config field.
 - **Name the directory `SESSION_STATE_DIR`**, from this package's `./computer`
   subpath, and put it outside any checkout. It is the name the file tools' walk
   steps over: a transcript quotes every line the session read, so a `grep` that
@@ -585,7 +581,7 @@ not alternatives:
 | `acceptEdits`       | edit files; `npm ci`, `git` and the test suite still denied                                            |
 | `dontAsk`           | "deny if not pre-approved" — the default's behaviour, named                                            |
 | `manual`            | documented by the CLI and unexercised here — whatever it would prompt for, headless denies             |
-| `plan`              | reads and produces a plan, changing nothing — and there is no interactive session here to approve it   |
+| `plan`              | reads and produces a plan, changing nothing — a planning run's mode, answering through `jsonSchema`    |
 | `auto`              | a model classifier rules on each call, spending the same subscription bucket the session is drawing on |
 | `bypassPermissions` | the whole job                                                                                          |
 
@@ -596,17 +592,12 @@ cloned repository's `postinstall` and its test suite, which is arbitrary code
 execution by design. Gating the agent's own edits while those doors stand open
 costs the agent its job and buys nothing. Containment is the credential swap.
 
-**A reading session runs under the same mode.** What keeps it from touching
-anything is where it runs, not what it may do: a copy of the parent's checkout on
-container disk, outside the workspace mount, deleted when the session ends — see
-`copy.ts`. Every mode that refuses an edit also refuses the commands a question
-usually needs answered.
-
-**A reading session waits for an install in flight.** Its copy takes the
-parent's dependency trees as they are when it is made, so the model polls
-`advisories` first and makes the brief and the copy once no install is running
-— bounded by the session's `timeoutMs`. `untilInstalled` in `./model.ts` has the
-rest.
+**A planning run is the one place another mode belongs**, and it is set per run
+— `ClaudeCodeModelOptions.permissionMode` — over the deployment's. Under `plan` a
+session reads, edits nothing, and is denied what would change the tree, the test
+suite included; there is nobody to approve its plan, so it answers through a
+`jsonSchema` instead. A follow-up of it runs under the same mode, and carrying the
+plan out is a later run that resumes it with `fork` under the deployment's mode.
 
 > **The container runs as root, and that changes how the flag has to be passed.**
 > The CLI refuses to bypass its permission checks under uid 0 unless `IS_SANDBOX=1`

@@ -2,17 +2,19 @@ import type { SubAgentSpec } from "@dynamicagents/core";
 import { z } from "zod";
 
 /**
- * The Claude Code writer and reader, as data: what the parent's model is offered.
- * The host binds each to a `SubAgent` class whose model is
+ * The Claude Code writer, as data: what the parent's model is offered. The host
+ * binds it to a `SubAgent` class whose model is
  * {@link file://./model.ts claudeCodeModel}, and adds the `prepare` and
- * `settle` that claim and release its workspace.
+ * `settle` that claim and release its workspace. A planner is the same spec
+ * under another name, description and input, whose model runs under `plan` —
+ * see {@link file://./model.ts ClaudeCodeModelOptions.permissionMode}.
  *
  * A module of its own for its `zod` schemas. `zod` costs a Worker bundle
  * ~460 KiB, and the workspace Durable Object imports this subpath for its
  * egress gateway alone; with `sideEffects: false`, a module nothing it uses
  * reaches is dropped from that bundle whole.
  *
- * Both run **detached**: a session runs for up to its `timeoutMs`, past the
+ * It runs **detached**: a session runs for up to its `timeoutMs`, past the
  * point a parent's turn is cut.
  */
 
@@ -29,7 +31,7 @@ import { z } from "zod";
  * request, and the host's `prepare` resolves it before anything runs.
  *
  * Exported so a host can extend it with an input of its own that its `prepare`
- * resolves, as it can the reader's.
+ * resolves.
  */
 export const CLAUDE_CODE_WRITE_INPUT = z.object({
   task: z
@@ -45,17 +47,7 @@ export const CLAUDE_CODE_WRITE_INPUT = z.object({
     )
 });
 
-/** The reader's input. No branch: its copy is deleted when it ends. */
-export const CLAUDE_CODE_READ_INPUT = z.object({
-  task: z
-    .string()
-    .describe(
-      "The question to answer or the plan to work out, and what you will do with the findings"
-    )
-});
-
 export type ClaudeCodeInput = z.infer<typeof CLAUDE_CODE_WRITE_INPUT>;
-export type ClaudeCodeReadInput = z.infer<typeof CLAUDE_CODE_READ_INPUT>;
 
 /**
  * Nothing reads it: the model is the CLI, whose system prompt is its own. It
@@ -97,45 +89,6 @@ export const CLAUDE_CODE_AGENT: SubAgentSpec<ClaudeCodeInput> = {
     "there means moving commits between branches."
   ].join("\n"),
   inputSchema: CLAUDE_CODE_WRITE_INPUT,
-  soul: SOUL,
-  detached: true,
-  formatInput: (input) => input.task
-};
-
-/**
- * The same CLI, in the parent's container, in a throwaway copy of its checkout
- * — see {@link file://./copy.ts}. A reader of its own rather than an input flag,
- * because the difference is not a setting a model should pick: it decides
- * whether the run needs a container of its own, and a model choosing that would
- * be choosing what the turn costs.
- *
- * The one thing the description must land is that the answer comes back as
- * *findings*: the session's edits are discarded, so a change delegated here is
- * a change that never happens, reported as though it did.
- */
-export const CLAUDE_CODE_READER_AGENT: SubAgentSpec<ClaudeCodeReadInput> = {
-  name: "claude_code_read",
-  description: [
-    "Hand a question about the code — or a plan to work out — to a Claude Code",
-    "session running in your workspace container. It works in a throwaway copy of",
-    "your checkout, so it can run anything a question needs: the test suite, a",
-    "build, `npm outdated`, a registry query. **Nothing it changes reaches your",
-    "checkout** — the copy is deleted when it ends, so asking it to make an edit",
-    "wastes the whole session. What comes back is its report, in a later turn.",
-    "",
-    "Use it for what you would otherwise have to find out yourself: how something",
-    "is wired, where a behaviour comes from, whether an approach fits the",
-    "codebase, how a change should be made before anyone makes it. Ask for the",
-    "findings you need, and say what you will do with them — a question with a",
-    "purpose comes back usefully specific.",
-    "",
-    "These are cheap enough to run several at once against independent",
-    "questions, and each still costs a session's startup — so one question per",
-    "session, not one file per session.",
-    "",
-    "It cannot ask you anything mid-run."
-  ].join("\n"),
-  inputSchema: CLAUDE_CODE_READ_INPUT,
   soul: SOUL,
   detached: true,
   formatInput: (input) => input.task
