@@ -883,9 +883,16 @@ function normalizeHeaders(headers) {
   return out;
 }
 
-/** The run's lines, with this machine's temporary paths taken out. */
+/**
+ * The run's lines, with this machine's temporary paths taken out — in the
+ * spelling the CLI names a project directory with too, every character but a
+ * letter or a digit turned to `-`.
+ */
 function normalizeLines(lines) {
-  return lines.map((line) => line.split(tmp).join("/probe"));
+  const projectSpelling = tmp.replace(/[^A-Za-z0-9]/g, "-");
+  return lines.map((line) =>
+    line.split(tmp).join("/probe").split(projectSpelling).join("-probe")
+  );
 }
 
 /**
