@@ -127,6 +127,44 @@ export const CREDENTIAL_PLACEHOLDER = "sk-ant-oat01-" + "0".repeat(24);
  */
 const RESERVED_ENV_KEY = "CLAUDE_CODE_OAUTH_TOKEN";
 
+/**
+ * The workspace mount, `/workspace` in every image this plugin runs in.
+ * Whatever a session writes under it is synced into the workspace's Durable
+ * Object; whatever it writes anywhere else dies with the container.
+ */
+const WORKSPACE_MOUNT = "/workspace";
+
+/**
+ * Where every session keeps Claude Code's own state — its `CLAUDE_CONFIG_DIR`.
+ *
+ * The whole config directory moves, created if absent: the transcripts under
+ * `projects/<cwd-with-/-as-->/<session-id>.jsonl`, the session index,
+ * `.claude.json` and the auto-memory directory. None of it is a credential.
+ *
+ * This is what decides how long a session stays resumable. The CLI's own
+ * `$HOME/.claude` is on the container's disk, so a conversation there dies with
+ * the container — which a deploy, a rollout and the workspace's own idle timer
+ * all end. Under the workspace mount it is the Durable Object's storage, and the
+ * conversation outlives the container that held it; a later run can continue it
+ * from that same workspace object, and from no other.
+ *
+ * **Fixed, and never a host's to choose.** A transcript is found only where it
+ * was written, so every second place a session could write one is a resume that
+ * cannot find it. `env` cannot move it either: {@link buildLaunch} refuses the
+ * key.
+ *
+ * The directory is named {@link file://../computer/paths.ts SESSION_STATE_DIR},
+ * which is the name the file tools' walk steps over: a transcript records every
+ * line the session read, so a walk that descended into it would answer the
+ * parent's `grep` for a line of source with the session that quoted it. The
+ * name is written out here rather than imported, because `/claude-code` does
+ * not reach `/computer` — a spec holds the two to the same spelling.
+ */
+export const SESSION_CONFIG_DIR = `${WORKSPACE_MOUNT}/.claude-sessions`;
+
+/** The environment key {@link SESSION_CONFIG_DIR} travels as. */
+const CONFIG_DIR_ENV_KEY = "CLAUDE_CONFIG_DIR";
+
 export interface LaunchOptions {
   /** The run's prompt — the whole of what this session is asked to do. */
   prompt: string;
@@ -188,7 +226,7 @@ export interface LaunchOptions {
    * Not scoped to the working directory — a session recorded against one cwd
    * resumes under another and goes on appending to the original transcript — so
    * what decides whether this works is where the transcript is, which is
-   * {@link LaunchOptions.configDir}.
+   * {@link SESSION_CONFIG_DIR} in the workspace the session ran in.
    *
    * **An id whose transcript is not there is not a failed session.** The CLI
    * prints `No conversation found with session ID`, emits a `result` line
@@ -215,31 +253,6 @@ export interface LaunchOptions {
    * conversation to fork, and a caller that set it meant to resume one.
    */
   fork?: boolean;
-
-  /**
-   * Where Claude Code keeps its own state — `CLAUDE_CONFIG_DIR`.
-   *
-   * Relocates the **whole** config directory, creating it if absent: the
-   * transcripts under `projects/<cwd-with-/-as-->/<session-id>.jsonl`, the
-   * session index, `.claude.json` and the auto-memory directory. It holds no
-   * credential.
-   *
-   * This is what decides how long a session stays resumable. Left unset it is
-   * `$HOME/.claude` on the container's disk, so the conversation dies with the
-   * container — which a deploy, a rollout and the workspace's own idle timer all
-   * end. Pointed inside the workspace mount it is the Durable Object's storage,
-   * and the conversation outlives the container that held it.
-   *
-   * A host putting it in the workspace should name the directory
-   * {@link file://../computer/paths.ts SESSION_STATE_DIR}, which is the name the
-   * file tools' walk steps over: a transcript records every line the session
-   * read, so a walk that descended into it would answer the parent's `grep` for
-   * a line of source with the session that quoted it. That name is defined
-   * beside the walk rather than here, and deliberately not imported across:
-   * `/computer` and `/claude-code` are separate subpaths, and a consumer
-   * installing one does not pay for the other.
-   */
-  configDir?: string;
 }
 
 export interface Launch {
@@ -288,9 +301,9 @@ function gitIdentityEnv(
  * arbitrary-code-execution environment by design — the install runs the repo's
  * `postinstall`, the agent runs its test suite. Stripping one door while the
  * others stand open buys nothing and costs the agent its context.
- * `CLAUDE_CONFIG_DIR` is not that kind of flag and is set when a host asks: it
+ * `CLAUDE_CONFIG_DIR` is not that kind of flag, and every session gets it: it
  * moves where the *client* keeps its own state, touching nothing a repository
- * ships — see {@link LaunchOptions.configDir}.
+ * ships — see {@link SESSION_CONFIG_DIR}.
  *
  * No `ANTHROPIC_BASE_URL` either: `http-gateway` egress intercepts
  * transparently, so the client talks to the real hostname and the gateway sees
@@ -339,6 +352,19 @@ export function buildLaunch(options: LaunchOptions): Launch {
         "in the real credential on the way out; putting a real one here would " +
         "hand it to every process in the container, including a cloned " +
         "repository's install scripts. Pass it as `credential` instead."
+    );
+  }
+
+  /**
+   * Refused for the same reason: a host that set it meant its sessions to keep
+   * their state somewhere else, and a transcript written anywhere but the one
+   * place is a conversation no later run will find.
+   */
+  if (options.env && CONFIG_DIR_ENV_KEY in options.env) {
+    throw new Error(
+      `claude-code: ${CONFIG_DIR_ENV_KEY} cannot be set through \`env\`. Every ` +
+        `session keeps its state in ${SESSION_CONFIG_DIR}, which is where a ` +
+        "later run looks for the conversation it continues."
     );
   }
 
@@ -394,9 +420,10 @@ export function buildLaunch(options: LaunchOptions): Launch {
 
   return {
     command: argv.join(" "),
-    // The last three are applied **after** the host's environment rather than
-    // before it. For the placeholder that makes the guard above a second line
-    // rather than the only one; for `IS_SANDBOX` it means a host cannot unset
+    // Everything below `options.env` is applied **after** the host's environment
+    // rather than before it. For the placeholder and the config directory that
+    // makes the guards above a second line rather than the only one; for
+    // `IS_SANDBOX` it means a host cannot unset
     // the variable its own permission mode depends on — see the note above.
     //
     // For the identity it is what keeps the four keys one answer. Spread before
@@ -411,7 +438,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
         ? { IS_SANDBOX: "1" }
         : undefined),
       ...gitIdentityEnv(options.author),
-      ...(options.configDir ? { CLAUDE_CONFIG_DIR: options.configDir } : {}),
+      [CONFIG_DIR_ENV_KEY]: SESSION_CONFIG_DIR,
       [RESERVED_ENV_KEY]: CREDENTIAL_PLACEHOLDER
     }
   };

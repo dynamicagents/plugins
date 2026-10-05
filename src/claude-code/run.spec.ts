@@ -12,11 +12,13 @@ import {
   freshCursor,
   startRun,
   CREDENTIAL_PLACEHOLDER,
+  SESSION_CONFIG_DIR,
   type DrainCursor,
   type DrainOutcome,
   type SessionRuntime
 } from "./run.js";
 import { DEFAULT_PERMISSION_MODE } from "./config.js";
+import { SESSION_STATE_DIR } from "../computer/paths.js";
 
 const EXEC = execIdFor("run-7");
 const FRESH = freshCursor(EXEC);
@@ -263,24 +265,33 @@ describe("buildLaunch", () => {
       );
     });
 
-    it("puts the client's own state where the host asks, and nowhere by default", () => {
+    /**
+     * Under the workspace mount, so a conversation outlives its container — and
+     * the same for every session, since a later run finds a transcript only
+     * where it was written.
+     */
+    it("keeps every session's state in the workspace, in one place", () => {
+      expect(SESSION_CONFIG_DIR).toBe("/workspace/.claude-sessions");
+      expect(launch().env.CLAUDE_CONFIG_DIR).toBe(SESSION_CONFIG_DIR);
       expect(
-        launch({ configDir: "/workspace/.claude-sessions" }).env
+        launch({ resume: "sess-1", fork: true, permissionMode: "plan" }).env
           .CLAUDE_CONFIG_DIR
-      ).toBe("/workspace/.claude-sessions");
-      // Unset, the CLI's own `$HOME/.claude` — on the container's disk, so the
-      // conversation dies with the container.
-      expect(launch().env.CLAUDE_CONFIG_DIR).toBeUndefined();
+      ).toBe(SESSION_CONFIG_DIR);
+    });
+
+    /**
+     * Two subpaths spell the name — `/claude-code` writes there and
+     * `/computer`'s walk steps over it — and neither may import the other.
+     */
+    it("names the directory the file tools' walk steps over", () => {
+      expect(SESSION_CONFIG_DIR).toBe(`/workspace/${SESSION_STATE_DIR}`);
     });
 
     /** A deployment-wide `env` must not answer where a transcript goes. */
-    it("is not something a host's own environment can redirect", () => {
-      expect(
-        launch({
-          configDir: "/workspace/.claude-sessions",
-          env: { CLAUDE_CONFIG_DIR: "/root/.claude" }
-        }).env.CLAUDE_CONFIG_DIR
-      ).toBe("/workspace/.claude-sessions");
+    it("refuses a host's environment that would move it", () => {
+      expect(() =>
+        launch({ env: { CLAUDE_CONFIG_DIR: "/root/.claude" } })
+      ).toThrow(/CLAUDE_CONFIG_DIR cannot be set through `env`/);
     });
   });
 
@@ -373,7 +384,8 @@ describe("buildLaunch", () => {
     expect(command).not.toContain("--bare");
     expect(command).not.toContain("--settings");
     expect(env).not.toHaveProperty("CLAUDE_CODE_DISABLE_AUTO_MEMORY");
-    expect(env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+    // The client's own state moves; the checkout's `.claude/` is untouched.
+    expect(env.CLAUDE_CONFIG_DIR).toBe(SESSION_CONFIG_DIR);
   });
 
   it("pins the version by refusing to autoupdate mid-run", () => {

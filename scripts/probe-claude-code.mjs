@@ -645,6 +645,10 @@ function runSession(
     HOME: home,
     TMPDIR: tmp,
     ...launch.env,
+    // The workspace mount, stood in for: `buildLaunch` names `/workspace`, which
+    // only the container has. Every run shares it, as every session in one
+    // workspace does, so the resume and the fork find the transcripts there.
+    CLAUDE_CONFIG_DIR: path.join(home, ".claude-sessions"),
     HTTPS_PROXY: proxyUrl,
     https_proxy: proxyUrl,
     NODE_EXTRA_CA_CERTS: ca

@@ -213,8 +213,7 @@ describe("where a session runs", () => {
       .start(runtime, "1", {
         prompt: "carry on",
         dir: "/workspace/r",
-        resume: { sessionId: "sess-1", fork: true },
-        configDir: "/workspace/.claude-sessions"
+        resume: { sessionId: "sess-1", fork: true }
       })
       .catch(() => {});
 
@@ -226,11 +225,7 @@ describe("where a session runs", () => {
     );
   });
 
-  /**
-   * Without it the follow-up would look for the transcript under the CLI's own
-   * `$HOME/.claude`, find nothing, and start an unrelated session reported as
-   * the follow-up.
-   */
+  /** A follow-up finds the transcript where every session wrote its own. */
   it("gives a follow-up the directory the session's transcript is in", async () => {
     const { calls, runtime } = launchRecorder();
 
@@ -238,8 +233,7 @@ describe("where a session runs", () => {
       .followUp(runtime, "1", {
         sessionId: "sess-1",
         prompt: "commit what you left",
-        dir: "/workspace/r",
-        configDir: "/workspace/.claude-sessions"
+        dir: "/workspace/r"
       })
       .catch(() => {});
 

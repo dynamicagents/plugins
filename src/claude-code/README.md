@@ -382,9 +382,6 @@ export class AnthropicCodingWriterChild extends SubAgent<Env> {
       // goes in the workspace object that ran the session, because the id names
       // a transcript in that container — see "A session has a handle" below.
       onSession: (record) => stub.noteSession(record),
-      // Where the client keeps its state. In the workspace, so the conversation
-      // outlives the container.
-      configDir: `${WORKSPACE_DIR}/${SESSION_STATE_DIR}`,
       // Once per run, before the session starts. A throw fails the run with its
       // message — how a host refuses a run its credentials cannot pay for.
       brief: async (task) => this.#brief(task, stub),
@@ -417,8 +414,8 @@ on field by field rather than passing along: `report` reads it as the result's
 
 **The follow-up is a second exec.** `claude -p --resume` under an exec id of its
 own, so its cursor and its notes are its own. It runs in the workspace the session
-did, and under the same `configDir`, because both decide where the transcript it is
-continuing can be found. `stop` ends it with the session.
+did, because that is where the transcript it is continuing can be found, and under
+the session's own `permissionMode`. `stop` ends it with the session.
 
 **The cursor is stored behind the notes.** It rides the same chain as the notes it
 counts, so a stored position never names a note that was not filed; a drain that
@@ -514,31 +511,37 @@ Measured against the pinned CLI, and all of it load-bearing here:
 
 ### How long a conversation stays resumable
 
-The transcript is a file:
-`$CLAUDE_CONFIG_DIR|$HOME/.claude/projects/<cwd-with-/-as-->/<session-id>.jsonl`.
+The transcript is a file, and every session writes it to the same place:
+`/workspace/.claude-sessions/projects/<cwd-with-/-as-->/<session-id>.jsonl`.
+`buildLaunch` sets `CLAUDE_CONFIG_DIR` to `SESSION_CONFIG_DIR` on every launch, and
+**it is not a host's to choose**: a transcript is found only where it was written, so
+a second place to write one is a resume that cannot find it. A host's `env` that
+sets the variable is refused when the session launches.
 
-**Unset, that is the container's disk, and the conversation dies with the
-container** — a deploy, a container rollout, a release at task settle and the
-workspace's own idle timer all end one. A resume after that is the refusal above,
-and the branch and its commits are untouched by it: what is gone is the
-conversation, not the work.
+The variable relocates the whole config directory, creating it if absent — the
+transcripts, the session index, `.claude.json` (which carries no credential) and the
+client's auto-memory directory. Under the workspace mount it is the Durable Object's
+storage, so the conversation outlives the container — a deploy, a rollout, a release
+at task settle or the workspace's own idle timer — bounded then by the workspace's
+own retention. The auto-memory goes with it: a later session in the same workspace
+reads what an earlier one remembered.
 
-**`configDir` moves it.** `CLAUDE_CONFIG_DIR` relocates the whole config directory,
-creating it if absent — the transcripts, the session index, `.claude.json` (which
-carries no credential) and the client's auto-memory directory. Pointed inside the
-workspace mount it is the Durable Object's storage, so the conversation outlives
-the container, bounded then by the workspace's own retention. A session's edits and
-its transcript reach the workspace by the same pull, so a drained session syncs
-both; a container replaced mid-run syncs only what the last pull carried.
+What that does not buy is reach across workspaces. A conversation lives in the
+workspace object that ran it, so **a run continues it only from that same
+workspace**: a host that gives each run a workspace of its own has to send a run
+that resumes one back to the workspace that ran it. Anywhere else, the resume is the
+refusal above — and the branch and its commits are untouched by it: what is missing
+is the conversation, not the work.
 
-One constraint on where a host puts it:
+A session's edits and its transcript reach the workspace by the same pull, so a
+drained session syncs both; a container replaced mid-run syncs only what the last
+pull carried.
 
-- **Name the directory `SESSION_STATE_DIR`**, from this package's `./computer`
-  subpath, and put it outside any checkout. It is the name the file tools' walk
-  steps over: a transcript quotes every line the session read, so a `grep` that
-  descended into it would answer a question about the source with the conversation
-  that mentioned it. Outside the checkout also keeps it out of reach of a
-  `git clean -ffdx`.
+The directory is named `SESSION_STATE_DIR` — the name `./computer`'s file tools'
+walk steps over. A transcript quotes every line the session read, so a `grep` that
+descended into it would answer a question about the source with the conversation
+that mentioned it. It sits at the workspace root, outside any checkout, which also
+keeps it out of reach of a `git clean -ffdx`.
 
 ## Updating Claude Code
 

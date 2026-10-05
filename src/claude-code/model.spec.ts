@@ -685,8 +685,7 @@ describe("claudeCodeModel", () => {
         }
       });
       const { records, over } = recording({
-        resume: { sessionId: "sess-plan", fork: true },
-        configDir: "/workspace/.claude-sessions"
+        resume: { sessionId: "sess-plan", fork: true }
       });
       const { model } = harness(box, over);
 
@@ -717,7 +716,6 @@ describe("claudeCodeModel", () => {
         }
       });
       const { model, reports } = harness(box, {
-        configDir: "/workspace/.claude-sessions",
         followUp: async () => "commit what you left"
       });
 

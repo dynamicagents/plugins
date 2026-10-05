@@ -46,8 +46,6 @@ export interface StartSession {
   permissionMode?: PermissionMode;
   /** A Claude Code conversation to continue rather than start. */
   resume?: ResumeSession;
-  /** Where the client keeps its state — {@link file://./run.ts LaunchOptions.configDir}. */
-  configDir?: string;
 }
 
 /**
@@ -67,7 +65,7 @@ export interface StartSession {
  * already ended, in a new process with a new exec: the session's transcript is
  * read back into context and the prompt is the next user turn. Where that
  * transcript lives — and so how long this is possible at all — is
- * {@link StartSession.configDir}.
+ * {@link file://./run.ts SESSION_CONFIG_DIR}.
  */
 export function claudeCodeSession(config: ClaudeCodeConfig) {
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -125,7 +123,6 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         ...launch(options.prompt, options.dir, options.permissionMode),
         ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}),
         ...resumption(options.resume),
-        ...(options.configDir ? { configDir: options.configDir } : {}),
         execId,
         timeoutMs,
         signal: sinks.signal
@@ -138,8 +135,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
      *
      * `sessionId` is the one the session reported — on its `result` line, or on
      * its cursor when it ended without one. This runs in the workspace the
-     * session did, and under the same `configDir`, because both are what decide
-     * where the transcript it is continuing can be found. A drain cut short goes
+     * session did, because that workspace's {@link file://./run.ts SESSION_CONFIG_DIR}
+     * is where the transcript it is continuing can be found. A drain cut short goes
      * on through {@link resume} with the cursor it stored, like any other
      * session's.
      *
@@ -155,7 +152,6 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         prompt: string;
         dir: string;
         permissionMode?: PermissionMode;
-        configDir?: string;
       },
       sinks: Sinks = {}
     ): Promise<DrainOutcome> {
@@ -170,7 +166,6 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
       using handle = await startRun(runtime, {
         ...launch(options.prompt, options.dir, options.permissionMode),
         resume: options.sessionId,
-        ...(options.configDir ? { configDir: options.configDir } : {}),
         execId,
         timeoutMs,
         signal: sinks.signal

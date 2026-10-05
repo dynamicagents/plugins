@@ -130,11 +130,6 @@ export interface ClaudeCodeModelOptions {
    * is the place to say what changed and nothing the session already holds.
    */
   resume?: { sessionId: string; fork?: boolean };
-  /**
-   * Where the session's own state goes — see
-   * {@link file://./run.ts LaunchOptions.configDir}.
-   */
-  configDir?: string;
   /** Files one note on the parent's transcript: the sub-agent's `note`. */
   note: (key: string, text: string) => Promise<void>;
   /**
@@ -338,8 +333,7 @@ export function claudeCodeModel(
             ...(options.permissionMode
               ? { permissionMode: options.permissionMode }
               : {}),
-            ...(options.resume ? { resume: options.resume } : {}),
-            ...(options.configDir ? { configDir: options.configDir } : {})
+            ...(options.resume ? { resume: options.resume } : {})
           },
           sinks
         )
@@ -375,8 +369,7 @@ export function claudeCodeModel(
               dir: options.dir,
               ...(options.permissionMode
                 ? { permissionMode: options.permissionMode }
-                : {}),
-              ...(options.configDir ? { configDir: options.configDir } : {})
+                : {})
             },
             sinks
           )

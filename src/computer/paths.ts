@@ -33,17 +33,17 @@ export function isGitInternal(path: string): boolean {
 /**
  * Where a session's own state lives inside a workspace, as a directory name.
  *
- * A host that wants a Claude Code session's transcript to outlive its container
- * points `CLAUDE_CONFIG_DIR` at a directory of this name in the workspace, which
- * is the Durable Object's storage — so the conversation survives the container
- * being stopped and a later session can continue it.
+ * Every Claude Code session keeps its `CLAUDE_CONFIG_DIR` in a directory of
+ * this name at the workspace root — the Durable Object's storage, so a
+ * conversation outlives its container and a later session can continue it. See
+ * {@link file://../claude-code/run.ts SESSION_CONFIG_DIR}.
  *
- * **Named here rather than in the plugin that sets the variable**, because the
- * module that has to step over it is the walk below, and the dependency cannot
- * run the other way: `/computer` reaching into `/claude-code` would pull a whole
- * plugin into every agent that installs the file tools, which
- * `verify:exports` refuses. A host configuring a session reads the name from
- * here; the `claude-code` plugin points at it in prose and imports nothing.
+ * **Spelled here as well as in the plugin that sets the variable**, because the
+ * module that has to step over it is the walk below, and neither may import the
+ * other: `/computer` reaching into `/claude-code` would pull a whole plugin into
+ * every agent that installs the file tools, and `/claude-code` reaches no other
+ * subpath — `verify:exports` refuses both. A spec in `/claude-code` holds the
+ * two spellings to one.
  */
 export const SESSION_STATE_DIR = ".claude-sessions";
 
