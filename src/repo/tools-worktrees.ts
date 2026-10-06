@@ -44,7 +44,7 @@ export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
           .string()
           .optional()
           .describe(
-            "The branch a sub-agent's report named, e.g. 'anthropic-coding/<task>/<n>'; omit to go back to your own checkout"
+            "The branch a sub-agent's report named, e.g. 'claude-coordinator/<task>/<n>'; omit to go back to your own checkout"
           )
       }),
       execute: async ({ branch }) => {

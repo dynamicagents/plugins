@@ -76,6 +76,8 @@ export {
 export { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
 export { VERIFIED_CLAUDE_CODE_VERSION } from "./verified.js";
 export type { EgressConfig } from "./egress.js";
+export { FORGE_HOSTS, FORGE_PLACEHOLDER } from "./forge.js";
+export type { ForgeConfig } from "./forge.js";
 export {
   credentialPool,
   readRefusal,

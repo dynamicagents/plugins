@@ -211,7 +211,7 @@ const CONTAINER_WARM_ID = "container-warm-id";
  *
  * **The default, not the policy.** "Longest command" is a fact about the agent,
  * so one whose commands run longer must say so via
- * {@link WorkspaceObjectConfig.containerIdleMs} — `anthropic-coding` holds a
+ * {@link WorkspaceObjectConfig.containerIdleMs} — `claude-coordinator` holds a
  * `claude -p` session open for its whole 40-minute timeout.
  */
 const CONTAINER_IDLE_MS = 20 * 60_000;
@@ -405,7 +405,7 @@ export interface WorkspaceObjectConfig {
   egress: WorkspaceEgressPolicy;
   /** How this deployment installs dependencies for this agent's checkouts. */
   installPlan: InstallPlan;
-  /** Log prefix — `coding-workspace`, `anthropic-coding-workspace`. */
+  /** Log prefix — `coding-workspace`, `claude-coordinator-workspace`. */
   label: string;
   /**
    * How long this agent's container stays up after the last command **started**.
@@ -413,7 +413,7 @@ export interface WorkspaceObjectConfig {
    * A per-agent value because the invariant on {@link CONTAINER_IDLE_MS} — it
    * must exceed the longest command the shell allows — is an invariant about the
    * *agent*, and the two differ by a factor of four. The coder's longest command
-   * is a tool call; `anthropic-coding`'s is a whole `claude -p` session that runs
+   * is a tool call; `claude-coordinator`'s is a whole `claude -p` session that runs
    * detached for its entire timeout.
    *
    * Omit it for the default. Raise it, never lower it, and raise it whenever the
@@ -444,7 +444,7 @@ export interface WorkspaceObjectConfig {
  *
  * **Base class fields run before subclass fields**, so as plain fields they
  * would read `undefined` from any `workspaceConfig()` that touches a subclass
- * field — which `AnthropicCodingWorkspace`'s does, for its credential store.
+ * field — which `ClaudeCoordinatorWorkspace`'s does, for its credential store.
  * Memoised getters remove the hazard rather than documenting it, which is what
  * lets a subclass implement the seam however it likes.
  */
@@ -455,7 +455,7 @@ export abstract class WorkspaceObjectBase<
    * This Worker's bindings, as the host's own generated `Env` spells them.
    *
    * Re-declared rather than inherited so a subclass reading a binding of its own
-   * — `anthropic-coding`'s reaches for its credential pool — gets its real type
+   * — `claude-coordinator`'s reaches for its credential pool — gets its real type
    * instead of the base's. `declare` because the field is the runtime's; this
    * only narrows what TypeScript believes about it.
    */
@@ -465,7 +465,7 @@ export abstract class WorkspaceObjectBase<
    * Everything this agent's workspace does differently. Called once, lazily.
    *
    * Read through {@link #cfg}, never directly: an implementation may build
-   * something real — `anthropic-coding`'s constructs its egress gateway — and this
+   * something real — `claude-coordinator`'s constructs its egress gateway — and this
    * is consulted on the busiest path in the object.
    */
   protected abstract workspaceConfig(): WorkspaceObjectConfig;

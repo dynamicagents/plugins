@@ -44,10 +44,10 @@ describe("the sub-agent spec", () => {
     };
     expect(write.parse({ task: "t" })).toEqual({ task: "t" });
     expect(
-      write.parse({ task: "t", continue: "anthropic-coding/t/1" })
+      write.parse({ task: "t", continue: "claude-coordinator/t/1" })
     ).toEqual({
       task: "t",
-      continue: "anthropic-coding/t/1"
+      continue: "claude-coordinator/t/1"
     });
   });
 

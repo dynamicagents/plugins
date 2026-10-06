@@ -4,6 +4,13 @@ import {
   type CredentialStore,
   type Lead
 } from "./credentials.js";
+import {
+  FORGE_HOSTS,
+  forgeAuthorization,
+  forgeError,
+  presentsPlaceholder,
+  type ForgeConfig
+} from "./forge.js";
 
 /**
  * `@dynamicagents/plugins/claude-code` — the container's only way out.
@@ -28,7 +35,8 @@ import {
  *    with a placeholder; the swap happens here. A `postinstall` script in a
  *    cloned repository can read every environment variable the container has and
  *    still learn nothing — which is the repository's standing rule ("hand it the
- *    action, not the credential") applied to a process nobody can constrain.
+ *    action, not the credential") applied to a process nobody can constrain. A
+ *    GitHub token, when configured, is held the same way — see `./forge.ts`.
  * 2. **Any restriction that is applied is total.** Not a policy the container
  *    cooperates with; the only route out. Restriction is **off by default** —
  *    see {@link EgressConfig.restrictToHosts} for why.
@@ -179,6 +187,11 @@ export interface EgressConfig {
    * restriction, the first time a host serves user-controlled subdomains.
    */
   restrictToHosts?: readonly string[];
+  /**
+   * The GitHub token to swap for the forge placeholder. Unset, GitHub is
+   * reached anonymously like any other host. See `./forge.ts`.
+   */
+  forge?: ForgeConfig;
   /** Named in log lines so one Worker's several gateways stay tellable apart. */
   label?: string;
   now?: () => number;
@@ -314,6 +327,10 @@ export function claudeCodeEgress(config: EgressConfig): Fetcher {
       );
     }
 
+    if (config.forge && FORGE_HOSTS.has(host)) {
+      return await toForge(request, url, config.forge);
+    }
+
     const headers = new Headers(request.headers);
 
     if (host !== ANTHROPIC_HOST) {
@@ -383,6 +400,54 @@ export function claudeCodeEgress(config: EgressConfig): Fetcher {
     }
 
     return await rotate(request, response, lead.id, lead.index);
+  };
+
+  /**
+   * A request to GitHub: anonymous unless it presents the forge placeholder,
+   * which is swapped for the real token over https only.
+   *
+   * `redirect: "manual"`, so the token rides only the request it was swapped
+   * into: a redirect goes back to the client, whose next request crosses this
+   * gateway again and is judged on its own host.
+   */
+  const toForge = async (
+    request: Request,
+    url: URL,
+    forge: ForgeConfig
+  ): Promise<Response> => {
+    const headers = new Headers(request.headers);
+    const presented = presentsPlaceholder(headers.get("authorization"));
+    for (const name of CREDENTIAL_HEADERS) headers.delete(name);
+    if (!presented) {
+      return await fetch(new Request(url, new Request(request, { headers })));
+    }
+
+    if (url.protocol !== "https:") {
+      console.warn(`[${tag}] refused a plaintext request to GitHub`, {
+        host: url.hostname,
+        method: request.method
+      });
+      return forgeError(
+        `${url.hostname} is reachable over https only; a credential is never ` +
+          "attached to a plaintext request",
+        403
+      );
+    }
+
+    const token = forge.token();
+    if (!token) {
+      console.error(`[${tag}] a session asked for GitHub with no token set`);
+      return forgeError(
+        "no GitHub token is configured for this deployment, so nothing can " +
+          "be done as its account",
+        401
+      );
+    }
+
+    headers.set("authorization", forgeAuthorization(presented, token));
+    return await fetch(
+      new Request(url, new Request(request, { headers, redirect: "manual" }))
+    );
   };
 
   /**

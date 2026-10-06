@@ -96,7 +96,8 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     // rather than this line resolving it and the flag being written twice.
     ...(permissionMode ? { permissionMode } : {}),
     ...(config.env ? { env: config.env } : {}),
-    ...(config.author ? { author: config.author } : {})
+    ...(config.author ? { author: config.author } : {}),
+    ...(config.forge ? { forge: true } : {})
   });
 
   return {
@@ -255,6 +256,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         ...(config.restrictToHosts === undefined
           ? {}
           : { restrictToHosts: config.restrictToHosts }),
+        ...(config.forge ? { forge: config.forge } : {}),
         label: "claude-code"
       })
   };
