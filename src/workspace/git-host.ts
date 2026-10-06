@@ -2,7 +2,7 @@ import type { RepoGitResult } from "../repo/index.js";
 import type { AuthCallback, GitClient } from "@cloudflare/computer/git";
 
 /**
- * The git operations that need the forge token, run on this side.
+ * The git operations that need the GitHub token, run on this side.
  *
  * They are here rather than on the `WorkspaceStub` the plugin already holds
  * because `WorkspaceGitStub` exposes only `cli(argv)` across a Durable Object
@@ -29,7 +29,7 @@ import type { AuthCallback, GitClient } from "@cloudflare/computer/git";
 export interface GitHostDeps {
   /** The workspace's own client — isomorphic-git over the local store. */
   git: () => GitClient;
-  /** The forge credential, read at the moment it would be handed over. */
+  /** The GitHub credential, read at the moment it would be handed over. */
   token: () => string | undefined;
   tag: () => string;
 }

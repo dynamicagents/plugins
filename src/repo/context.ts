@@ -9,7 +9,7 @@ import type {
 
 /**
  * The machinery every repo tool closes over: the resolved config, the git
- * runners, and the forge client.
+ * runners, and the GitHub client.
  */
 
 const DEFAULT_WORKDIR = "/workspace";
@@ -20,15 +20,15 @@ const DEFAULT_AUTHOR = {
 };
 const DEFAULT_MAX_OUTPUT_CHARS = 16_000;
 /**
- * Ceiling on every call this plugin makes to the forge's API.
+ * Ceiling on every call this plugin makes to GitHub's API.
  *
  * Not configurable, because it is not a tuning knob: it exists so an API that
  * stops answering costs a tool call rather than the task. These are single small
  * requests, and thirty seconds is already generous for one.
  */
-const FORGE_TIMEOUT_MS = 30_000;
+const GITHUB_TIMEOUT_MS = 30_000;
 /**
- * How many items one forge list call asks for. GitHub's maximum, and its default
+ * How many items one GitHub list call asks for. GitHub's maximum, and its default
  * without this is 30.
  *
  * One page, never a Link-header walk: an unbounded fetch loop does not belong
@@ -37,7 +37,7 @@ const FORGE_TIMEOUT_MS = 30_000;
  * presented as the whole answer — a pull request's newest review comments are on
  * the last page, and those are exactly the ones an agent was sent to act on.
  */
-export const FORGE_PAGE_SIZE = 100;
+export const GITHUB_PAGE_SIZE = 100;
 
 /**
  * Where GraphQL lives, given where REST does.
@@ -119,7 +119,7 @@ function unreachableNote(err: unknown): string {
       "is known to have finished. This is infrastructure — not git, and not what " +
       "you asked for. The checkout is durable and is exactly as you left it. " +
       "Retry, and read what the retry says rather than assuming it starts from " +
-      "nothing: a command that had already reached the forge may have taken " +
+      "nothing: a command that had already reached GitHub may have taken " +
       "effect. Retrying is safe either way — these commands push one branch to " +
       "the branch of the same name, and never force."
     );
@@ -234,29 +234,29 @@ export interface RepoContext {
     remote?: { host: string; url: string };
     unreachable?: string;
   }>;
-  forge: (
+  github: (
     tool: string,
     path: string,
     init?: { method: string; body: unknown }
   ) => Promise<{ ok: true; data: unknown } | { ok: false; message: string }>;
-  forgeGraphql: (
+  githubGraphql: (
     tool: string,
     query: string,
     variables: Record<string, unknown>
   ) => Promise<{ ok: true; data: unknown } | { ok: false; message: string }>;
-  forgeRepo: (
+  githubRepo: (
     dir: string
   ) => Promise<{ owner: string; repo: string } | { refusal: string }>;
 }
 
 /**
- * How long a forge action may run before Think gives up on it.
+ * How long an action that calls GitHub may run before Think gives up on it.
  *
- * An action's default is thirty seconds, which is {@link FORGE_TIMEOUT_MS}
- * alone — and a thread reply is three forge calls, after an `origin` read that
+ * An action's default is thirty seconds, which is {@link GITHUB_TIMEOUT_MS}
+ * alone — and a thread reply is three GitHub calls, after an `origin` read that
  * waits its turn in the git queue.
  */
-export const FORGE_ACTION_TIMEOUT_MS = 120_000;
+export const GITHUB_ACTION_TIMEOUT_MS = 120_000;
 
 /**
  * The task an action runs for, which leads its idempotency key.
@@ -271,7 +271,7 @@ export function actionTask(ctx: ActionContext): string {
   const task = ctx.agent.activeTurnMetadata?.taskId;
   if (typeof task !== "string")
     throw new Error(
-      "this turn carries no task id, so a forge write cannot be keyed to it — " +
+      "this turn carries no task id, so a GitHub write cannot be keyed to it — " +
         "the repo plugin's actions run only in turns core started for a task"
     );
   return task;
@@ -328,7 +328,7 @@ export function repoContext(
   };
 
   /**
-   * The forge credential, or the reason there is none.
+   * The GitHub credential, or the reason there is none.
    *
    * `config.token` is the host's thunk, and an unresolvable secret throws at the
    * moment of use rather than at startup. Every caller here has a sentence to
@@ -342,7 +342,7 @@ export function repoContext(
     } catch (err) {
       return {
         failure:
-          `the forge credential could not be read: ${String(err)}. That is the ` +
+          `the GitHub credential could not be read: ${String(err)}. That is the ` +
           `host's configuration rather than anything you passed — report it ` +
           `rather than working around it.`
       };
@@ -364,8 +364,8 @@ export function repoContext(
    * of an investigation and findable only by timestamp.
    *
    * The token is scrubbed rather than trusted. It has no route into a container
-   * command, and the one channel that could carry it is the forge API's error
-   * body, which {@link forge} logs through this same function. So stderr *should*
+   * command, and the one channel that could carry it is the GitHub API's error
+   * body, which {@link github} logs through this same function. So stderr *should*
    * be clean — but "should be" is not the standard for something that writes a
    * credential into a log that outlives the request, and the scrub costs a
    * `split`/`join` on a path that already failed.
@@ -530,9 +530,9 @@ export function repoContext(
     runGit(() => config.git.push({ url, dir, branch, allowedHosts }));
 
   /**
-   * One call to the forge's API, from the Worker.
+   * One call to GitHub's API, from the Worker.
    *
-   * Every tool here that talks to the forge goes through this, so the credential
+   * Every tool here that talks to GitHub goes through this, so the credential
    * stays on the Worker's side of the boundary and the bound, the header set and
    * the refusal to let an unreadable body replace an explanatory status are
    * written once.
@@ -541,11 +541,11 @@ export function repoContext(
    * its own sentence to add: a POST whose answer never arrived may have been
    * received, which a GET has no reason to warn about.
    */
-  const forge = (
+  const github = (
     tool: string,
     path: string,
     init?: { method: string; body: unknown }
-  ) => forgeAt(tool, `${apiBase}${path}`, init);
+  ) => githubAt(tool, `${apiBase}${path}`, init);
 
   /**
    * The same call, against a URL rather than a path under {@link apiBase}.
@@ -553,7 +553,7 @@ export function repoContext(
    * GraphQL needs it: on Enterprise the REST base carries `/api/v3` and GraphQL
    * does not live under it — see {@link graphqlEndpoint}.
    */
-  const forgeAt = async (
+  const githubAt = async (
     tool: string,
     url: string,
     init?: { method: string; body: unknown }
@@ -574,7 +574,7 @@ export function repoContext(
           "user-agent": "da-coder"
         },
         ...(init ? { body: JSON.stringify(init.body) } : {}),
-        signal: AbortSignal.timeout(FORGE_TIMEOUT_MS)
+        signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS)
       });
     } catch (err) {
       logFailure(tool, { stderr: String(err) });
@@ -592,7 +592,7 @@ export function repoContext(
   };
 
   /**
-   * One GraphQL query or mutation, over {@link forge} so the credential, the
+   * One GraphQL query or mutation, over {@link github} so the credential, the
    * bound, the headers and the scrubbed failure log stay written once.
    *
    * **A failed GraphQL query answers `200`.** The errors are in the body, so
@@ -607,12 +607,12 @@ export function repoContext(
    * `repo_issue_view` reads, and a review *request* naming an app is invisible to
    * REST — see {@link file://./tools-review.ts REVIEW_REQUESTS_QUERY}.
    */
-  const forgeGraphql = async (
+  const githubGraphql = async (
     tool: string,
     query: string,
     variables: Record<string, unknown>
   ): Promise<{ ok: true; data: unknown } | { ok: false; message: string }> => {
-    const answered = await forgeAt(tool, graphqlUrl, {
+    const answered = await githubAt(tool, graphqlUrl, {
       method: "POST",
       body: { query, variables }
     });
@@ -635,7 +635,7 @@ export function repoContext(
   };
 
   /**
-   * Which repository the tools that read the forge are talking about.
+   * Which repository the tools that read GitHub are talking about.
    *
    * The checkout's own origin, never a URL the model supplies. Three reasons, in
    * order of how much they matter: the origin has already been through the host
@@ -645,7 +645,7 @@ export function repoContext(
    * "issue 42" almost always means the repository it is working in, so the extra
    * parameter would mostly be an extra way to be wrong.
    */
-  const forgeRepo = async (
+  const githubRepo = async (
     dir: string
   ): Promise<{ owner: string; repo: string } | { refusal: string }> => {
     const { remote, unreachable } = await origin(dir);
@@ -724,8 +724,8 @@ export function repoContext(
     fetchOrigin,
     pushBranch,
     origin,
-    forge,
-    forgeGraphql,
-    forgeRepo
+    github,
+    githubGraphql,
+    githubRepo
   };
 }

@@ -59,8 +59,8 @@ The session launches with `CREDENTIAL_PLACEHOLDER`. `computerd` intercepts every
 outbound request and hands it to `claudeCodeEgress` on the **Worker** side, which:
 
 1. **swaps** the placeholder for a real credential, for `api.anthropic.com` only;
-2. **swaps** GitHub's placeholder for the `forge` token, for `github.com` and
-   `api.github.com` only, when `forge` is configured (see below);
+2. **swaps** GitHub's placeholder for `githubToken`, for `github.com` and
+   `api.github.com` only, when it is configured (see below);
 3. **strips** every credential header from anything else;
 4. optionally **restricts the container to named hosts** — exact hostname match,
    no wildcards, and **off by default** (see below);
@@ -73,8 +73,8 @@ what protects the credential, not the process boundary.
 
 ### GitHub, as the deployment's account
 
-`forge: { token: () => env.GITHUB_TOKEN }` lets a session push its branch, open
-its pull request and answer its review. The session gets a placeholder as
+`githubToken: () => env.GITHUB_TOKEN` lets a session push its branch, open its
+pull request and answer its review. The session gets a placeholder as
 `GH_TOKEN`, and git a credential helper for `https://github.com` that answers
 with it. The gateway swaps the placeholder for the token on GitHub's two hosts,
 over https only, and never follows a redirect with it on. A request that does

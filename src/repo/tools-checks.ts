@@ -1,7 +1,7 @@
 import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
-import { FORGE_PAGE_SIZE } from "./context.js";
+import { GITHUB_PAGE_SIZE } from "./context.js";
 import type { RepoContext } from "./context.js";
 
 /** A pull request's CI: what has run on its head commit, and how it ended. */
@@ -82,7 +82,7 @@ function listed(checks: Check[]): string {
 }
 
 export function checkTools(ctx: RepoContext): ToolSet {
-  const { bounded, forge, forgeRepo } = ctx;
+  const { bounded, github, githubRepo } = ctx;
 
   return {
     repo_pr_checks: tool({
@@ -93,11 +93,11 @@ export function checkTools(ctx: RepoContext): ToolSet {
         number: z.number().int().positive().describe("Pull request number")
       }),
       execute: async ({ dir, number }) => {
-        const target = await forgeRepo(dir);
+        const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
 
-        const pr = await forge(
+        const pr = await github(
           "repo_pr_checks",
           `/repos/${owner}/${repo}/pulls/${number}`
         );
@@ -106,16 +106,16 @@ export function checkTools(ctx: RepoContext): ToolSet {
         if (!sha) return `#${number} is not a pull request in ${owner}/${repo}`;
         const short = sha.slice(0, 7);
 
-        const runs = await forge(
+        const runs = await github(
           "repo_pr_checks",
-          `/repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=${FORGE_PAGE_SIZE}`
+          `/repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=${GITHUB_PAGE_SIZE}`
         );
         if (!runs.ok) return bounded(runs.message);
         // The combined status holds the latest per context, so one page is
         // every context there is.
-        const statuses = await forge(
+        const statuses = await github(
           "repo_pr_checks",
-          `/repos/${owner}/${repo}/commits/${sha}/status?per_page=${FORGE_PAGE_SIZE}`
+          `/repos/${owner}/${repo}/commits/${sha}/status?per_page=${GITHUB_PAGE_SIZE}`
         );
         if (!statuses.ok) return bounded(statuses.message);
 
@@ -148,10 +148,10 @@ export function checkTools(ctx: RepoContext): ToolSet {
           [runData.total_count ?? 0, "check runs"],
           [statusData.total_count ?? 0, "commit statuses"]
         ]
-          .filter(([total]) => (total as number) > FORGE_PAGE_SIZE)
+          .filter(([total]) => (total as number) > GITHUB_PAGE_SIZE)
           .map(
             ([total, what]) =>
-              `Only the first ${FORGE_PAGE_SIZE} of ${total} ${what} were read.`
+              `Only the first ${GITHUB_PAGE_SIZE} of ${total} ${what} were read.`
           );
         const truncated = unread.length > 0;
 

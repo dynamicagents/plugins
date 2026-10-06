@@ -97,7 +97,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     ...(permissionMode ? { permissionMode } : {}),
     ...(config.env ? { env: config.env } : {}),
     ...(config.author ? { author: config.author } : {}),
-    ...(config.forge ? { forge: true } : {})
+    ...(config.githubToken ? { github: true } : {})
   });
 
   return {
@@ -256,7 +256,7 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
         ...(config.restrictToHosts === undefined
           ? {}
           : { restrictToHosts: config.restrictToHosts }),
-        ...(config.forge ? { forge: config.forge } : {}),
+        ...(config.githubToken ? { githubToken: config.githubToken } : {}),
         label: "claude-code"
       })
   };

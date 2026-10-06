@@ -3,7 +3,7 @@ import type { AgentPlugin } from "@dynamicagents/core";
 import { repoContext } from "./context.js";
 import { checkTools } from "./tools-checks.js";
 import { cloneTools } from "./tools-clone.js";
-import { forgeActions, forgeTools } from "./tools-forge.js";
+import { prActions, prTools } from "./tools-pr.js";
 import { reviewActions, reviewTools } from "./tools-review.js";
 import { worktreeTools } from "./tools-worktree.js";
 import { worktreesTools } from "./tools-worktrees.js";
@@ -37,7 +37,7 @@ export { graphqlEndpoint, truncateOutput } from "./context.js";
  * none of it needs to authenticate.
  *
  * That split is the one thing to preserve when changing this file: if an
- * operation talks to the forge it does not belong on `exec`, and if it does not,
+ * operation talks to GitHub it does not belong on `exec`, and if it does not,
  * it has no business anywhere else.
  *
  * It is absolute rather than careful because a narrower version does not hold.
@@ -51,9 +51,9 @@ export { graphqlEndpoint, truncateOutput } from "./context.js";
  * the length of one command is readable at `/proc/<pid>/environ` by anything
  * else in the container.
  *
- * Two further rules, which are about the forge rather than the container:
+ * Two further rules, which are about GitHub rather than the container:
  *
- * 1. **The forge is an allowlist, checked before anything runs.** A clone URL is
+ * 1. **GitHub's hosts are an allowlist, checked before anything runs.** A clone URL is
  *    model input — a repository README, an issue body, or a page fetched by a
  *    co-installed browser plugin is enough to choose it — and a credential
  *    offered to a host of the model's choosing is the whole game. So the URL's
@@ -62,7 +62,7 @@ export { graphqlEndpoint, truncateOutput } from "./context.js";
  *    check to the moment the token would actually be handed over. `origin` is
  *    re-derived and re-checked on every push rather than remembered, because the
  *    checkout's `.git/config` is a file the container can rewrite.
- * 2. **The forge API is called from the Worker**, so the credential that can
+ * 2. **The GitHub API is called from the Worker**, so the credential that can
  *    write to a repository through the API never crosses the boundary either.
  *    Every tool that reads or writes through it resolves the repository from the
  *    checkout's own origin rather than from a parameter, so there is no way to
@@ -105,7 +105,7 @@ export type RepoExec = (
 }>;
 
 /**
- * The three git operations that need the forge token, run by the host.
+ * The three git operations that need the GitHub token, run by the host.
  *
  * Injected for the same reason {@link RepoExec} is — this plugin owns the
  * policy, not the plumbing — but the split between the two is not arbitrary. It
@@ -114,7 +114,7 @@ export type RepoExec = (
  * keeps its secret and never touches the container at all.
  *
  * That is why `clone`, `fetch` and `push` are the whole interface. They are
- * exactly the operations that talk to the forge. `status`, `diff`, `add`,
+ * exactly the operations that talk to GitHub. `status`, `diff`, `add`,
  * `commit` and `checkout` are local, need nothing to authenticate with, and stay
  * on `exec` where they are cheap and where the model can see them work.
  *
@@ -170,7 +170,7 @@ export interface RepoGit {
   /**
    * The checkout's `origin` URL, read on the host's side; `undefined` for none.
    *
-   * Optional. Set, the forge tools resolve their repository without the
+   * Optional. Set, the GitHub tools resolve their repository without the
    * container, so an agent polling a pull request does not keep one running.
    * Unset, the origin is read through {@link RepoConfig.exec}.
    */
@@ -185,14 +185,14 @@ export interface RepoConfig {
   /**
    * Runs commands in the container holding the checkout.
    *
-   * Uncredentialed, always. Nothing this runs is ever given the forge token —
+   * Uncredentialed, always. Nothing this runs is ever given the GitHub token —
    * see {@link RepoGit} for the operations that need one.
    */
   exec: RepoExec;
   /** Runs the three credentialed operations, on the host's side of the boundary. */
   git: RepoGit;
   /**
-   * A forge token with contents+pull-request write. A thunk so a rotated secret
+   * A GitHub token with contents+pull-request write. A thunk so a rotated secret
    * is picked up without rebuilding the plugin list.
    */
   token: () => string;
@@ -488,7 +488,7 @@ export function repo(config: RepoConfig): AgentPlugin {
       return only({
         ...cloneTools(repoCtx),
         ...worktreeTools(repoCtx),
-        ...forgeTools(repoCtx),
+        ...prTools(repoCtx),
         ...reviewTools(repoCtx),
         ...checkTools(repoCtx),
         ...(config.worktrees ? worktreesTools(config.worktrees) : {})
@@ -497,7 +497,7 @@ export function repo(config: RepoConfig): AgentPlugin {
 
     actions: (ctx) => {
       const repoCtx = repoContext(config, ctx.runtime);
-      return only({ ...forgeActions(repoCtx), ...reviewActions(repoCtx) });
+      return only({ ...prActions(repoCtx), ...reviewActions(repoCtx) });
     },
 
     context: [{ provider: { get: async () => context } }],

@@ -1,5 +1,3 @@
-import type { ForgeConfig } from "./forge.js";
-
 /**
  * Everything one deployment of this plugin tunes, in one shape.
  *
@@ -154,19 +152,20 @@ export interface ClaudeCodeConfig {
    * and for why open is the default.
    *
    * A restriction that leaves out `github.com` and `api.github.com` leaves out
-   * {@link forge} with them.
+   * {@link githubToken} with them.
    */
   restrictToHosts?: readonly string[];
 
   /**
    * GitHub as the deployment's account, for a session that pushes its branch,
-   * opens its pull request and answers its review.
+   * opens its pull request and answers its review. Read per request, on the
+   * Worker side.
    *
    * The session gets a placeholder as `GH_TOKEN` and as git's credential, and
    * the egress gateway swaps in this token for GitHub's hosts only — see
-   * {@link file://./forge.ts}. Unset, `gh` and git reach GitHub anonymously.
+   * {@link file://./github.ts}. Unset, `gh` and git reach GitHub anonymously.
    */
-  forge?: ForgeConfig;
+  githubToken?: () => string | undefined;
 
   /**
    * Ceiling on the whole session, enforced by the container runtime.

@@ -5,7 +5,7 @@ import { describeGitError, WorkspaceGitHost } from "./git-host.js";
 /**
  * The credential boundary, driven directly.
  *
- * `onAuth` is the whole of what keeps a forge token from reaching a host nobody
+ * `onAuth` is the whole of what keeps a GitHub token from reaching a host nobody
  * allowed. It is built per operation and handed to isomorphic-git, so the only
  * way to exercise it is to capture it from a fake client and call it with the
  * URLs git would — including the one it reaches by redirect, which is the case
@@ -23,7 +23,7 @@ import { describeGitError, WorkspaceGitHost } from "./git-host.js";
  */
 const NO_PRIOR_AUTH = {};
 
-const TOKEN = "forge-token";
+const TOKEN = "github-token";
 const ALLOWED = ["github.com"];
 
 /** A client that captures the `onAuth` it is given and reports success. */
@@ -57,7 +57,7 @@ function hostWith(git: GitClient, token: string | undefined) {
   });
 }
 
-describe("who the forge credential is handed to", () => {
+describe("who the GitHub credential is handed to", () => {
   it("authenticates to a host on the allowlist", async () => {
     const { git, onAuth } = captureAuth();
     await hostWith(git, TOKEN).fetch({

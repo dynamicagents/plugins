@@ -660,7 +660,7 @@ describe("draining an outstanding pull", () => {
    * only as current as the last pull. A commit made in the container that has
    * not arrived is a commit `git push` cannot see — and pushing anyway publishes
    * a tree the agent did not produce, which reports success and shows an older
-   * branch on the forge.
+   * branch on GitHub.
    *
    * With no container there is nothing outstanding, so this asserts the other
    * half: the check does not stand between a workspace and its own git.

@@ -14,7 +14,7 @@ import { testPluginContext } from "../../test/helpers.js";
 
 /**
  * The repo plugin's two jobs, both of which are security properties rather than
- * features: the forge token never becomes readable, and a model-authored string
+ * features: the GitHub token never becomes readable, and a model-authored string
  * never becomes a shell command.
  *
  * No container here — `exec` is injected precisely so this is testable without
@@ -112,7 +112,7 @@ type GitStub = Partial<
  *
  * The counterpart to {@link recorder}, and the split between them is the point
  * of these tests: `calls` is everything that ran in the container, `gitCalls` is
- * everything that touched the forge. No token appears in the first list, ever,
+ * everything that touched GitHub. No token appears in the first list, ever,
  * and asserting that is much of what this file does.
  */
 function gitRecorder(results: GitStub = {}): {
@@ -236,7 +236,7 @@ describe("token containment", () => {
     // The container still does the local half — switching to the branch,
     // resolving its tip, checking it is ahead of the default. That is the split
     // this plugin now rests on, so it is asserted from both sides: nothing in
-    // the container talks to the forge, and the thing that does never appears
+    // the container talks to GitHub, and the thing that does never appears
     // there.
     expect(calls.some((c) => c.command.includes("checkout"))).toBe(true);
     expect(calls.some((c) => /\bgit push\b/.test(c.command))).toBe(false);
@@ -734,7 +734,7 @@ describe("guardrails", () => {
  * every push rather than remembered.
  */
 /**
- * Talking to the forge, which is what a model reaches for `gh` to do.
+ * Talking to GitHub, which is what a model reaches for `gh` to do.
  *
  * Served from the Worker: the token that can read a private repository and write
  * comments on it is the same token, and installing a CLI in the container to use
@@ -745,7 +745,7 @@ describe("guardrails", () => {
  * way to point the token at a repository nobody asked about. That binds hardest
  * on `repo_open_pr`, the one that writes.
  */
-describe("talking to the forge", () => {
+describe("talking to GitHub", () => {
   /**
    * Answers keyed by the path each belongs to, matched as a **suffix of the
    * pathname**.
@@ -1809,14 +1809,14 @@ describe("what a person approves before it runs", () => {
  */
 describe("a review, and answering it", () => {
   /**
-   * The forge, answering REST by path suffix and GraphQL by what the query says.
+   * GitHub, answering REST by path suffix and GraphQL by what the query says.
    *
    * GraphQL cannot be keyed on the path — every operation posts to `/graphql` —
    * so `graphql` is handed the query text and returns the whole envelope,
    * `errors` included, which is what lets the 200-with-errors case be written at
    * all.
    */
-  const forgeStub = (opts: {
+  const githubStub = (opts: {
     rest?: Record<string, unknown>;
     graphql?: (query: string, variables: Record<string, unknown>) => unknown;
   }) =>
@@ -1895,8 +1895,8 @@ describe("a review, and answering it", () => {
     });
 
     const status =
-      (opts: Parameters<typeof forgeStub>[0]) => async (reviewer?: string) => {
-        const spy = forgeStub(opts);
+      (opts: Parameters<typeof githubStub>[0]) => async (reviewer?: string) => {
+        const spy = githubStub(opts);
         try {
           return await run(tools(recorder().exec), "repo_pr_review_status", {
             dir: "/w/r",
@@ -2102,7 +2102,7 @@ describe("a review, and answering it", () => {
 
   describe("repo_pr_threads", () => {
     it("reads unresolved threads, with the id needed to answer one", async () => {
-      const spy = forgeStub({
+      const spy = githubStub({
         graphql: () => threadsPage([thread()])
       });
       try {
@@ -2120,7 +2120,7 @@ describe("a review, and answering it", () => {
 
     it("leaves resolved threads out unless asked for them", async () => {
       const nodes = [thread(), thread({ id: "PRRT_2", isResolved: true })];
-      const spy = forgeStub({ graphql: () => threadsPage(nodes) });
+      const spy = githubStub({ graphql: () => threadsPage(nodes) });
       try {
         const set = tools(recorder().exec);
         const open = await run(set, "repo_pr_threads", {
@@ -2145,7 +2145,7 @@ describe("a review, and answering it", () => {
       // with the errors in the body, so a caller reading `data` straight through
       // reports a permission failure as "no threads" — and an agent told a review
       // is clean stops looking.
-      const spy = forgeStub({
+      const spy = githubStub({
         graphql: () => ({
           data: null,
           errors: [{ message: "Resource not accessible by integration" }]
@@ -2167,7 +2167,7 @@ describe("a review, and answering it", () => {
       // The false-clean result paging exists to prevent, at the exit most likely
       // to skip the warning: a run that stopped early and found nothing open in
       // what it read. The unread pages are where the newest threads are.
-      const spy = forgeStub({
+      const spy = githubStub({
         graphql: () =>
           threadsPage([thread({ isResolved: true })], "always-more")
       });
@@ -2186,7 +2186,7 @@ describe("a review, and answering it", () => {
       // The reviewer's point is at the top and a reply this plugin sent is at
       // the bottom, so neither end can be the one dropped — and what is missing
       // is named rather than silently absent.
-      const spy = forgeStub({
+      const spy = githubStub({
         graphql: () =>
           threadsPage([
             thread({
@@ -2212,7 +2212,7 @@ describe("a review, and answering it", () => {
     });
 
     it("walks every page, because the newest threads are on the last one", async () => {
-      const spy = forgeStub({
+      const spy = githubStub({
         graphql: (_query, variables) =>
           variables.after
             ? threadsPage([thread({ id: "PRRT_LAST", path: "src/late.ts" })])
@@ -2254,7 +2254,7 @@ describe("a review, and answering it", () => {
     };
 
     it("replies and resolves in one call", async () => {
-      const spy = forgeStub({ graphql: answer });
+      const spy = githubStub({ graphql: answer });
       try {
         const result = await run(
           tools(recorder().exec),
@@ -2274,7 +2274,7 @@ describe("a review, and answering it", () => {
     });
 
     it("leaves the thread open when asked to", async () => {
-      const spy = forgeStub({ graphql: answer });
+      const spy = githubStub({ graphql: answer });
       try {
         const result = await run(
           tools(recorder().exec),
@@ -2297,7 +2297,7 @@ describe("a review, and answering it", () => {
       // The reply and the resolve fail independently, so a tool that says "the
       // reply landed, resolve it alone" has to give a way to do that. Without
       // it the only route back is a second reply the reviewer has already read.
-      const spy = forgeStub({ graphql: answer });
+      const spy = githubStub({ graphql: answer });
       try {
         const result = await run(
           tools(recorder().exec),
@@ -2314,7 +2314,7 @@ describe("a review, and answering it", () => {
       // The one input here that can name a pull request nobody checked out — a
       // node id is global. Every other tool derives the repository from the
       // checkout's own origin and has nothing to validate; this one has to ask.
-      const spy = forgeStub({ graphql: answer });
+      const spy = githubStub({ graphql: answer });
       try {
         const result = await run(
           tools(recorder().exec),
@@ -2338,7 +2338,7 @@ describe("a review, and answering it", () => {
       // needs resolving; one never answered needs answering. "It failed" covers
       // both and sends the model to do the wrong one — here, to send the reply
       // the reviewer already has.
-      const spy = forgeStub({
+      const spy = githubStub({
         graphql: (query, variables) =>
           query.includes("resolveReviewThread")
             ? { data: null, errors: [{ message: "resolve is not permitted" }] }
@@ -2366,7 +2366,7 @@ describe("a review, and answering it", () => {
   });
 
   /**
-   * The two forge writes are Think actions, so a recovered turn replays a
+   * The two GitHub writes are Think actions, so a recovered turn replays a
    * landed write rather than repeating it. What is this plugin's own is the key
    * — what counts as "the same write" — and which outcomes may settle it.
    */
@@ -2453,7 +2453,7 @@ describe("a review, and answering it", () => {
       ).rejects.toThrow(/no task id/);
     });
 
-    it("gives the forge longer than an action's default", () => {
+    it("gives GitHub longer than an action's default", () => {
       for (const [name, { config }] of Object.entries(actions()))
         expect(config.timeoutMs, name).toBeGreaterThan(30_000);
     });
@@ -2474,7 +2474,7 @@ describe("a review, and answering it", () => {
     });
 
     it("throws a refusal, which would otherwise answer every retry", async () => {
-      const spy = forgeStub({
+      const spy = githubStub({
         graphql: () => ({
           data: {
             node: {
@@ -2498,7 +2498,7 @@ describe("a review, and answering it", () => {
     it("settles a reply that landed on a thread that did not resolve", async () => {
       // Thrown, the key would be released and the retry would send the
       // reviewer the reply a second time.
-      const spy = forgeStub({
+      const spy = githubStub({
         graphql: (query) =>
           query.includes("addPullRequestReviewThreadReply")
             ? {
@@ -2533,7 +2533,8 @@ describe("a review, and answering it", () => {
 });
 
 /**
- * The two places a forge that is not github.com changes the answer.
+ * The two places a GitHub Enterprise host, rather than github.com, changes the
+ * answer.
  *
  * Both are invisible on the public API, which is what every other spec here runs
  * against — so nothing but a case named after Enterprise catches either.
@@ -2928,7 +2929,7 @@ describe("a host that keeps worktrees", () => {
 describe("a pull request's checks", () => {
   const SHA = "abc1234def5678";
 
-  /** The forge by REST path suffix; anything unlisted is a 404. */
+  /** GitHub by REST path suffix; anything unlisted is a 404. */
   const checks = async (rest: Record<string, unknown>) => {
     const spy = vi
       .spyOn(globalThis, "fetch")
@@ -3123,7 +3124,7 @@ describe("an origin the host reads", () => {
    * every poll. Read through `exec`, each one starts the container it waits
    * with; read by the host, none does.
    */
-  it("resolves the forge tools' repository without the container", async () => {
+  it("resolves the GitHub tools' repository without the container", async () => {
     const { exec, calls } = recorder();
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async () =>

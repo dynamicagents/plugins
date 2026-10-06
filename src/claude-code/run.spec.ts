@@ -18,7 +18,7 @@ import {
   type SessionRuntime
 } from "./run.js";
 import { DEFAULT_PERMISSION_MODE } from "./config.js";
-import { FORGE_PLACEHOLDER } from "./forge.js";
+import { GITHUB_TOKEN_PLACEHOLDER } from "./github.js";
 import { SESSION_STATE_DIR } from "../computer/paths.js";
 
 const EXEC = execIdFor("run-7");
@@ -1319,24 +1319,24 @@ describe("the reserved credential key", () => {
   });
 });
 
-describe("the forge placeholder", () => {
+describe("the GitHub placeholder", () => {
   const launch = (env?: Record<string, string>) =>
     buildLaunch({
       prompt: "p",
       dir: "/workspace/repo",
-      forge: true,
+      github: true,
       ...(env ? { env } : {})
     });
 
   it("presents the placeholder to gh and to git", () => {
     const { env } = launch();
-    expect(env.GH_TOKEN).toBe(FORGE_PLACEHOLDER);
+    expect(env.GH_TOKEN).toBe(GITHUB_TOKEN_PLACEHOLDER);
     expect(env.GIT_CONFIG_COUNT).toBe("1");
     expect(env.GIT_CONFIG_KEY_0).toBe("credential.https://github.com.helper");
     expect(env.GIT_CONFIG_VALUE_0).toContain("$GH_TOKEN");
   });
 
-  it("is absent without forge, so a host may set GH_TOKEN itself", () => {
+  it("is absent without github, so a host may set GH_TOKEN itself", () => {
     const { env } = buildLaunch({
       prompt: "p",
       dir: "/workspace/repo",
@@ -1346,7 +1346,7 @@ describe("the forge placeholder", () => {
     expect(env.GIT_CONFIG_COUNT).toBeUndefined();
   });
 
-  it("refuses a host setting a key it owns beside forge", () => {
+  it("refuses a host setting a key it owns beside github", () => {
     expect(() => launch({ GH_TOKEN: "ghp_REAL" })).toThrow(
       /GH_TOKEN cannot be set through `env`/
     );

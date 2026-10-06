@@ -92,7 +92,7 @@ import type { RepoGitResult } from "../repo/index.js";
  * - `./sync.ts` — the host's half of syncing, which nothing else will do.
  * - `./ca-trust.ts` — making a container able to speak TLS.
  * - `./git-identity.ts` — who a container's commits belong to.
- * - `./git-host.ts` — the operations that hold the forge credential.
+ * - `./git-host.ts` — the operations that hold the GitHub credential.
  *
  * Each takes a small explicit seam, and that is the test: a module that needed
  * the whole object back would be a module that did not want extracting.
@@ -118,7 +118,7 @@ export const WORKSPACE_DIR = "/workspace";
  *
  * `repo` is not always a repository. A host may pass a sentinel through here as
  * one — a scratchpad is modelled that way, which is what keys it to its own
- * object and its own container. Anything that is not a forge name works, as long
+ * object and its own container. Anything that is not a GitHub name works, as long
  * as no caller could clone something that collides with it.
  */
 export function workspaceName(callerKey: string, repo?: string): string {
@@ -317,7 +317,7 @@ class WorkspaceContainerHost extends DurableObject<Cloudflare.Env> {}
 const WorkspaceContainerBase = withWorkspaceContainer(WorkspaceContainerHost);
 
 /**
- * The forge credential, and who a commit made on this side is attributed to.
+ * The GitHub credential, and who a commit made on this side is attributed to.
  *
  * Config rather than an env read, because this class cannot name a consumer's
  * ambient `Env` — it is an interface `wrangler types` generates into *their*
@@ -331,7 +331,7 @@ const WorkspaceContainerBase = withWorkspaceContainer(WorkspaceContainerHost);
  */
 export interface WorkspaceGitConfig {
   /**
-   * The **name** of the binding holding the forge credential — never the
+   * The **name** of the binding holding the GitHub credential — never the
    * credential itself.
    *
    * `workspaceConfig()` is an ordinary method on the prototype, and on a Durable
@@ -429,7 +429,7 @@ export interface WorkspaceObjectConfig {
    * old size. Which size, and why there is no default: {@link file://./README.md}.
    */
   instance: ContainerInstanceSize;
-  /** The forge credential and commit identity — see {@link WorkspaceGitConfig}. */
+  /** The GitHub credential and commit identity — see {@link WorkspaceGitConfig}. */
   git: WorkspaceGitConfig;
 }
 
@@ -600,7 +600,7 @@ export abstract class WorkspaceObjectBase<
   });
 
   /**
-   * The forge credential, read at the moment it would be handed over.
+   * The GitHub credential, read at the moment it would be handed over.
    *
    * `#`-private, which is the only spelling actually unreachable over RPC — see
    * {@link WorkspaceGitConfig.tokenBinding} for why that matters here and not
@@ -860,7 +860,7 @@ export abstract class WorkspaceObjectBase<
       observer: createCloudflareObserver({ tracing }),
       // Git, running **here** rather than in the container.
       //
-      // This is what lets the forge token stay on this side of the boundary.
+      // This is what lets the GitHub token stay on this side of the boundary.
       // `createGitClient` binds isomorphic-git to `provider()` — the local
       // SQLite store, not the wire — so a clone, fetch or push executes next to
       // the data it writes, and the container never holds a credential at all.
@@ -977,7 +977,7 @@ export abstract class WorkspaceObjectBase<
   }
 
   /**
-   * Clone, fetch and push — the operations that need the forge token.
+   * Clone, fetch and push — the operations that need the GitHub token.
    *
    * The work is `./git-host.ts`, which owns why the credential stays on this
    * side of the boundary. What stays here is what only this object can do: the
@@ -1033,7 +1033,7 @@ export abstract class WorkspaceObjectBase<
    * did not finish, the workspace still holds the tree as it was before the
    * commit — and isomorphic-git, running here, would push a branch that does not
    * include it. That is the one failure worth stopping for: the push reports
-   * success, the forge shows an older tree, and nothing in either account says
+   * success, GitHub shows an older tree, and nothing in either account says
    * why.
    *
    * Refused rather than attempted, because every alternative is worse. Pushing

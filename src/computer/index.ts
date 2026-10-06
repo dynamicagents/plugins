@@ -108,7 +108,7 @@ export interface ComputerConfig extends WorkspaceClientConfig {
    *
    * Do not hand the agent the credential; hand it the *action*. Keep the secret
    * on the Worker and expose one tool that makes the call it is for.
-   * `@dynamicagents/plugins/repo` is the worked example: it holds a forge token, calls
+   * `@dynamicagents/plugins/repo` is the worked example: it holds a GitHub token, calls
    * the API from the Worker, and runs clone, fetch and push on the host's side of
    * the boundary. **No command in its container is ever given that token.**
    */
