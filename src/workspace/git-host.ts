@@ -152,6 +152,21 @@ export class WorkspaceGitHost {
     });
   }
 
+  /**
+   * `remote.origin.url` from the local store, or `undefined` where there is no
+   * checkout or no origin. Reads only, and needs no credential.
+   */
+  async origin(dir: string): Promise<string | undefined> {
+    try {
+      const url = await this.deps
+        .git()
+        .configGet({ dir, path: "remote.origin.url" });
+      return typeof url === "string" && url ? url : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async push(req: {
     url: string;
     dir: string;

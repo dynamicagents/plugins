@@ -127,6 +127,11 @@ to authenticate: `status`, `diff`, `add`, `commit`, `checkout`. That is the whol
 rule for changing this plugin — an operation that talks to the forge does not belong
 on `exec`, and one that does not has no business anywhere else.
 
+One exception runs the other way, for cost rather than trust: a host's `git` may
+also answer `origin(dir)` from its own copy of the files. The forge tools then
+resolve their repository without the container, so an agent polling a pull request
+for its review does not keep one running.
+
 The rule is absolute rather than careful because the narrower versions do not hold.
 Git is a general-purpose command runner: it executes what `.git/config` and
 `.git/hooks` name, both live in the workspace filesystem, and a co-installed shell

@@ -309,6 +309,29 @@ describe("what a clone leaves for the container's git", () => {
   });
 });
 
+describe("reading a checkout's origin", () => {
+  const withConfig = (configGet: () => Promise<unknown>) =>
+    hostWith({ configGet: vi.fn(configGet) } as unknown as GitClient, TOKEN);
+
+  it("answers the url from the local store", async () => {
+    const host = withConfig(async () => "https://github.com/acme/widget.git");
+    expect(await host.origin("/workspace/widget")).toBe(
+      "https://github.com/acme/widget.git"
+    );
+  });
+
+  it("answers nothing for a directory with no checkout or no origin", async () => {
+    expect(
+      await withConfig(async () => undefined).origin("/w")
+    ).toBeUndefined();
+    expect(
+      await withConfig(async () => {
+        throw new Error("not a git repository");
+      }).origin("/w")
+    ).toBeUndefined();
+  });
+});
+
 describe("describeGitError", () => {
   it("is the message alone when there is no cause", () => {
     expect(describeGitError(new Error("push rejected"))).toBe("push rejected");

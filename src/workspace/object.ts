@@ -1016,6 +1016,15 @@ export abstract class WorkspaceObjectBase<
   }
 
   /**
+   * A checkout's `origin`, from this object's storage. Starts no container and
+   * moves no deadline, like {@link checkoutDir}: a pull request polled for its
+   * review is not the workspace in use.
+   */
+  async gitOrigin(dir: string): Promise<string | undefined> {
+    return await this.#gitHost.origin(dir);
+  }
+
+  /**
    * Bring the workspace up to date, or say why git must not run.
    *
    * **Git here reads this object's storage**, so it has to be current first. The

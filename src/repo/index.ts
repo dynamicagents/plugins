@@ -167,6 +167,14 @@ export interface RepoGit {
     branch: string;
     allowedHosts: string[];
   }): Promise<RepoGitResult>;
+  /**
+   * The checkout's `origin` URL, read on the host's side; `undefined` for none.
+   *
+   * Optional. Set, the forge tools resolve their repository without the
+   * container, so an agent polling a pull request does not keep one running.
+   * Unset, the origin is read through {@link RepoConfig.exec}.
+   */
+  origin?(dir: string): Promise<string | undefined>;
 }
 
 /** What a {@link RepoGit} operation reports. */

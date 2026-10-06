@@ -3088,3 +3088,65 @@ describe("choosing the tools", () => {
     expect(context).not.toContain("Never push");
   });
 });
+
+describe("an origin the host reads", () => {
+  /**
+   * An agent polling a pull request for its review asks for the repository on
+   * every poll. Read through `exec`, each one starts the container it waits
+   * with; read by the host, none does.
+   */
+  it("resolves the forge tools' repository without the container", async () => {
+    const { exec, calls } = recorder();
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ title: "t", state: "open" }), {
+          status: 200
+        })
+    );
+    try {
+      const result = await run(
+        tools(exec, {
+          git: {
+            ...gitRecorder().git,
+            origin: async () => "https://github.com/o/r.git"
+          }
+        }),
+        "repo_pr_view",
+        { dir: "/w/r", number: 7 }
+      );
+      expect(result).toContain("#7 t");
+      expect(String(spy.mock.calls[0]![0])).toContain("/repos/o/r/pulls/7");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses as it would with no origin when the host has none", async () => {
+    const result = await run(
+      tools(recorder().exec, {
+        git: { ...gitRecorder().git, origin: async () => undefined }
+      }),
+      "repo_pr_view",
+      { dir: "/w/r", number: 7 }
+    );
+    expect(result).toContain("has no origin on an allowed host");
+  });
+
+  it("says the workspace was unreachable rather than that there is no origin", async () => {
+    const result = await run(
+      tools(recorder().exec, {
+        git: {
+          ...gitRecorder().git,
+          origin: async () => {
+            throw new Error("Network connection lost");
+          }
+        }
+      }),
+      "repo_pr_view",
+      { dir: "/w/r", number: 7 }
+    );
+    expect(result).toContain("could not be reached");
+    expect(result).not.toContain("clone it with repo_clone first");
+  });
+});

@@ -680,13 +680,27 @@ export function repoContext(
     /** Set when git never answered, so "no origin" would be a guess. */
     unreachable?: string;
   }> => {
-    const result = await plain("remote get-url origin", dir);
-    // Two different nothings. `repo_push`'s answer to "no origin here" is to
-    // tell the model to clone the repository first — advice that is actively
-    // wrong when the truth is that no command ran at all.
-    if (result.unreachable) return { unreachable: result.stderr };
-    if (!result.success) return {};
-    const url = result.stdout.trim();
+    let url: string;
+    if (config.git.origin) {
+      let read: string | undefined;
+      try {
+        read = await config.git.origin(dir);
+      } catch (err) {
+        return {
+          unreachable: `the workspace could not be reached to read ${dir}'s origin: ${String(err)}`
+        };
+      }
+      if (!read) return {};
+      url = read.trim();
+    } else {
+      const result = await plain("remote get-url origin", dir);
+      // Two different nothings. `repo_push`'s answer to "no origin here" is to
+      // tell the model to clone the repository first — advice that is actively
+      // wrong when the truth is that no command ran at all.
+      if (result.unreachable) return { unreachable: result.stderr };
+      if (!result.success) return {};
+      url = result.stdout.trim();
+    }
     const location = repoLocation(url);
     if (!location || !allowedHosts.includes(location.host)) return {};
     // The URL as well as the host: the credentialed operations run on the
