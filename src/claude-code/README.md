@@ -377,7 +377,7 @@ export class AnthropicCodingWriterChild extends SubAgent<Env> {
       storage: this.ctx.storage,
       runId: this.name,
       dir,
-      note: (key, text) => this.note(key, text),
+      note: (key, text, detail) => this.note(key, text, detail),
       // The session's handle, as soon as it has one and again when it ends. It
       // goes in the workspace object that ran the session, because the id names
       // a transcript in that container — see "A session has a handle" below.
@@ -405,8 +405,14 @@ assistant messages say, so narration streamed as text would become the result.
 What the session says as it works goes to the parent as **notes**, through
 `note`, each keyed on its exec and its position: the parent's transcript dedupes
 on the key, so a note filed again after a restart is dropped, and two runs in one
-task never collide. Nothing else is streamed at all — Think's stall watchdog is
-off, so a silent stream is not cut.
+task never collide. Prose is a plain note; every tool call, its result and the
+session's start and end are a note with a **card** — the tool, what it acted on,
+its input and output folded beneath (`./cards.ts`). A thinking block is a card
+too, saying only how long it streamed — "Thought for 5s", timed from its first
+`thinking_tokens` line so a retry or a slow first token is not counted, and just
+"Thought" when that cannot be measured — and never what it said. A
+card stays on the transcript and never reaches the thread. Nothing else is streamed at all —
+Think's stall watchdog is off, so a silent stream is not cut.
 
 **A `jsonSchema` makes the answer data**, for a session whose answer a host acts
 on field by field rather than passing along: `report` reads it as the result's

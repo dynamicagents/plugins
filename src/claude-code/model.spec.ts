@@ -177,7 +177,7 @@ function harness(
   box: ReturnType<typeof container>,
   over: Partial<ClaudeCodeModelOptions> = {}
 ) {
-  const notes: { key: string; text: string }[] = [];
+  const notes: { key: string; text: string; detail?: unknown }[] = [];
   const reports: SessionOutcome[] = [];
   const { map, storage } = memoryStorage();
   const options: ClaudeCodeModelOptions = {
@@ -189,8 +189,8 @@ function harness(
     storage,
     runId: RUN,
     dir: "/workspace/repo",
-    note: async (key, text) => {
-      notes.push({ key, text });
+    note: async (key, text, detail) => {
+      notes.push({ key, text, ...(detail ? { detail } : {}) });
     },
     report: async (outcome) => {
       reports.push(outcome);
@@ -248,7 +248,13 @@ describe("claudeCodeModel", () => {
 
     expect(notes).toEqual([
       { key: `${SESSION}:claude:0`, text: "reading the parser" },
-      { key: `${SESSION}:claude:1`, text: "fixing the off-by-one" }
+      { key: `${SESSION}:claude:1`, text: "fixing the off-by-one" },
+      // The session's end, as a card the transcript keeps.
+      {
+        key: `${SESSION}:claude:2`,
+        text: "Session finished",
+        detail: { title: "Session", status: "ok" }
+      }
     ]);
     // Narration streamed as text would become the run's result.
     expect(parts.map((p) => p.type)).toEqual([
@@ -306,7 +312,7 @@ describe("claudeCodeModel", () => {
     expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, SESSION]);
     expect(box.calls.getExec).toEqual([{ id: SESSION, resume: 0 }]);
     expect(new Set(notes.map((n) => n.key))).toEqual(
-      new Set([0, 1, 2].map((n) => `${SESSION}:claude:${n}`))
+      new Set([0, 1, 2, 3].map((n) => `${SESSION}:claude:${n}`))
     );
     // The brief is asked once and kept: a restart does not re-decide it.
     expect(brief).toHaveBeenCalledTimes(1);
@@ -338,7 +344,10 @@ describe("claudeCodeModel", () => {
 
     expect(box.calls.exec).toEqual([]);
     expect(box.calls.getExec).toEqual([{ id: SESSION, resume: 2 }]);
-    expect(notes).toEqual([{ key: `${SESSION}:claude:2`, text: "three" }]);
+    expect(notes.map((n) => [n.key, n.text])).toEqual([
+      [`${SESSION}:claude:2`, "three"],
+      [`${SESSION}:claude:3`, "Session finished"]
+    ]);
   });
 
   /**
@@ -400,7 +409,7 @@ describe("claudeCodeModel", () => {
     expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, SESSION]);
     expect(box.calls.getExec).toEqual([{ id: SESSION, resume: 0 }]);
     expect(new Set(notes.map((n) => n.key))).toEqual(
-      new Set([0, 1, 2].map((n) => `${SESSION}:claude:${n}`))
+      new Set([0, 1, 2, 3].map((n) => `${SESSION}:claude:${n}`))
     );
     expect(reports[0]?.session.exitCode).toBe(0);
   });
@@ -464,8 +473,10 @@ describe("claudeCodeModel", () => {
     expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, FOLLOW_UP]);
     expect(box.calls.exec[1]?.command).toContain("--resume sess-1");
     // Its own exec id leads its keys, so its first note is not the session's.
-    expect(notes).toEqual([
-      { key: `${FOLLOW_UP}:claude:0`, text: "committing" }
+    expect(notes.map((n) => [n.key, n.text])).toEqual([
+      [`${SESSION}:claude:0`, "Session finished"],
+      [`${FOLLOW_UP}:claude:0`, "committing"],
+      [`${FOLLOW_UP}:claude:1`, "Session finished"]
     ]);
     expect(reports[0]?.session.result?.text).toBe("done");
     expect(reports[0]?.followUp?.result?.text).toBe("committed");

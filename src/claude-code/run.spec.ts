@@ -505,6 +505,84 @@ describe("buildLaunch", () => {
 });
 
 describe("drainRun", () => {
+  /**
+   * A thinking block is timed by when its lines reach the drain: its first
+   * `thinking_tokens` line, then its own. The start can arrive before a cut and
+   * the block after it, so the cursor carries the start.
+   */
+  describe("timing a thinking block", () => {
+    const T0 = Date.parse("2026-10-06T08:31:00.000Z");
+    const tokens = line({
+      type: "system",
+      subtype: "thinking_tokens",
+      estimated_tokens: 50,
+      estimated_tokens_delta: 50
+    });
+    const thinking = (ms: number) =>
+      line({
+        type: "assistant",
+        timestamp: new Date(T0 + ms).toISOString(),
+        message: {
+          id: "msg_1",
+          content: [{ type: "thinking", thinking: "private" }]
+        }
+      });
+    /** A handle that sets the drain's clock to each event's time as it is read. */
+    const timed = (script: [Event, number][]) => {
+      let clock = T0;
+      const stream = new ReadableStream<Event>(
+        {
+          pull(controller) {
+            const next = script.shift();
+            if (!next) return controller.close();
+            clock = T0 + next[1];
+            controller.enqueue(next[0]);
+          }
+        },
+        { highWaterMark: 0 }
+      );
+      const handle = Object.assign(stream, {
+        id: EXEC,
+        backend: "container",
+        result: async () => {
+          throw new Error("not used by the drain");
+        },
+        kill: async () => {},
+        [Symbol.dispose]: () => {}
+      }) as unknown as WorkspaceRuntimeExecHandle<"utf8">;
+      return { handle, now: () => clock };
+    };
+
+    it("times it from its first token line to its own line", async () => {
+      const { handle, now } = timed([
+        [stdout(1, tokens), 1_000],
+        [stdout(2, thinking(4_000)), 4_000],
+        [exit(3, 0), 4_001]
+      ]);
+      const outcome = await drainRun(handle, FRESH, { now });
+      expect(outcome.progress.map((p) => p.text)).toEqual(["Thought for 3s"]);
+      expect(outcome.cursor.thinkingFrom).toBeUndefined();
+    });
+
+    it("carries a pending start on its cursor, and times from it after a resume", async () => {
+      const first = timed([
+        [stdout(1, tokens), 1_000],
+        [exit(2, 0), 1_001]
+      ]);
+      const cut = await drainRun(first.handle, FRESH, { now: first.now });
+      expect(cut.cursor.thinkingFrom).toBe(T0 + 1_000);
+
+      const second = timed([
+        [stdout(3, thinking(5_000)), 5_000],
+        [exit(4, 0), 5_001]
+      ]);
+      const resumed = await drainRun(second.handle, cut.cursor, {
+        now: second.now
+      });
+      expect(resumed.progress.map((p) => p.text)).toEqual(["Thought for 4s"]);
+    });
+  });
+
   it("reports the run done on the exit event, with its result", async () => {
     const handle = fakeHandle([
       stdout(1, assistant("working")),
@@ -519,7 +597,11 @@ describe("drainRun", () => {
     expect(outcome.exitCode).toBe(0);
     expect(outcome.result?.costUsd).toBe(1.25);
     expect(outcome.cursor.seq).toBe(3);
-    expect(outcome.progress.map((p) => p.key)).toEqual(["claude:0"]);
+    // The narration, then the session's end as a card.
+    expect(outcome.progress.map((p) => p.key)).toEqual([
+      "claude:0",
+      "claude:1"
+    ]);
   });
 
   /**

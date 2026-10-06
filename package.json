@@ -77,7 +77,7 @@
   "peerDependencies": {
     "@cloudflare/computer": "^0.4.0",
     "@cloudflare/think": ">=0.20.0 <0.21.0",
-    "@dynamicagents/core": ">=0.12.0 <0.13.0",
+    "@dynamicagents/core": ">=0.13.0 <0.14.0",
     "@platformatic/vfs": "^0.4.0",
     "agents": ">=0.26.0 <0.27.0",
     "ai": "^7.0.88",

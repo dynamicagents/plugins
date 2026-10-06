@@ -92,9 +92,7 @@ describe("parseStream", () => {
     const rest = `{"content":[{"type":"text","text":"done"}]}}\n`;
     const second = parseStream(first.carry + rest);
 
-    expect(second.events).toEqual([
-      { kind: "assistant", text: "done", tools: [] }
-    ]);
+    expect(second.events).toEqual([{ kind: "text", text: "done" }]);
   });
 
   /**
@@ -111,56 +109,262 @@ describe("parseStream", () => {
 
     const { events, nested } = parseStream(buffer);
 
-    expect(events.map((e) => e.kind === "assistant" && e.text)).toEqual([
+    expect(events.map((e) => e.kind === "text" && e.text)).toEqual([
       "outer work",
       "more outer work"
     ]);
     expect(nested).toBe(1);
   });
 
-  it("drops thinking blocks but keeps the text beside them", () => {
+  it("reads every block of a turn, in the order it said them", () => {
     const buffer = line({
       type: "assistant",
       message: {
         content: [
-          { type: "thinking", thinking: "a long private deliberation" },
-          { type: "text", text: "the visible part" }
+          { type: "thinking", thinking: " a deliberation " },
+          {
+            type: "text",
+            text: "editing\n\n    indented code  \n- one\n- two"
+          },
+          { type: "text", text: "  \n " },
+          { type: "tool_use", id: "toolu_1", name: "Edit", input: { a: 1 } },
+          { type: "tool_use", id: "toolu_2", name: "Bash", input: {} },
+          // No id: nothing could complete its card.
+          { type: "tool_use", name: "Read", input: {} }
         ]
       }
     });
 
     expect(parseStream(buffer).events).toEqual([
-      { kind: "assistant", text: "the visible part", tools: [] }
-    ]);
-  });
-
-  it("names the tools an assistant turn called", () => {
-    const buffer = line({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "text", text: "editing" },
-          { type: "tool_use", name: "Edit", input: {} },
-          { type: "tool_use", name: "Bash", input: {} }
-        ]
-      }
-    });
-
-    expect(parseStream(buffer).events).toEqual([
-      { kind: "assistant", text: "editing", tools: ["Edit", "Bash"] }
+      { kind: "thinking" },
+      // Verbatim: it is markdown, and its indentation and line breaks are its
+      // structure. A block of only whitespace says nothing.
+      { kind: "text", text: "editing\n\n    indented code  \n- one\n- two" },
+      { kind: "toolUse", id: "toolu_1", name: "Edit", input: { a: 1 } },
+      { kind: "toolUse", id: "toolu_2", name: "Bash", input: {} }
     ]);
   });
 
   /**
-   * `user` lines on this stream are tool results being fed back to the model —
-   * large, and already summarised by the assistant turn that follows.
+   * A thinking block is the one block whose content never leaves the parser: it
+   * can be thousands of tokens of private reasoning. What a reader gets is how
+   * long it streamed — from the read that brought its first `thinking_tokens`
+   * line to the read that brought the block, so nothing that came before the
+   * model started thinking is counted.
    */
-  it("says nothing about tool results coming back", () => {
-    const buffer = line({
-      type: "user",
-      message: { content: [{ type: "tool_result", content: "ok" }] }
+  describe("a thinking block", () => {
+    const T0 = Date.parse("2026-10-06T08:31:00.000Z");
+    const iso = (ms: number) => new Date(T0 + ms).toISOString();
+    const toolResult = (ms: number) =>
+      line({
+        type: "user",
+        timestamp: iso(ms),
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "ok" }
+          ]
+        }
+      });
+    const tokens = (estimated: number) =>
+      line({
+        type: "system",
+        subtype: "thinking_tokens",
+        estimated_tokens: estimated,
+        estimated_tokens_delta: estimated
+      });
+    const thinking = (ms: number, id = "msg_1") =>
+      line({
+        type: "assistant",
+        timestamp: iso(ms),
+        message: {
+          id,
+          content: [{ type: "thinking", thinking: "a private deliberation" }]
+        }
+      });
+    /** Each read arrives at `ms`, carrying the last read's start on. */
+    const reads = (...steps: [number, string][]) => {
+      let from: number | undefined;
+      const events: ClaudeCodeEvent[] = [];
+      for (const [ms, buffer] of steps) {
+        const parsed = parseStream(buffer, {
+          now: T0 + ms,
+          ...(from === undefined ? {} : { thinkingFrom: from })
+        });
+        events.push(...parsed.events);
+        from = parsed.thinkingFrom;
+      }
+      return { events, from };
+    };
+
+    it("is timed from its first token line to its own line, and carries none of its text", () => {
+      const { events, from } = reads(
+        [0, toolResult(0)],
+        [800, tokens(50)],
+        [2_000, tokens(200)],
+        [5_400, thinking(5_400)]
+      );
+      expect(events.at(-1)).toEqual({
+        kind: "thinking",
+        messageId: "msg_1",
+        durationMs: 4_600
+      });
+      // The block's own line clears the start.
+      expect(from).toBeUndefined();
+      const notes = toProgress(events, 0);
+      expect(notes.at(-1)).toEqual({
+        key: "claude:1",
+        text: "Thought for 5s",
+        detail: { title: "Thinking", ref: "msg_1" }
+      });
+      expect(JSON.stringify(notes)).not.toContain("deliberation");
     });
-    expect(parseStream(buffer).events).toEqual([]);
+
+    /**
+     * The failure the token line exists to avoid: a minute of retries between
+     * the tool result and the first token is not a minute of thought.
+     */
+    it("does not count a retry or anything else before thinking started", () => {
+      const retry = line({ type: "system", subtype: "api_retry", attempt: 1 });
+      const { events } = reads(
+        [0, toolResult(0)],
+        [1_000, retry],
+        [61_000, tokens(50)],
+        [63_000, thinking(63_000)]
+      );
+      expect(events.at(-1)).toMatchObject({ durationMs: 2_000 });
+    });
+
+    it("has no time when no token line came before it", () => {
+      const { events } = reads([0, toolResult(0)], [2_500, thinking(2_500)]);
+      expect(events.at(-1)).toEqual({ kind: "thinking", messageId: "msg_1" });
+      expect(toProgress(events, 0).at(-1)?.text).toBe("Thought");
+    });
+
+    /**
+     * A drain that re-attached is handed what was printed meanwhile in one
+     * burst. Timed on that read, a minute-long block would read as instant.
+     */
+    it("has no time when its line arrives long after the CLI stamped it", () => {
+      const { events } = reads(
+        [0, toolResult(0)],
+        [90_000, tokens(50) + thinking(30_000)]
+      );
+      expect(events.at(-1)).toEqual({ kind: "thinking", messageId: "msg_1" });
+    });
+
+    /**
+     * Every line with a timestamp ends whatever was pending — so token lines
+     * from before a tool's result, an inner agent's included, never start the
+     * block that answers it.
+     */
+    it("starts only after the last message before it", () => {
+      const { events } = reads(
+        [0, tokens(50)],
+        [50_000, toolResult(50_000)],
+        [51_000, tokens(50)],
+        [53_000, thinking(53_000)]
+      );
+      expect(events.at(-1)).toMatchObject({ durationMs: 2_000 });
+    });
+
+    it("is not timed without a clock", () => {
+      expect(parseStream(tokens(50) + thinking(0)).events).toEqual([
+        { kind: "thinking", messageId: "msg_1" }
+      ]);
+    });
+
+    it("folds a message's blocks into one card, by the message", () => {
+      const { events } = reads(
+        [0, toolResult(0)],
+        [500, tokens(50)],
+        [9_000, thinking(9_000) + tokens(4) + tokens(300) + thinking(9_010)]
+      );
+      expect(toProgress(events, 0).map((note) => note.detail)).toEqual([
+        expect.objectContaining({ ref: "toolu_1" }),
+        { title: "Thinking", ref: "msg_1" },
+        { title: "Thinking", ref: "msg_1" }
+      ]);
+    });
+  });
+
+  describe("a tool result coming back", () => {
+    it("is read as a string or as text blocks, with is_error", () => {
+      const buffer =
+        line({
+          type: "user",
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: "toolu_1", content: "ok" }
+            ]
+          }
+        }) +
+        line({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_2",
+                is_error: true,
+                content: [
+                  { type: "text", text: "first" },
+                  { type: "image", source: {} },
+                  { type: "text", text: "second" }
+                ]
+              }
+            ]
+          }
+        });
+
+      expect(parseStream(buffer).events).toEqual([
+        { kind: "toolResult", id: "toolu_1", isError: false, content: "ok" },
+        {
+          kind: "toolResult",
+          id: "toolu_2",
+          isError: true,
+          content: "first\n[image]\nsecond"
+        }
+      ]);
+    });
+
+    it("carries the tool's own record, when the line holds one result", () => {
+      const record = { stdout: "hi", stderr: "", interrupted: false };
+      const one = line({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "hi" }
+          ]
+        },
+        tool_use_result: record
+      });
+      const two = line({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "a" },
+            { type: "tool_result", tool_use_id: "toolu_2", content: "b" }
+          ]
+        },
+        tool_use_result: record
+      });
+
+      expect(parseStream(one).events).toEqual([
+        expect.objectContaining({ id: "toolu_1", structured: record })
+      ]);
+      // Not per block, so it belongs to neither of two.
+      expect(
+        parseStream(two).events.some((event) => "structured" in event)
+      ).toBe(false);
+    });
+
+    it("says nothing for a user line that is not a tool's answer", () => {
+      const buffer = line({
+        type: "user",
+        message: { content: [{ type: "text", text: "the prompt" }] }
+      });
+      expect(parseStream(buffer).events).toEqual([]);
+    });
   });
 
   it("surfaces an api_retry, which is what a budget refusal looks like", () => {
@@ -439,44 +643,85 @@ describe("toProgress", () => {
     expect(first.map((p) => p.key)).toEqual(["claude:4", "claude:5"]);
   });
 
-  it("says nothing for init or result, which the caller reports itself", () => {
+  it("marks a session's start and end as cards", () => {
     const { events } = parseStream(init() + line(RESULT));
-    expect(toProgress(events, 0)).toEqual([]);
-  });
-
-  it("drops the tool names from a turn that also has text", () => {
-    const buffer = line({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "text", text: "checking" },
-          { type: "tool_use", name: "Bash", input: {} },
-          { type: "tool_use", name: "Bash", input: {} }
-        ]
+    expect(toProgress(events, 0)).toEqual([
+      {
+        key: "claude:0",
+        text: "Session started · opus",
+        detail: { title: "Session" }
+      },
+      {
+        key: "claude:1",
+        text: "Session finished · 1 turn · 15s",
+        detail: { title: "Session", status: "ok" }
       }
-    });
-
-    // The tool names add nothing a reader can act on; only the prose posts.
-    expect(toProgress(parseStream(buffer).events, 0)[0]?.text).toBe("checking");
+    ]);
   });
 
   /**
-   * A turn that only calls tools — no text block at all — must produce no note.
-   * Rendering the tool name instead posts a bare `[Bash]` per call, one Slack
-   * message each, with nothing a reader can act on.
+   * The seven silent minutes this exists for: a session reading and searching
+   * for a long stretch says nothing in prose, and every one of those calls is
+   * the progress a reader came to the transcript for. Each is a card — which
+   * never reaches the thread, so this is not one Slack message per call.
    */
-  it("says nothing for a turn that only calls tools", () => {
-    const buffer = line({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "tool_use", name: "Bash", input: {} },
-          { type: "tool_use", name: "Read", input: {} }
-        ]
-      }
-    });
+  it("files a card per call for a turn that only calls tools, and its result completes it", () => {
+    const buffer =
+      line({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_1",
+              name: "Bash",
+              input: { command: "npm test", description: "Run the suite" }
+            },
+            {
+              type: "tool_use",
+              id: "toolu_2",
+              name: "Read",
+              input: { file_path: "src/a.ts" }
+            }
+          ]
+        }
+      }) +
+      line({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "1 passed" }
+          ]
+        },
+        tool_use_result: { stdout: "1 passed", stderr: "", interrupted: false }
+      });
 
-    expect(toProgress(parseStream(buffer).events, 0)).toEqual([]);
+    expect(toProgress(parseStream(buffer).events, 0)).toEqual([
+      {
+        key: "claude:0",
+        text: "Run the suite",
+        detail: {
+          ref: "toolu_1",
+          status: "running",
+          title: "Bash",
+          sections: [{ label: "Command", body: "npm test", format: "code" }]
+        }
+      },
+      {
+        key: "claude:1",
+        text: "src/a.ts",
+        detail: { ref: "toolu_2", status: "running", title: "Read" }
+      },
+      {
+        key: "claude:2",
+        text: "1 passed",
+        detail: {
+          ref: "toolu_1",
+          status: "ok",
+          sections: [{ label: "Output", body: "1 passed", format: "code" }]
+        }
+      }
+    ]);
   });
 
   it("posts a long turn whole", () => {
@@ -484,6 +729,7 @@ describe("toProgress", () => {
     const note = toProgress(parseStream(assistant(text)).events, 0);
 
     expect(note[0]!.text).toBe(text);
+    expect(note[0]!.detail).toBeUndefined();
   });
 
   it("posts a long denial reason and retry detail whole", () => {

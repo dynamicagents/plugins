@@ -1,4 +1,11 @@
 import type { NoteData } from "@dynamicagents/core/subagent";
+import {
+  initCard,
+  resultCard,
+  thinkingCard,
+  toolCallCard,
+  toolResultCard
+} from "./cards.js";
 
 /**
  * `claude -p --output-format stream-json` on the wire, turned into things this
@@ -30,8 +37,8 @@ import type { NoteData } from "@dynamicagents/core/subagent";
 /** Content blocks Claude Code emits inside an `assistant` message. */
 interface AssistantBlock {
   type: string;
+  id?: string;
   text?: string;
-  thinking?: string;
   name?: string;
   input?: unknown;
 }
@@ -117,14 +124,46 @@ export interface RateLimitInfo {
 }
 
 export type ClaudeCodeEvent =
-  | { kind: "init"; sessionId: string; model?: string }
+  | {
+      kind: "init";
+      sessionId: string;
+      model?: string;
+      cwd?: string;
+      permissionMode?: string;
+    }
   /**
    * The subscription bucket, as the client sees it. Carried rather than acted
    * on here — {@link describe} decides what a reader is told, and the caller
    * decides what the credential pool is told.
    */
   | { kind: "rateLimit"; info: RateLimitInfo }
-  | { kind: "assistant"; text: string; tools: string[] }
+  /** One `text` block of an assistant message, verbatim — it is markdown. */
+  | { kind: "text"; text: string }
+  /**
+   * One `thinking` block, as how long it took — never what it said. A block can
+   * run to thousands of tokens of private reasoning; a reader is told that the
+   * model thought, and for how long, the way the CLI itself says it.
+   *
+   * `durationMs` is measured, never inferred: see
+   * {@link ParsedStream.thinkingFrom} for where it starts, and it is absent
+   * whenever that cannot be trusted. `messageId` is the API message the block
+   * belongs to — a message can carry more than one.
+   */
+  | { kind: "thinking"; messageId?: string; durationMs?: number }
+  | { kind: "toolUse"; id: string; name: string; input: unknown }
+  /**
+   * One `tool_result` block of a `user` line: a tool's answer going back to
+   * the model. `structured` is the line's `tool_use_result` — the tool's own
+   * record of what it did, richer than the text the model reads — and is read
+   * only when the line carries a single result, since it is not per block.
+   */
+  | {
+      kind: "toolResult";
+      id: string;
+      isError: boolean;
+      content: string;
+      structured?: unknown;
+    }
   | { kind: "retry"; detail: string }
   /**
    * A tool call the session was not allowed to make.
@@ -165,7 +204,48 @@ export interface ParsedStream {
   sample?: string;
   /** Lines dropped for carrying `parent_tool_use_id`. See {@link parseStream}. */
   nested: number;
+  /**
+   * When the pending thinking block began streaming, on the caller's clock:
+   * the `now` of the read that brought its first `system/thinking_tokens`
+   * line.
+   *
+   * That line is the one sign on the stream that thinking is under way. The
+   * CLI prints it as the block's text arrives, so it comes after everything
+   * that is not thinking: request setup, the wait for a first token, an API
+   * retry's back-off, a compaction. The line before a block — the tool result
+   * it answers — comes before all of those, and timing from it is how a minute
+   * of retries reads as a minute of thought. The token line carries no time of
+   * its own, which is why the caller's clock stamps it.
+   *
+   * Cleared by every line that carries a `timestamp`, so a start belongs to
+   * the block that follows the last message and never to work before it. Handed
+   * back with `carry`, for the same reason, and kept on the caller's cursor.
+   */
+  thinkingFrom?: number;
 }
+
+/** What {@link parseStream} times a thinking block against. */
+export interface ParseClock {
+  /** When this read arrived, in epoch milliseconds. */
+  now: number;
+  /** {@link ParsedStream.thinkingFrom} from the previous read. */
+  thinkingFrom?: number;
+}
+
+/**
+ * How far a thinking line's arrival may be from its own `timestamp` for the
+ * block to be timed.
+ *
+ * Both ends of a block are timed by when they arrive, which is only the truth
+ * while the drain reads live. A drain that re-attached after a cut is handed
+ * what was printed meanwhile in one burst, and its arrival times are the
+ * replay's — so a block whose line arrived far from when the CLI stamped it
+ * reads "Thought", with no time. Locally a line arrives 5–31 ms after its
+ * stamp; a re-attach has been measured at about a second. A container clock
+ * this far from the Worker's degrades every block to no time, rather than to a
+ * wrong one.
+ */
+export const LIVE_SLACK_MS = 5_000;
 
 const EMPTY_USAGE: ClaudeCodeUsage = {
   input: 0,
@@ -200,31 +280,91 @@ function readUsage(raw: unknown): ClaudeCodeUsage {
 }
 
 /**
- * Flatten an `assistant` message into a line of prose and the tools it called.
+ * An `assistant` message as events, one per block, in the order it said them.
  *
- * `thinking` blocks are dropped. They are the model's private reasoning, they
- * are the largest thing in the stream by a wide margin, and the parent agent is
- * being shown progress rather than asked to review the subagent's deliberation.
+ * Per block rather than flattened, because the blocks are different things to
+ * a reader: prose, the model's reasoning, and each tool it called. A message
+ * that only calls tools is as much progress as one that narrates.
  */
-function readAssistant(message: Record<string, unknown>): {
-  text: string;
-  tools: string[];
-} {
+function readAssistant(
+  message: Record<string, unknown>,
+  thought: number | undefined
+): ClaudeCodeEvent[] {
+  const messageId = str(message.id);
   const content = Array.isArray(message.content)
     ? (message.content as AssistantBlock[])
     : [];
-  const text: string[] = [];
-  const tools: string[] = [];
+  const events: ClaudeCodeEvent[] = [];
 
   for (const block of content) {
     if (!asRecord(block)) continue;
-    const blockText = str(block.text);
-    if (block.type === "text" && blockText) text.push(blockText.trim());
-    const toolName = str(block.name);
-    if (block.type === "tool_use" && toolName) tools.push(toolName);
+    if (block.type === "text") {
+      // Trimmed only to ask whether it is empty: indentation is a code block's
+      // and trailing spaces a hard break's, so the event keeps it verbatim.
+      const text = str(block.text);
+      if (text?.trim()) events.push({ kind: "text", text });
+    } else if (block.type === "thinking") {
+      events.push({
+        kind: "thinking",
+        ...(messageId ? { messageId } : {}),
+        ...(thought === undefined ? {} : { durationMs: thought })
+      });
+    } else if (block.type === "tool_use") {
+      const id = str(block.id);
+      const name = str(block.name);
+      if (id && name)
+        events.push({ kind: "toolUse", id, name, input: block.input });
+    }
   }
 
-  return { text: text.join(" ").replace(/\s+/g, " ").trim(), tools };
+  return events;
+}
+
+/**
+ * A `user` line's tool results. Anything else a user line carries — the
+ * prompt echoed back, a hook's note — is not a tool's answer and says nothing.
+ */
+function readToolResults(
+  event: Record<string, unknown>,
+  message: Record<string, unknown>
+): ClaudeCodeEvent[] {
+  const content = Array.isArray(message.content) ? message.content : [];
+  const results = content.filter(
+    (block): block is Record<string, unknown> =>
+      asRecord(block)?.type === "tool_result"
+  );
+  const structured = results.length === 1 ? event.tool_use_result : undefined;
+  const events: ClaudeCodeEvent[] = [];
+  for (const block of results) {
+    const id = str(block.tool_use_id);
+    if (!id) continue;
+    events.push({
+      kind: "toolResult",
+      id,
+      isError: block.is_error === true,
+      content: resultText(block.content),
+      ...(structured === undefined || structured === null ? {} : { structured })
+    });
+  }
+  return events;
+}
+
+/**
+ * A `tool_result` block's content as text. It is a string, or a list of
+ * blocks of which only the text ones are readable here — an image a tool
+ * returned is named, not carried.
+ */
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      const record = asRecord(block);
+      if (record?.type === "text") return str(record.text) ?? "";
+      return record?.type ? `[${String(record.type)}]` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 /**
@@ -265,8 +405,13 @@ function readDenial(event: Record<string, unknown>): ClaudeCodeEvent {
  * the filter.
  *
  * `result` and `init` are never nested and are read unconditionally.
+ *
+ * `clock` is when this read arrived, and the pending thinking block's start
+ * from the previous read — see {@link ParsedStream.thinkingFrom}. Without it no
+ * block is timed.
  */
-export function parseStream(buffer: string): ParsedStream {
+export function parseStream(buffer: string, clock?: ParseClock): ParsedStream {
+  let thinkingFrom = clock?.thinkingFrom;
   const events: ClaudeCodeEvent[] = [];
   let skipped = 0;
   let nested = 0;
@@ -314,6 +459,8 @@ export function parseStream(buffer: string): ParsedStream {
       continue;
     }
 
+    const at = readTime(event.timestamp);
+
     switch (event.type) {
       case "system": {
         if (event.subtype === "init") {
@@ -323,15 +470,23 @@ export function parseStream(buffer: string): ParsedStream {
             break;
           }
           const model = str(event.model);
+          const cwd = str(event.cwd);
+          const permissionMode = str(event.permissionMode);
           events.push({
             kind: "init",
             sessionId,
-            ...(model ? { model } : {})
+            ...(model ? { model } : {}),
+            ...(cwd ? { cwd } : {}),
+            ...(permissionMode ? { permissionMode } : {})
           });
           break;
         }
         if (event.subtype === "permission_denied") {
           events.push(readDenial(event));
+          break;
+        }
+        if (event.subtype === "thinking_tokens") {
+          if (clock) thinkingFrom ??= clock.now;
           break;
         }
         if (event.subtype === "api_retry") {
@@ -361,19 +516,26 @@ export function parseStream(buffer: string): ParsedStream {
           skip(trimmed);
           break;
         }
-        const { text, tools } = readAssistant(message);
-        if (!text && tools.length === 0) break;
-        events.push({ kind: "assistant", text, tools });
+        // Ended by its own line's arrival, and trusted only on a live read.
+        const thought =
+          clock !== undefined &&
+          thinkingFrom !== undefined &&
+          at !== undefined &&
+          Math.abs(clock.now - at) <= LIVE_SLACK_MS
+            ? clock.now - thinkingFrom
+            : undefined;
+        events.push(...readAssistant(message, thought));
         break;
       }
 
       // `user` messages on this stream are tool *results* being fed back to the
-      // model, not anything a human said. They are large, they are already
-      // summarised by the assistant turn that follows, and the un-nested ones
-      // belong to the outer run's own tools — so they are deliberately not
-      // surfaced as progress.
-      case "user":
+      // model, not anything a human said — each one completes the card its call
+      // opened.
+      case "user": {
+        const message = asRecord(event.message);
+        if (message) events.push(...readToolResults(event, message));
         break;
+      }
 
       case "result": {
         events.push({ kind: "result", result: readResult(event) });
@@ -404,9 +566,18 @@ export function parseStream(buffer: string): ParsedStream {
       default:
         skip(trimmed);
     }
+
+    if (at !== undefined) thinkingFrom = undefined;
   }
 
-  return { events, carry, skipped, nested, ...(sample ? { sample } : {}) };
+  return {
+    events,
+    carry,
+    skipped,
+    nested,
+    ...(sample ? { sample } : {}),
+    ...(thinkingFrom === undefined ? {} : { thinkingFrom })
+  };
 }
 
 /**
@@ -446,6 +617,12 @@ function readRateLimit(
       ? { overageDisabledReason: str(info.overageDisabledReason) }
       : {})
   };
+}
+
+/** A line's `timestamp`, in epoch milliseconds, or `undefined`. */
+function readTime(value: unknown): number | undefined {
+  const ms = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 /** Whether a millisecond value is one `Date` can actually represent. */
@@ -531,7 +708,7 @@ function safeJson(value: unknown): string {
 const SAMPLE_MAX_CHARS = 200;
 
 /**
- * Turn events into progress notes the parent can post.
+ * Turn events into progress notes for the parent's transcript.
  *
  * **`from` is the number of notes already emitted for this run, and the key is
  * derived from it.** Not from the note's content, not from a clock, and not from
@@ -554,32 +731,31 @@ export function toProgress(
   let n = from;
 
   for (const event of events) {
-    const text = describe(event);
-    if (!text) continue;
-    out.push({ key: `claude:${n}`, text });
+    const note = describe(event);
+    if (!note) continue;
+    out.push({ key: `claude:${n}`, ...note });
     n++;
   }
 
   return out;
 }
 
-/** One line of progress, or nothing when the event is not worth a note. */
-function describe(event: ClaudeCodeEvent): string | undefined {
+/** One note, or nothing when the event is not worth one. */
+function describe(event: ClaudeCodeEvent): Omit<NoteData, "key"> | undefined {
   switch (event.kind) {
-    // Tool calls are not narration. A turn that only called tools said nothing
-    // the reader can act on, and it cost one Slack message per Bash/Read/Edit —
-    // nine of them for a one-line README edit. The tool names added nothing to
-    // the turns that *did* have text either, so the prefix goes with them.
-    //
-    // Same policy the in-process agents already apply in the gatekeeper
-    // (src/agents/shared/loop.ts: "Tool-only steps stay silent in Slack").
-    // Deliberately narrower than silencing the whole channel: `denied` and
-    // `retry` below stay, because they are the only evidence of a session that
-    // is being refused or throttled.
-    //
     // Never clipped. A plan or a report cut mid-sentence reads as complete.
-    case "assistant":
-      return event.text || undefined;
+    case "text":
+      return { text: event.text };
+    // Tool activity is a card, and a card never reaches the thread — core's
+    // `transcribeNote` keeps it on the transcript — so a session's every Bash,
+    // Read and Edit is shown without one message each in front of the person.
+    // `./cards.ts` holds how each tool reads.
+    case "toolUse":
+      return toolCallCard(event.id, event.name, event.input);
+    case "toolResult":
+      return toolResultCard(event);
+    case "thinking":
+      return thinkingCard(event.durationMs, event.messageId);
     case "denied":
       // The one progress note that is more useful than the session's own
       // account of itself. A refused tool call is invisible in the transcript —
@@ -587,12 +763,14 @@ function describe(event: ClaudeCodeEvent): string | undefined {
       // parent sees a subagent being resourceful and never learns it was fenced
       // in. Named tool first, because that is what distinguishes a broken
       // configuration from a deny rule doing its job.
-      return `permission denied${event.tool ? ` for ${event.tool}` : ""}: ${event.reason}`;
+      return {
+        text: `permission denied${event.tool ? ` for ${event.tool}` : ""}: ${event.reason}`
+      };
     case "retry":
       // Surfaced deliberately. This is what a budget refusal from the egress
       // gateway looks like from inside the container, and a run that ends
       // shortly afterwards is explained by it.
-      return `retrying the model call: ${event.detail}`;
+      return { text: `retrying the model call: ${event.detail}` };
     case "rateLimit":
       /**
        * Silent while the bucket is fine, which is every line of a healthy
@@ -606,17 +784,20 @@ function describe(event: ClaudeCodeEvent): string | undefined {
        */
       return event.info.status === RATE_LIMIT_OK
         ? undefined
-        : `the ${event.info.rateLimitType ?? "subscription"} limit reports "${event.info.status}"` +
-            (event.info.resetsAt === undefined
-              ? ""
-              : ` until ${new Date(event.info.resetsAt * 1000).toISOString()}`);
-    // `init`'s session id is a handle, not news: it reaches the host on the
-    // drain's cursor — see `DrainCursor.sessionId` in ./run.ts — where something
-    // can record it and resume with it. `result` is the terminal outcome the
-    // caller reports itself.
+        : {
+            text:
+              `the ${event.info.rateLimitType ?? "subscription"} limit reports "${event.info.status}"` +
+              (event.info.resetsAt === undefined
+                ? ""
+                : ` until ${new Date(event.info.resetsAt * 1000).toISOString()}`)
+          };
+    // `init`'s session id is a handle as well as news: it reaches the host on
+    // the drain's cursor — see `DrainCursor.sessionId` in ./run.ts — where
+    // something can record it and resume with it.
     case "init":
+      return initCard(event);
     case "result":
-      return undefined;
+      return resultCard(event.result);
   }
 }
 

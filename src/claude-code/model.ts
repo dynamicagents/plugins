@@ -1,4 +1,6 @@
 import type { LanguageModel } from "ai";
+import type { ArtifactEntryDetail } from "@dynamicagents/core/artifacts";
+import type { NoteData } from "@dynamicagents/core/subagent";
 import { isPlatformTransientError } from "agents";
 import type { ClaudeCodeConfig, PermissionMode } from "./config.js";
 import type { ClaudeCodeResult, RateLimitInfo } from "./events.js";
@@ -130,8 +132,16 @@ export interface ClaudeCodeModelOptions {
    * is the place to say what changed and nothing the session already holds.
    */
   resume?: { sessionId: string; fork?: boolean };
-  /** Files one note on the parent's transcript: the sub-agent's `note`. */
-  note: (key: string, text: string) => Promise<void>;
+  /**
+   * Files one note on the parent's transcript: the sub-agent's `note`. A tool
+   * call, its result and the session's own start and end arrive with a card —
+   * see {@link file://./cards.ts Card}.
+   */
+  note: (
+    key: string,
+    text: string,
+    detail?: ArtifactEntryDetail
+  ) => Promise<void>;
   /**
    * The session's handle, as soon as there is one and again when the session
    * ends — see {@link SessionRecord}.
@@ -232,8 +242,8 @@ export function claudeCodeModel(
      * — or with its own follow-up's, which counts from zero again.
      */
     const sinks = {
-      onProgress: (note: { key: string; text: string }) =>
-        options.note(`${current}:${note.key}`, note.text),
+      onProgress: (note: NoteData) =>
+        options.note(`${current}:${note.key}`, note.text, note.detail),
       // The drain offers a cursor the moment the session id appears, which is
       // what makes this the earliest the handle can be recorded — seconds in,
       // rather than at the end a killed session never reaches.

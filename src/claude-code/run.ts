@@ -499,6 +499,11 @@ export interface DrainCursor {
    * event can land either side of an eviction.
    */
   stderr?: string;
+  /**
+   * When the pending thinking block began streaming, on this drain's clock —
+   * see `ParsedStream.thinkingFrom` in `./events.ts`.
+   */
+  thinkingFrom?: number;
 }
 
 /** A cursor for a session that has not started yet. */
@@ -838,6 +843,7 @@ export async function drainRun(
   const progress: NoteData[] = [];
   let emitted = cursor.emitted;
   let buffer = cursor.carry;
+  let thinkingFrom = cursor.thinkingFrom;
   let seq = cursor.seq;
   let result = cursor.result;
   // This drain's reading only — see `DrainOutcome`. Starting undefined also
@@ -883,8 +889,12 @@ export async function drainRun(
    * most one incomplete line.
    */
   const absorb = (): void => {
-    const parsed = parseStream(buffer);
+    const parsed = parseStream(buffer, {
+      now: now(),
+      ...(thinkingFrom === undefined ? {} : { thinkingFrom })
+    });
     buffer = parsed.carry;
+    thinkingFrom = parsed.thinkingFrom;
     for (const event of parsed.events) {
       if (event.kind === "result") result = event.result;
       // The first one only, and it is the id of whatever this drain is actually
@@ -973,6 +983,7 @@ export async function drainRun(
     seq,
     carry: buffer,
     emitted,
+    ...(thinkingFrom === undefined ? {} : { thinkingFrom }),
     ...(sessionId ? { sessionId } : {}),
     ...(result ? { result } : {}),
     ...(stderr ? { stderr } : {})
