@@ -418,7 +418,9 @@ export function repo(config: RepoConfig): AgentPlugin {
     has("repo_worktrees") &&
       "`repo_worktrees` lists the worktrees your writing sub-agents committed in — each one's branch, whether a session is still in it, whether its commits are pushed — and releases one you will not keep.",
     has("repo_worktree") &&
-      "`repo_worktree` points every repo tool and your file reads at the worktree holding a branch, so you review — `repo_diff` with `base` shows what its commits add — push and open the pull request from there; call it with no branch to come back to your own checkout."
+      (has("repo_diff") && has("repo_push") && has("repo_open_pr")
+        ? "`repo_worktree` points every repo tool and your file reads at the worktree holding a branch, so you review — `repo_diff` with `base` shows what its commits add — push and open the pull request from there; call it with no branch to come back to your own checkout."
+        : "`repo_worktree` points every repo tool and your file reads at the worktree holding a branch; call it with no branch to come back to your own checkout.")
   ];
   const lines = [
     has("repo_clone") &&
@@ -427,9 +429,19 @@ export function repo(config: RepoConfig): AgentPlugin {
           ? " — but if it has uncommitted changes it is left as-is, and you should read them with `repo_diff` before deciding what to do."
           : "."),
     has("repo_fetch") &&
-      "`repo_fetch` brings a checkout's remote branches in without touching its tree — how you review a branch someone else pushed, as `origin/<branch>` with `repo_diff`.",
-    (has("repo_status") || has("repo_diff")) &&
+      "`repo_fetch` brings a checkout's remote branches in without touching its tree" +
+        (has("repo_diff")
+          ? " — how you review a branch someone else pushed, as `origin/<branch>` with `repo_diff`."
+          : "."),
+    has("repo_status") &&
+      has("repo_diff") &&
       "`repo_status` and `repo_diff` show what you have changed — read the diff before committing. On a large change call `repo_diff` with `stat: true` first to see which files moved, then read the ones that matter; output is truncated from the middle when it is large.",
+    has("repo_status") &&
+      !has("repo_diff") &&
+      "`repo_status` shows what you have changed.",
+    !has("repo_status") &&
+      has("repo_diff") &&
+      "`repo_diff` shows what changed. On a large change call it with `stat: true` first to see which files moved, then read the ones that matter; output is truncated from the middle when it is large.",
     has("repo_commit") && "`repo_commit` stages everything and commits.",
     has("repo_push") &&
       "`repo_push` pushes a branch the checkout holds, or creates one at the current commit. It refuses the default branch and other protected names, and it refuses a branch that adds no commit the remote does not already have — that is not negotiable.",
@@ -447,6 +459,9 @@ export function repo(config: RepoConfig): AgentPlugin {
         (has("repo_pr_thread_reply")
           ? " `repo_pr_thread_reply` answers one and resolves it. Answer every thread: say what you changed and where, or why you did not, and resolve it either way so the record says what happened."
           : ""),
+    has("repo_pr_thread_reply") &&
+      !has("repo_pr_threads") &&
+      "`repo_pr_thread_reply` answers a review thread and resolves it. Answer every thread: say what you changed and where, or why you did not, and resolve it either way so the record says what happened.",
     has("repo_pr_checks") &&
       "`repo_pr_checks` says how a pull request's CI stands on its latest commit: what is still running, what failed and where to read why, and what passed.",
     ...(worktrees || [])

@@ -123,9 +123,13 @@ export function checkTools(ctx: RepoContext): ToolSet {
           total_count?: number;
           check_runs?: CheckRun[];
         };
+        const statusData = statuses.data as {
+          total_count?: number;
+          statuses?: CommitStatus[];
+        };
         const checks = readChecks(
           runData.check_runs ?? [],
-          (statuses.data as { statuses?: CommitStatus[] }).statuses ?? []
+          statusData.statuses ?? []
         );
         if (checks.length === 0) {
           return (
@@ -138,9 +142,18 @@ export function checkTools(ctx: RepoContext): ToolSet {
         const failed = checks.filter((c) => c.outcome === "failed");
         const pending = checks.filter((c) => c.outcome === "pending");
         const passed = checks.length - failed.length - pending.length;
-        // A full page means the newest runs may be past it, and those are the
-        // ones a caller polls for, so an unread page is never "all passed".
-        const truncated = (runData.total_count ?? 0) > FORGE_PAGE_SIZE;
+        // Either API can run past a page, and what is past it may be the one
+        // failure, so an unread page is never "all passed".
+        const unread = [
+          [runData.total_count ?? 0, "check runs"],
+          [statusData.total_count ?? 0, "commit statuses"]
+        ]
+          .filter(([total]) => (total as number) > FORGE_PAGE_SIZE)
+          .map(
+            ([total, what]) =>
+              `Only the first ${FORGE_PAGE_SIZE} of ${total} ${what} were read.`
+          );
+        const truncated = unread.length > 0;
 
         return bounded(
           [
@@ -148,12 +161,7 @@ export function checkTools(ctx: RepoContext): ToolSet {
               `${pending.length} still running, ${passed} passed.`,
             ...(failed.length ? ["", "Failed:", listed(failed)] : []),
             ...(pending.length ? ["", "Still running:", listed(pending)] : []),
-            ...(truncated
-              ? [
-                  "",
-                  `Only the first ${FORGE_PAGE_SIZE} of ${runData.total_count} check runs were read.`
-                ]
-              : []),
+            ...(truncated ? ["", ...unread] : []),
             ...(!failed.length && !pending.length && !truncated
               ? ["", "Every check has finished and passed."]
               : [])

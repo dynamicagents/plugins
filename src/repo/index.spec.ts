@@ -3014,6 +3014,22 @@ describe("a pull request's checks", () => {
     expect(result).not.toContain("Every check has finished");
   });
 
+  it("does not call a truncated read of commit statuses all passed", async () => {
+    const result = await checks({
+      ...pr,
+      [`/commits/${SHA}/check-runs`]: { total_count: 0, check_runs: [] },
+      [`/commits/${SHA}/status`]: {
+        total_count: 140,
+        statuses: [{ context: "ci/a", state: "success" }]
+      }
+    });
+
+    expect(result).toContain(
+      "Only the first 100 of 140 commit statuses were read."
+    );
+    expect(result).not.toContain("Every check has finished");
+  });
+
   it("says when nothing has reported yet", async () => {
     const result = await checks({
       ...pr,
@@ -3087,6 +3103,18 @@ describe("choosing the tools", () => {
     expect(context).toContain("`repo_pr_checks`");
     expect(context).not.toContain("Never push");
   });
+
+  /** A line about one tool may lean on another only when that one is offered too. */
+  it.each(REPO_TOOL_NAMES.map((name) => [name]))(
+    "names no other tool when %s is offered alone",
+    async (name) => {
+      const context = await contextOf(plugin([name]));
+      expect(context).toContain(`\`${name}\``);
+      for (const other of REPO_TOOL_NAMES.filter((o) => o !== name)) {
+        expect(context).not.toContain(`\`${other}\``);
+      }
+    }
+  );
 });
 
 describe("an origin the host reads", () => {
