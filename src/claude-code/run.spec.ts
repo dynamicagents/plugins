@@ -519,7 +519,11 @@ describe("drainRun", () => {
     expect(outcome.exitCode).toBe(0);
     expect(outcome.result?.costUsd).toBe(1.25);
     expect(outcome.cursor.seq).toBe(3);
-    expect(outcome.progress.map((p) => p.key)).toEqual(["claude:0"]);
+    // The narration, then the session's end as a card.
+    expect(outcome.progress.map((p) => p.key)).toEqual([
+      "claude:0",
+      "claude:1"
+    ]);
   });
 
   /**

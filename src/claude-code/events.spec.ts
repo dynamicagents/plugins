@@ -92,9 +92,7 @@ describe("parseStream", () => {
     const rest = `{"content":[{"type":"text","text":"done"}]}}\n`;
     const second = parseStream(first.carry + rest);
 
-    expect(second.events).toEqual([
-      { kind: "assistant", text: "done", tools: [] }
-    ]);
+    expect(second.events).toEqual([{ kind: "text", text: "done" }]);
   });
 
   /**
@@ -111,56 +109,115 @@ describe("parseStream", () => {
 
     const { events, nested } = parseStream(buffer);
 
-    expect(events.map((e) => e.kind === "assistant" && e.text)).toEqual([
+    expect(events.map((e) => e.kind === "text" && e.text)).toEqual([
       "outer work",
       "more outer work"
     ]);
     expect(nested).toBe(1);
   });
 
-  it("drops thinking blocks but keeps the text beside them", () => {
+  it("reads every block of a turn, in the order it said them", () => {
     const buffer = line({
       type: "assistant",
       message: {
         content: [
-          { type: "thinking", thinking: "a long private deliberation" },
-          { type: "text", text: "the visible part" }
+          { type: "thinking", thinking: " a deliberation " },
+          { type: "text", text: "editing\n\n- one\n- two" },
+          { type: "tool_use", id: "toolu_1", name: "Edit", input: { a: 1 } },
+          { type: "tool_use", id: "toolu_2", name: "Bash", input: {} },
+          // No id: nothing could complete its card.
+          { type: "tool_use", name: "Read", input: {} }
         ]
       }
     });
 
     expect(parseStream(buffer).events).toEqual([
-      { kind: "assistant", text: "the visible part", tools: [] }
+      { kind: "thinking", text: "a deliberation" },
+      // Verbatim: it is markdown, and its line breaks are its structure.
+      { kind: "text", text: "editing\n\n- one\n- two" },
+      { kind: "toolUse", id: "toolu_1", name: "Edit", input: { a: 1 } },
+      { kind: "toolUse", id: "toolu_2", name: "Bash", input: {} }
     ]);
   });
 
-  it("names the tools an assistant turn called", () => {
-    const buffer = line({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "text", text: "editing" },
-          { type: "tool_use", name: "Edit", input: {} },
-          { type: "tool_use", name: "Bash", input: {} }
-        ]
-      }
+  describe("a tool result coming back", () => {
+    it("is read as a string or as text blocks, with is_error", () => {
+      const buffer =
+        line({
+          type: "user",
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: "toolu_1", content: "ok" }
+            ]
+          }
+        }) +
+        line({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_2",
+                is_error: true,
+                content: [
+                  { type: "text", text: "first" },
+                  { type: "image", source: {} },
+                  { type: "text", text: "second" }
+                ]
+              }
+            ]
+          }
+        });
+
+      expect(parseStream(buffer).events).toEqual([
+        { kind: "toolResult", id: "toolu_1", isError: false, content: "ok" },
+        {
+          kind: "toolResult",
+          id: "toolu_2",
+          isError: true,
+          content: "first\n[image]\nsecond"
+        }
+      ]);
     });
 
-    expect(parseStream(buffer).events).toEqual([
-      { kind: "assistant", text: "editing", tools: ["Edit", "Bash"] }
-    ]);
-  });
+    it("carries the tool's own record, when the line holds one result", () => {
+      const record = { stdout: "hi", stderr: "", interrupted: false };
+      const one = line({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "hi" }
+          ]
+        },
+        tool_use_result: record
+      });
+      const two = line({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "a" },
+            { type: "tool_result", tool_use_id: "toolu_2", content: "b" }
+          ]
+        },
+        tool_use_result: record
+      });
 
-  /**
-   * `user` lines on this stream are tool results being fed back to the model —
-   * large, and already summarised by the assistant turn that follows.
-   */
-  it("says nothing about tool results coming back", () => {
-    const buffer = line({
-      type: "user",
-      message: { content: [{ type: "tool_result", content: "ok" }] }
+      expect(parseStream(one).events).toEqual([
+        expect.objectContaining({ id: "toolu_1", structured: record })
+      ]);
+      // Not per block, so it belongs to neither of two.
+      expect(
+        parseStream(two).events.some((event) => "structured" in event)
+      ).toBe(false);
     });
-    expect(parseStream(buffer).events).toEqual([]);
+
+    it("says nothing for a user line that is not a tool's answer", () => {
+      const buffer = line({
+        type: "user",
+        message: { content: [{ type: "text", text: "the prompt" }] }
+      });
+      expect(parseStream(buffer).events).toEqual([]);
+    });
   });
 
   it("surfaces an api_retry, which is what a budget refusal looks like", () => {
@@ -439,44 +496,85 @@ describe("toProgress", () => {
     expect(first.map((p) => p.key)).toEqual(["claude:4", "claude:5"]);
   });
 
-  it("says nothing for init or result, which the caller reports itself", () => {
+  it("marks a session's start and end as cards", () => {
     const { events } = parseStream(init() + line(RESULT));
-    expect(toProgress(events, 0)).toEqual([]);
-  });
-
-  it("drops the tool names from a turn that also has text", () => {
-    const buffer = line({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "text", text: "checking" },
-          { type: "tool_use", name: "Bash", input: {} },
-          { type: "tool_use", name: "Bash", input: {} }
-        ]
+    expect(toProgress(events, 0)).toEqual([
+      {
+        key: "claude:0",
+        text: "Session started · opus",
+        detail: { title: "Session" }
+      },
+      {
+        key: "claude:1",
+        text: "Session finished · 1 turn · 15s",
+        detail: { title: "Session", status: "ok" }
       }
-    });
-
-    // The tool names add nothing a reader can act on; only the prose posts.
-    expect(toProgress(parseStream(buffer).events, 0)[0]?.text).toBe("checking");
+    ]);
   });
 
   /**
-   * A turn that only calls tools — no text block at all — must produce no note.
-   * Rendering the tool name instead posts a bare `[Bash]` per call, one Slack
-   * message each, with nothing a reader can act on.
+   * The seven silent minutes this exists for: a session reading and searching
+   * for a long stretch says nothing in prose, and every one of those calls is
+   * the progress a reader came to the transcript for. Each is a card — which
+   * never reaches the thread, so this is not one Slack message per call.
    */
-  it("says nothing for a turn that only calls tools", () => {
-    const buffer = line({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "tool_use", name: "Bash", input: {} },
-          { type: "tool_use", name: "Read", input: {} }
-        ]
-      }
-    });
+  it("files a card per call for a turn that only calls tools, and its result completes it", () => {
+    const buffer =
+      line({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_1",
+              name: "Bash",
+              input: { command: "npm test", description: "Run the suite" }
+            },
+            {
+              type: "tool_use",
+              id: "toolu_2",
+              name: "Read",
+              input: { file_path: "src/a.ts" }
+            }
+          ]
+        }
+      }) +
+      line({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "1 passed" }
+          ]
+        },
+        tool_use_result: { stdout: "1 passed", stderr: "", interrupted: false }
+      });
 
-    expect(toProgress(parseStream(buffer).events, 0)).toEqual([]);
+    expect(toProgress(parseStream(buffer).events, 0)).toEqual([
+      {
+        key: "claude:0",
+        text: "Run the suite",
+        detail: {
+          ref: "toolu_1",
+          status: "running",
+          title: "Bash",
+          sections: [{ label: "Command", body: "npm test", format: "code" }]
+        }
+      },
+      {
+        key: "claude:1",
+        text: "src/a.ts",
+        detail: { ref: "toolu_2", status: "running", title: "Read" }
+      },
+      {
+        key: "claude:2",
+        text: "1 passed",
+        detail: {
+          ref: "toolu_1",
+          status: "ok",
+          sections: [{ label: "Output", body: "1 passed", format: "code" }]
+        }
+      }
+    ]);
   });
 
   it("posts a long turn whole", () => {
@@ -484,6 +582,7 @@ describe("toProgress", () => {
     const note = toProgress(parseStream(assistant(text)).events, 0);
 
     expect(note[0]!.text).toBe(text);
+    expect(note[0]!.detail).toBeUndefined();
   });
 
   it("posts a long denial reason and retry detail whole", () => {
