@@ -4,8 +4,8 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import {
   actionTask,
-  FORGE_ACTION_TIMEOUT_MS,
-  FORGE_PAGE_SIZE,
+  GITHUB_ACTION_TIMEOUT_MS,
+  GITHUB_PAGE_SIZE,
   sha256
 } from "./context.js";
 import type { RepoContext } from "./context.js";
@@ -15,7 +15,7 @@ import type { RepoContext } from "./context.js";
 /**
  * How many pages of review threads one `repo_pr_threads` call will walk.
  *
- * A bound rather than a full walk, for the reason {@link FORGE_PAGE_SIZE} is one
+ * A bound rather than a full walk, for the reason {@link GITHUB_PAGE_SIZE} is one
  * — but unlike the single page everything else here takes, threads genuinely
  * have to page: a review long enough to spill one puts its newest threads on the
  * last page, and those are exactly the ones an agent was sent to answer. So this
@@ -80,7 +80,7 @@ const REVIEW_THREADS_QUERY = `
   query($owner:String!,$repo:String!,$number:Int!,$after:String){
     repository(owner:$owner,name:$repo){
       pullRequest(number:$number){
-        reviewThreads(first:${FORGE_PAGE_SIZE},after:$after){
+        reviewThreads(first:${GITHUB_PAGE_SIZE},after:$after){
           pageInfo{hasNextPage endCursor}
           nodes{
             id isResolved isOutdated path line
@@ -106,7 +106,7 @@ const REVIEW_REQUESTS_QUERY = `
   query($owner:String!,$repo:String!,$number:Int!){
     repository(owner:$owner,name:$repo){
       pullRequest(number:$number){
-        reviewRequests(first:${FORGE_PAGE_SIZE}){
+        reviewRequests(first:${GITHUB_PAGE_SIZE}){
           nodes{
             requestedReviewer{
               ... on User{login}
@@ -175,7 +175,7 @@ function renderThread(t: ReviewThread): string {
 /**
  * The owner and repository as their own names, rather than as REST path segments.
  *
- * {@link file://./context.ts forgeRepo} percent-encodes both, because that is
+ * {@link file://./context.ts githubRepo} percent-encodes both, because that is
  * what makes a path safe. A GraphQL *variable* is not a path — it is compared
  * against the repository's actual name — so an encoded one would silently stop
  * matching the moment a name contains a character worth encoding.
@@ -223,7 +223,7 @@ function sameReviewer(a: string, b: string): boolean {
 }
 
 export function reviewTools(ctx: RepoContext): ToolSet {
-  const { bounded, forge, forgeGraphql, forgeRepo } = ctx;
+  const { bounded, github, githubGraphql, githubRepo } = ctx;
 
   return {
     repo_pr_review_status: tool({
@@ -240,7 +240,7 @@ export function reviewTools(ctx: RepoContext): ToolSet {
           )
       }),
       execute: async ({ dir, number, reviewer }) => {
-        const target = await forgeRepo(dir);
+        const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
         const who = reviewer ?? "Copilot";
@@ -251,7 +251,7 @@ export function reviewTools(ctx: RepoContext): ToolSet {
         // asked for, so "still requested" is true now and "has reviewed" is
         // about the past. Reading them the other way round reports a re-review
         // as finished the moment it is asked for.
-        const requested = await forgeGraphql(
+        const requested = await githubGraphql(
           "repo_pr_review_status",
           REVIEW_REQUESTS_QUERY,
           { owner, repo, number }
@@ -280,9 +280,9 @@ export function reviewTools(ctx: RepoContext): ToolSet {
         if (pending)
           return `${who} has been asked to review #${number} and has not finished.`;
 
-        const reviews = await forge(
+        const reviews = await github(
           "repo_pr_review_status",
-          `/repos/${owner}/${repo}/pulls/${number}/reviews?per_page=${FORGE_PAGE_SIZE}`
+          `/repos/${owner}/${repo}/pulls/${number}/reviews?per_page=${GITHUB_PAGE_SIZE}`
         );
         if (!reviews.ok) return bounded(reviews.message);
         const all = reviews.data as {
@@ -308,9 +308,9 @@ export function reviewTools(ctx: RepoContext): ToolSet {
           // review being waited for. So a truncated read cannot answer the
           // question at all, and must not answer it with "waiting will not help":
           // that is the one reply a caller ends its polling on.
-          if (all.length >= FORGE_PAGE_SIZE)
+          if (all.length >= GITHUB_PAGE_SIZE)
             return bounded(
-              `#${number} has at least ${FORGE_PAGE_SIZE} reviews and only the oldest were read, ` +
+              `#${number} has at least ${GITHUB_PAGE_SIZE} reviews and only the oldest were read, ` +
                 `so whether ${who} has reviewed it is unknown. Read the pull request itself with repo_pr_view, ` +
                 `or look for threads with repo_pr_threads.`
             );
@@ -339,7 +339,7 @@ export function reviewTools(ctx: RepoContext): ToolSet {
           .describe("Include threads already resolved. Defaults to false.")
       }),
       execute: async ({ dir, number, includeResolved }) => {
-        const target = await forgeRepo(dir);
+        const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = decoded(target);
 
@@ -358,7 +358,7 @@ export function reviewTools(ctx: RepoContext): ToolSet {
           }
           const answered:
             { ok: true; data: unknown } | { ok: false; message: string } =
-            await forgeGraphql("repo_pr_threads", REVIEW_THREADS_QUERY, {
+            await githubGraphql("repo_pr_threads", REVIEW_THREADS_QUERY, {
               owner,
               repo,
               number,
@@ -410,13 +410,13 @@ export function reviewTools(ctx: RepoContext): ToolSet {
 
 /**
  * Answering a thread, as a Think action — see
- * {@link file://./tools-forge.ts forgeActions} for why every failure is
+ * {@link file://./tools-pr.ts prActions} for why every failure is
  * thrown. The one outcome returned short of success is a reply that landed on
  * a thread that did not resolve: that reply must never be sent again, so it is
  * settled, and the resolve-only call it asks for is a different key.
  */
 export function reviewActions(ctx: RepoContext): Record<string, Action> {
-  const { bounded, forgeGraphql, forgeRepo } = ctx;
+  const { bounded, githubGraphql, githubRepo } = ctx;
 
   const replyInput = z.object({
     dir: z.string().describe("The checkout directory"),
@@ -442,24 +442,24 @@ export function reviewActions(ctx: RepoContext): Record<string, Action> {
       description:
         "Answer one review thread on a pull request in the repository you have checked out, and resolve it. Reply with what you changed and where, or with why you did not — either way the thread ends resolved unless you say otherwise. The same reply to one thread twice in one task is sent once.",
       inputSchema: replyInput,
-      timeoutMs: FORGE_ACTION_TIMEOUT_MS,
+      timeoutMs: GITHUB_ACTION_TIMEOUT_MS,
       // The thread and the resolve flag as well as the body, or the same reply
       // to two threads — "Fixed." — would be one key.
       idempotencyKey: async ({ input, ctx: turn }) =>
         `${actionTask(turn)}:${input.dir}#${input.number}:${input.threadId}:` +
         `${await sha256(input.body ?? "")}:${input.resolve ?? true}`,
       execute: async ({ dir, number, threadId, body, resolve }) => {
-        const target = await forgeRepo(dir);
+        const target = await githubRepo(dir);
         if ("refusal" in target) throw new Error(target.refusal);
         const { owner, repo } = decoded(target);
 
         // A thread id is a global node id, so unlike every other tool here this
         // one takes something that can name a pull request in a repository
-        // nobody checked out — the reach `forgeRepo` exists to prevent. Checked
+        // nobody checked out — the reach `githubRepo` exists to prevent. Checked
         // rather than trusted: the id came from a tool result the model read,
         // and a model that misremembers one must not write into a stranger's
         // review.
-        const belongs = await forgeGraphql(
+        const belongs = await githubGraphql(
           "repo_pr_thread_reply",
           THREAD_OWNER_QUERY,
           { id: threadId }
@@ -489,7 +489,7 @@ export function reviewActions(ctx: RepoContext): Record<string, Action> {
             throw new Error(
               "nothing to do: give a body to reply, or leave resolve unset to resolve the thread"
             );
-          const only = await forgeGraphql(
+          const only = await githubGraphql(
             "repo_pr_thread_reply",
             THREAD_RESOLVE_MUTATION,
             { id: threadId }
@@ -501,7 +501,7 @@ export function reviewActions(ctx: RepoContext): Record<string, Action> {
           return `resolved ${threadId}`;
         }
 
-        const replied = await forgeGraphql(
+        const replied = await githubGraphql(
           "repo_pr_thread_reply",
           THREAD_REPLY_MUTATION,
           { id: threadId, body }
@@ -529,7 +529,7 @@ export function reviewActions(ctx: RepoContext): Record<string, Action> {
         // thread that was answered and not resolved needs resolving, and one
         // that was never answered needs answering. Saying "it failed" covers
         // both and tells the model to do the wrong one.
-        const resolved = await forgeGraphql(
+        const resolved = await githubGraphql(
           "repo_pr_thread_reply",
           THREAD_RESOLVE_MUTATION,
           { id: threadId }

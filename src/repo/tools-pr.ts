@@ -4,15 +4,15 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import {
   actionTask,
-  FORGE_ACTION_TIMEOUT_MS,
-  FORGE_PAGE_SIZE,
+  GITHUB_ACTION_TIMEOUT_MS,
+  GITHUB_PAGE_SIZE,
   sha256
 } from "./context.js";
 import type { RepoContext } from "./context.js";
 
-/** The forge's REST surface: pull requests, issues and their comments. */
-export function forgeTools(ctx: RepoContext): ToolSet {
-  const { bounded, forge, forgeRepo } = ctx;
+/** GitHub's REST surface: pull requests, issues and their comments. */
+export function prTools(ctx: RepoContext): ToolSet {
+  const { bounded, github, githubRepo } = ctx;
 
   return {
     repo_open_pr: tool({
@@ -35,7 +35,7 @@ export function forgeTools(ctx: RepoContext): ToolSet {
         // writes. A repository named at the call site is bounded only by the
         // host allowlist, so an agent talked into naming one could open a pull
         // request on anything the token can write to.
-        const target = await forgeRepo(dir);
+        const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
 
@@ -50,7 +50,7 @@ export function forgeTools(ctx: RepoContext): ToolSet {
             : `${decodeURIComponent(owner)}:${head}`,
           base
         });
-        const existing = await forge(
+        const existing = await github(
           "repo_open_pr",
           `/repos/${owner}/${repo}/pulls?${filter}`
         );
@@ -61,7 +61,7 @@ export function forgeTools(ctx: RepoContext): ToolSet {
         if (open?.html_url)
           return `already open, nothing new was created: ${open.html_url}`;
 
-        const opened = await forge(
+        const opened = await github(
           "repo_open_pr",
           `/repos/${owner}/${repo}/pulls`,
           { method: "POST", body: { title, head, base, body } }
@@ -90,14 +90,14 @@ export function forgeTools(ctx: RepoContext): ToolSet {
         number: z.number().int().positive().describe("Issue or PR number")
       }),
       execute: async ({ dir, number }) => {
-        const target = await forgeRepo(dir);
+        const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
 
         // The issues endpoint, deliberately, even for a pull request: GitHub
         // models every PR as an issue, and this is the one that carries the
         // discussion. `repo_pr_view` is for the parts that are only a PR's.
-        const issue = await forge(
+        const issue = await github(
           "repo_issue_view",
           `/repos/${owner}/${repo}/issues/${number}`
         );
@@ -110,9 +110,9 @@ export function forgeTools(ctx: RepoContext): ToolSet {
           pull_request?: unknown;
         };
 
-        const comments = await forge(
+        const comments = await github(
           "repo_issue_view",
-          `/repos/${owner}/${repo}/issues/${number}/comments?per_page=${FORGE_PAGE_SIZE}`
+          `/repos/${owner}/${repo}/issues/${number}/comments?per_page=${GITHUB_PAGE_SIZE}`
         );
         // A failure here is not a failure of the tool: the issue itself was
         // read, and half an answer beats none.
@@ -123,7 +123,7 @@ export function forgeTools(ctx: RepoContext): ToolSet {
         // this thread is what the model reasons from: comments arrive oldest
         // first, so the ones it cannot see are the most recent — the review
         // feedback, on the pull request busy enough to have overflowed.
-        const moreComments = thread.length >= FORGE_PAGE_SIZE;
+        const moreComments = thread.length >= GITHUB_PAGE_SIZE;
 
         return bounded(
           [
@@ -139,7 +139,7 @@ export function forgeTools(ctx: RepoContext): ToolSet {
             ...(comments.ok ? [] : [`\n(comments could not be read)`]),
             ...(moreComments
               ? [
-                  `\n(showing the first ${FORGE_PAGE_SIZE} comments; the thread is ` +
+                  `\n(showing the first ${GITHUB_PAGE_SIZE} comments; the thread is ` +
                     `longer, and the newest are not among them)`
                 ]
               : [])
@@ -156,11 +156,11 @@ export function forgeTools(ctx: RepoContext): ToolSet {
         number: z.number().int().positive().describe("Pull request number")
       }),
       execute: async ({ dir, number }) => {
-        const target = await forgeRepo(dir);
+        const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
 
-        const pr = await forge(
+        const pr = await github(
           "repo_pr_view",
           `/repos/${owner}/${repo}/pulls/${number}`
         );
@@ -176,14 +176,14 @@ export function forgeTools(ctx: RepoContext): ToolSet {
           html_url?: string;
         };
 
-        const files = await forge(
+        const files = await github(
           "repo_pr_view",
-          `/repos/${owner}/${repo}/pulls/${number}/files?per_page=${FORGE_PAGE_SIZE}`
+          `/repos/${owner}/${repo}/pulls/${number}/files?per_page=${GITHUB_PAGE_SIZE}`
         );
         const changed = (
           files.ok && Array.isArray(files.data) ? files.data : []
         ) as { filename?: string; additions?: number; deletions?: number }[];
-        const moreFiles = changed.length >= FORGE_PAGE_SIZE;
+        const moreFiles = changed.length >= GITHUB_PAGE_SIZE;
 
         return bounded(
           [
@@ -213,7 +213,7 @@ export function forgeTools(ctx: RepoContext): ToolSet {
                 : "  (changed files could not be read)",
             ...(moreFiles
               ? [
-                  `\n(showing the first ${FORGE_PAGE_SIZE} files; this pull request ` +
+                  `\n(showing the first ${GITHUB_PAGE_SIZE} files; this pull request ` +
                     `touches more)`
                 ]
               : [])
@@ -225,15 +225,15 @@ export function forgeTools(ctx: RepoContext): ToolSet {
 }
 
 /**
- * The forge writes a recovered turn must not repeat, as Think actions.
+ * The GitHub writes a recovered turn must not repeat, as Think actions.
  *
  * Every failure is thrown rather than returned. Think settles what an action
  * returns and replays it for the life of the key, so a refusal returned as a
  * string would answer every retry in the task; a throw releases the key, and
  * the retry runs.
  */
-export function forgeActions(ctx: RepoContext): Record<string, Action> {
-  const { bounded, forge, forgeRepo } = ctx;
+export function prActions(ctx: RepoContext): Record<string, Action> {
+  const { bounded, github, githubRepo } = ctx;
 
   const commentInput = z.object({
     dir: z.string().describe("The checkout directory"),
@@ -250,15 +250,15 @@ export function forgeActions(ctx: RepoContext): Record<string, Action> {
       description:
         "Leave a comment on a pull request or issue in the repository you have checked out. Use this to report what you did, or to answer a review — not to announce work you have not finished. The same comment twice in one task is posted once.",
       inputSchema: commentInput,
-      timeoutMs: FORGE_ACTION_TIMEOUT_MS,
+      timeoutMs: GITHUB_ACTION_TIMEOUT_MS,
       idempotencyKey: async ({ input, ctx: turn }) =>
         `${actionTask(turn)}:${input.dir}#${input.number}:comment:${await sha256(input.body)}`,
       execute: async ({ dir, number, body }) => {
-        const target = await forgeRepo(dir);
+        const target = await githubRepo(dir);
         if ("refusal" in target) throw new Error(target.refusal);
         const { owner, repo } = target;
 
-        const posted = await forge(
+        const posted = await github(
           "repo_pr_comment",
           `/repos/${owner}/${repo}/issues/${number}/comments`,
           { method: "POST", body: { body } }

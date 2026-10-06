@@ -131,12 +131,6 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         message: z.string().describe("Commit message")
       }),
       execute: async ({ dir, message }) => {
-        const refused = await config.beforeWrite?.({
-          tool: "repo_commit",
-          dir
-        });
-        if (refused) return refused;
-
         // Checked rather than fired and forgotten. A failed `add` leaves the
         // index holding less than the model believes, and the commit that
         // follows still succeeds — so the turn reports a commit that quietly
@@ -243,14 +237,6 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         if (!remote)
           return `${dir} has no origin on an allowed host — clone it with repo_clone first`;
 
-        const refused = await config.beforeWrite?.({
-          tool: "repo_push",
-          dir,
-          branch,
-          url: remote.url
-        });
-        if (refused) return refused;
-
         const exists = await plain(
           `rev-parse --verify --quiet "refs/heads/$REPO_BRANCH"`,
           dir,
@@ -348,15 +334,6 @@ export function worktreeTools(ctx: RepoContext): ToolSet {
         if (!result.success) {
           logFailure("repo_push", result);
           return bounded(`push failed: ${result.stderr || result.stdout}`);
-        }
-        try {
-          await config.afterPush?.({ dir, branch, commit });
-        } catch (err) {
-          console.warn("[repo] afterPush failed", {
-            dir,
-            branch,
-            err: String(err)
-          });
         }
         const pushed =
           `pushed ${branch} at ${short} "${subject}", ${count} ` +

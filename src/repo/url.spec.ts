@@ -178,7 +178,7 @@ describe("sameRepoUrl", () => {
   it.each([
     ["a different repository", "https://github.com/o/other"],
     ["a different owner", "https://github.com/other/r"],
-    // The reason this compares URLs rather than `parseRepo` results: two forges
+    // The reason this compares URLs rather than `parseRepo` results: two hosts
     // can each hold an `o/r`, and they are not the same checkout.
     ["a different host", "https://git.acme.dev/o/r"]
   ])("does not match %s", (_why, other) => {

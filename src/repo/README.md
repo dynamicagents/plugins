@@ -21,8 +21,14 @@ repo({
 
 Tools: `repo_clone`, `repo_fetch`, `repo_status`, `repo_diff`, `repo_commit`,
 `repo_push`, `repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment`,
-`repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`, and — for a host
-that keeps worktrees, below — `repo_worktrees` and `repo_worktree`.
+`repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`, `repo_pr_checks`,
+and — for a host that keeps worktrees, below — `repo_worktrees` and `repo_worktree`.
+
+`tools: [...]` offers only the tools named, and the context the model reads names
+only those. An agent that coordinates others' work — reading pull requests, never
+writing one — takes the read tools and nothing it would be told to finish with.
+Core's `restrictTools` is the wrong instrument here: it drops a plugin's context
+whole.
 
 Everything past `repo_open_pr` is what a model reaches for `gh` to do — read an
 issue, check a pull request, leave a comment, answer a review. They are here
@@ -35,7 +41,7 @@ credential somewhere nobody asked about.
 **Answering a review is GraphQL, and the rest is REST.** Not a preference:
 `isResolved` is not on any REST representation of a review comment, and resolving
 a thread has no REST endpoint at all. That brings one hazard worth knowing before
-editing `forgeGraphql` — **a failed GraphQL query answers `200`**, with the
+editing `githubGraphql` — **a failed GraphQL query answers `200`**, with the
 errors in the body, so a caller that reads `data` straight through reports a
 permission failure as an empty review. An agent told a review is clean stops
 looking.
@@ -43,7 +49,7 @@ looking.
 `repo_pr_thread_reply` is also the only tool here that takes something able to
 name another repository: a thread id is a global node id, not a path segment
 derived from the checkout. It asks which pull request the id belongs to and
-refuses a mismatch, which is the same reach `forgeRepo` denies everywhere else.
+refuses a mismatch, which is the same reach `githubRepo` denies everywhere else.
 
 ## The writes a recovered turn must not repeat
 
@@ -51,7 +57,7 @@ refuses a mismatch, which is the same reach `forgeRepo` denies everywhere else.
 `actions`, rather than tools. A turn cut by an eviction or a deploy is recovered by
 running it again, and a comment that had already landed would land twice. An
 action's result is kept under an idempotency key, and a call with a settled key
-replays that result instead of calling the forge.
+replays that result instead of calling GitHub.
 
 The key is the task, the checkout and the pull request, and the write itself —
 the body's SHA-256, and for a reply the thread and whether to resolve it. The task
@@ -75,16 +81,12 @@ A host whose writing sub-agents each commit in a checkout of their own can hand 
 parent a way between them: `worktrees: { list, use, release }`. The plugin then
 offers `repo_worktrees`, to see each worktree's branch and state and to release
 one, and `repo_worktree`, which asks the host to point every repo tool at the
-worktree holding a branch — or back at the main checkout. A switch moves the
+worktree holding a branch — or back at the main checkout. The switch holds until
+the next one, and a host that moves the tools on its own says so where the model
+reads it every turn: the model remembers the switch's answer. A switch moves the
 installing agent's own tools, so a host passes `worktrees` to the parent's install
 and never to a sub-agent's. The host renders every answer; this plugin checks a
 branch's shape and passes the sentence through.
-
-Two hooks go with it. `beforeWrite` is asked before `repo_commit` or `repo_push`
-changes anything, with the origin a push would use, and a string it returns refuses
-with that sentence — for a checkout a session is still working in, or whose
-`.git/config` a session could have rewritten. `afterPush` is told the commit a push
-landed.
 
 ## Nothing is held for approval
 
@@ -101,7 +103,7 @@ than a matter of taste. `exec` is anything that runs a command in the container 
 [`/workspace`](../workspace/)'s `workspaceExec` is one such thing, and injecting it
 keeps the two plugins independent, so a host with its own container can use this
 against that and the tests here need no container at all. `git` is the other side:
-the three operations that talk to the forge, run by the host, with the credential
+the three operations that talk to GitHub, run by the host, with the credential
 never crossing over. See below for why that split exists.
 
 ## Where the token lives
@@ -118,8 +120,13 @@ credential helpers.
 
 Everything else still runs in the container through `exec`, because none of it needs
 to authenticate: `status`, `diff`, `add`, `commit`, `checkout`. That is the whole
-rule for changing this plugin — an operation that talks to the forge does not belong
+rule for changing this plugin — an operation that talks to GitHub does not belong
 on `exec`, and one that does not has no business anywhere else.
+
+One exception runs the other way, for cost rather than trust: a host's `git` may
+also answer `origin(dir)` from its own copy of the files. The GitHub tools then
+resolve their repository without the container, so an agent polling a pull request
+for its review does not keep one running.
 
 The rule is absolute rather than careful because the narrower versions do not hold.
 Git is a general-purpose command runner: it executes what `.git/config` and
@@ -131,7 +138,7 @@ config beats a `-c` override: specificity outranks precedence. And a token that
 lives in a process environment for the length of one command is readable at
 `/proc/<pid>/environ` by anything else on a filesystem the model has root on.
 
-Two more rules, about the forge rather than the container:
+Two more rules, about GitHub rather than the container:
 
 - **Never offered to a host you did not allow.** The clone URL is model input: a
   repository README, an issue body, or a page a co-installed browser plugin fetched
@@ -143,7 +150,7 @@ Two more rules, about the forge rather than the container:
   the host's git, and userinfo is where URL parsers disagree about which host is
   named. `origin` is re-derived and re-checked on every push rather than remembered,
   because the checkout's `.git/config` is a file the container can rewrite.
-- **The forge API is called from the Worker.** So the credential that can write
+- **The GitHub API is called from the Worker.** So the credential that can write
   through the API never crosses into the container either. Every tool that uses it —
   `repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment` — resolves
   the repository from the **checkout's own origin** rather than from a parameter.
@@ -239,6 +246,7 @@ practical one for an agent whose entire view of the work is the diff.
 
 ## Requirements
 
-A `GITHUB_TOKEN` secret with contents + pull-request write, a container with
+A `GITHUB_TOKEN` secret with contents + pull-request write (and checks + commit
+statuses read, for `repo_pr_checks`), a container with
 `git` on it for the local half, and a `git` implementation on the host's side for
 the three operations that authenticate.

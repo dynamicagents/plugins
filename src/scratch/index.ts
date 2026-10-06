@@ -120,7 +120,7 @@ export interface ScratchConfig {
    * Runs commands in the container holding the workspace.
    *
    * Uncredentialed, and nothing here ever needs a credential: a scratchpad has
-   * no remote, so no operation in this plugin talks to a forge.
+   * no remote, so no operation in this plugin talks to GitHub.
    */
   exec: ScratchExec;
   /** Where the scratchpad lives. Defaults to {@link DEFAULT_SCRATCH_DIR}. */

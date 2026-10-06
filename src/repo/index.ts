@@ -1,8 +1,9 @@
 import { definePlugin } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
 import { repoContext } from "./context.js";
+import { checkTools } from "./tools-checks.js";
 import { cloneTools } from "./tools-clone.js";
-import { forgeActions, forgeTools } from "./tools-forge.js";
+import { prActions, prTools } from "./tools-pr.js";
 import { reviewActions, reviewTools } from "./tools-review.js";
 import { worktreeTools } from "./tools-worktree.js";
 import { worktreesTools } from "./tools-worktrees.js";
@@ -36,7 +37,7 @@ export { graphqlEndpoint, truncateOutput } from "./context.js";
  * none of it needs to authenticate.
  *
  * That split is the one thing to preserve when changing this file: if an
- * operation talks to the forge it does not belong on `exec`, and if it does not,
+ * operation talks to GitHub it does not belong on `exec`, and if it does not,
  * it has no business anywhere else.
  *
  * It is absolute rather than careful because a narrower version does not hold.
@@ -50,9 +51,9 @@ export { graphqlEndpoint, truncateOutput } from "./context.js";
  * the length of one command is readable at `/proc/<pid>/environ` by anything
  * else in the container.
  *
- * Two further rules, which are about the forge rather than the container:
+ * Two further rules, which are about GitHub rather than the container:
  *
- * 1. **The forge is an allowlist, checked before anything runs.** A clone URL is
+ * 1. **GitHub's hosts are an allowlist, checked before anything runs.** A clone URL is
  *    model input — a repository README, an issue body, or a page fetched by a
  *    co-installed browser plugin is enough to choose it — and a credential
  *    offered to a host of the model's choosing is the whole game. So the URL's
@@ -61,7 +62,7 @@ export { graphqlEndpoint, truncateOutput } from "./context.js";
  *    check to the moment the token would actually be handed over. `origin` is
  *    re-derived and re-checked on every push rather than remembered, because the
  *    checkout's `.git/config` is a file the container can rewrite.
- * 2. **The forge API is called from the Worker**, so the credential that can
+ * 2. **The GitHub API is called from the Worker**, so the credential that can
  *    write to a repository through the API never crosses the boundary either.
  *    Every tool that reads or writes through it resolves the repository from the
  *    checkout's own origin rather than from a parameter, so there is no way to
@@ -104,7 +105,7 @@ export type RepoExec = (
 }>;
 
 /**
- * The three git operations that need the forge token, run by the host.
+ * The three git operations that need the GitHub token, run by the host.
  *
  * Injected for the same reason {@link RepoExec} is — this plugin owns the
  * policy, not the plumbing — but the split between the two is not arbitrary. It
@@ -113,7 +114,7 @@ export type RepoExec = (
  * keeps its secret and never touches the container at all.
  *
  * That is why `clone`, `fetch` and `push` are the whole interface. They are
- * exactly the operations that talk to the forge. `status`, `diff`, `add`,
+ * exactly the operations that talk to GitHub. `status`, `diff`, `add`,
  * `commit` and `checkout` are local, need nothing to authenticate with, and stay
  * on `exec` where they are cheap and where the model can see them work.
  *
@@ -166,6 +167,14 @@ export interface RepoGit {
     branch: string;
     allowedHosts: string[];
   }): Promise<RepoGitResult>;
+  /**
+   * The checkout's `origin` URL, read on the host's side; `undefined` for none.
+   *
+   * Optional. Set, the GitHub tools resolve their repository without the
+   * container, so an agent polling a pull request does not keep one running.
+   * Unset, the origin is read through {@link RepoConfig.exec}.
+   */
+  origin?(dir: string): Promise<string | undefined>;
 }
 
 /** What a {@link RepoGit} operation reports. */
@@ -176,14 +185,14 @@ export interface RepoConfig {
   /**
    * Runs commands in the container holding the checkout.
    *
-   * Uncredentialed, always. Nothing this runs is ever given the forge token —
+   * Uncredentialed, always. Nothing this runs is ever given the GitHub token —
    * see {@link RepoGit} for the operations that need one.
    */
   exec: RepoExec;
   /** Runs the three credentialed operations, on the host's side of the boundary. */
   git: RepoGit;
   /**
-   * A forge token with contents+pull-request write. A thunk so a rotated secret
+   * A GitHub token with contents+pull-request write. A thunk so a rotated secret
    * is picked up without rebuilding the plugin list.
    */
   token: () => string;
@@ -270,33 +279,6 @@ export interface RepoConfig {
     repo: string;
   }) => void;
   /**
-   * Asked before `repo_commit` or `repo_push` changes anything. A string refuses
-   * with that sentence; `undefined` lets it through.
-   *
-   * For a host whose checkouts something else may be working in, or may have
-   * rewritten — a sub-agent's session that has not finished, a `.git/config` a
-   * session had a shell over. Only the host knows either, and a refusal here is
-   * the only place the model hears it before the write lands. `url` is the
-   * origin a push would go to, read from the checkout.
-   */
-  beforeWrite?: (write: {
-    tool: "repo_commit" | "repo_push";
-    dir: string;
-    branch?: string;
-    url?: string;
-  }) => Promise<string | undefined>;
-  /**
-   * Called once a push has landed, with the commit it put on the remote.
-   *
-   * A throw is caught and logged: the push happened, and the model must be told
-   * so whatever a host's bookkeeping does.
-   */
-  afterPush?: (push: {
-    dir: string;
-    branch: string;
-    commit: string;
-  }) => Promise<void>;
-  /**
    * The worktrees a host keeps for its sub-agents' work, and the way between
    * them.
    *
@@ -305,7 +287,36 @@ export interface RepoConfig {
    * install and never on a sub-agent's. See {@link RepoWorktrees}.
    */
   worktrees?: RepoWorktrees;
+  /**
+   * The tools this install offers, and with them the lines of context that
+   * describe them. Unset, every tool. A selection rather than core's
+   * `restrictTools`, which drops a plugin's context whole: an agent that
+   * coordinates others' work reads about the tools it has and no others.
+   */
+  tools?: readonly RepoToolName[];
 }
+
+/** Every tool and action this plugin can offer, by the name the model sees. */
+export const REPO_TOOL_NAMES = [
+  "repo_clone",
+  "repo_fetch",
+  "repo_status",
+  "repo_diff",
+  "repo_commit",
+  "repo_push",
+  "repo_open_pr",
+  "repo_issue_view",
+  "repo_pr_view",
+  "repo_pr_comment",
+  "repo_pr_review_status",
+  "repo_pr_threads",
+  "repo_pr_thread_reply",
+  "repo_pr_checks",
+  "repo_worktrees",
+  "repo_worktree"
+] as const;
+
+export type RepoToolName = (typeof REPO_TOOL_NAMES)[number];
 
 /**
  * Checkouts a host keeps apart from the main one — each holding a branch its
@@ -323,6 +334,10 @@ export interface RepoWorktrees {
    * Point every repo tool — and whatever else the host routes the same way — at
    * the worktree holding `branch`, or back at the main checkout when it is absent.
    * Answers what the model now has in front of it.
+   *
+   * The switch holds until the next one. This answer is what the model
+   * remembers, so a host that moves the tools on its own says so where the
+   * model reads it every turn.
    */
   use(branch?: string): Promise<string>;
   /** Give up `branch`'s worktree, and the unpushed work in it. */
@@ -363,23 +378,78 @@ export interface RepoCheckout {
  * why, and for what a fork that wants one does instead.
  */
 export function repo(config: RepoConfig): AgentPlugin {
+  const selected = new Set<string>(config.tools ?? REPO_TOOL_NAMES);
+  const has = (name: RepoToolName) => selected.has(name);
+  const only = <T>(all: Record<string, T>): Record<string, T> =>
+    Object.fromEntries(
+      Object.entries(all).filter(([name]) => selected.has(name))
+    );
+  const views = [
+    has("repo_issue_view") &&
+      "`repo_issue_view` reads an issue or pull request with its comments",
+    has("repo_pr_view") &&
+      "`repo_pr_view` shows a pull request's state and the files it touches",
+    has("repo_pr_comment") && "`repo_pr_comment` leaves a comment"
+  ].filter((line): line is string => typeof line === "string");
+  const worktrees = config.worktrees && [
+    has("repo_worktrees") &&
+      "`repo_worktrees` lists the worktrees your writing sub-agents committed in — each one's branch, whether a session is still in it, whether its commits are pushed — and releases one you will not keep.",
+    has("repo_worktree") &&
+      "`repo_worktree` points every repo tool and your file reads at the worktree holding a branch, and they stay there until you call it again — with no branch to come back to your own checkout."
+  ];
+  const lines = [
+    has("repo_clone") &&
+      "`repo_clone` checks one out into the workspace. The checkout may already be there from an earlier task, in which case it is fetched and reset for you" +
+        (has("repo_diff")
+          ? " — but if it has uncommitted changes it is left as-is, and you should read them with `repo_diff` before deciding what to do."
+          : "."),
+    has("repo_fetch") &&
+      "`repo_fetch` brings a checkout's remote branches in without touching its tree" +
+        (has("repo_diff")
+          ? " — how you review a branch someone else pushed, as `origin/<branch>` with `repo_diff`."
+          : "."),
+    has("repo_status") &&
+      has("repo_diff") &&
+      "`repo_status` and `repo_diff` show what you have changed — read the diff before committing. On a large change call `repo_diff` with `stat: true` first to see which files moved, then read the ones that matter; output is truncated from the middle when it is large.",
+    has("repo_status") &&
+      !has("repo_diff") &&
+      "`repo_status` shows what you have changed.",
+    !has("repo_status") &&
+      has("repo_diff") &&
+      "`repo_diff` shows what changed. On a large change call it with `stat: true` first to see which files moved, then read the ones that matter; output is truncated from the middle when it is large.",
+    has("repo_commit") && "`repo_commit` stages everything and commits.",
+    has("repo_push") &&
+      "`repo_push` pushes a branch the checkout holds, or creates one at the current commit. It refuses the default branch and other protected names, and it refuses a branch that adds no commit the remote does not already have — that is not negotiable.",
+    has("repo_open_pr") &&
+      "`repo_open_pr` opens the pull request and returns its URL.",
+    views.length > 0 &&
+      `${views.join(", ")}. ${views.length > 1 ? "Each acts" : "It acts"} on the repository you have checked out — read the issue a task refers to before guessing what it asks for.`,
+    has("repo_pr_review_status") &&
+      "`repo_pr_review_status` says whether a reviewer has finished. Ask it before reading a review: one that has not landed has left nothing, so an empty list of threads means nothing yet rather than nothing to do.",
+    has("repo_pr_threads") &&
+      "`repo_pr_threads` reads the review threads — the comments left on particular lines, which are not on the " +
+        (has("repo_issue_view")
+          ? "timeline `repo_issue_view` shows."
+          : "pull request's timeline.") +
+        (has("repo_pr_thread_reply")
+          ? " `repo_pr_thread_reply` answers one and resolves it. Answer every thread: say what you changed and where, or why you did not, and resolve it either way so the record says what happened."
+          : ""),
+    has("repo_pr_thread_reply") &&
+      !has("repo_pr_threads") &&
+      "`repo_pr_thread_reply` answers a review thread and resolves it. Answer every thread: say what you changed and where, or why you did not, and resolve it either way so the record says what happened.",
+    has("repo_pr_checks") &&
+      "`repo_pr_checks` says how a pull request's CI stands on its latest commit: what is still running, what failed and where to read why, and what passed.",
+    ...(worktrees || [])
+  ].filter((line): line is string => typeof line === "string");
+  const rules = [
+    has("repo_push") && "Never push to the default branch.",
+    has("repo_open_pr") &&
+      "Finish by opening a pull request and reporting its URL."
+  ].filter((line): line is string => typeof line === "string");
   const context = [
     "You can work with git repositories:",
-    "- `repo_clone` checks one out into the workspace. The checkout may already be there from an earlier task, in which case it is fetched and reset for you — but if it has uncommitted changes it is left as-is, and you should read them with `repo_diff` before deciding what to do.",
-    "- `repo_fetch` brings a checkout's remote branches in without touching its tree — how you review a branch someone else pushed, as `origin/<branch>` with `repo_diff`.",
-    "- `repo_status` and `repo_diff` show what you have changed — read the diff before committing. On a large change call `repo_diff` with `stat: true` first to see which files moved, then read the ones that matter; output is truncated from the middle when it is large.",
-    "- `repo_commit` stages everything and commits.",
-    "- `repo_push` pushes a branch the checkout holds, or creates one at the current commit. It refuses the default branch and other protected names, and it refuses a branch that adds no commit the remote does not already have — that is not negotiable.",
-    "- `repo_open_pr` opens the pull request and returns its URL.",
-    "- `repo_issue_view` reads an issue or pull request with its comments, `repo_pr_view` shows a pull request's state and the files it touches, and `repo_pr_comment` leaves a comment. All three act on the repository you have checked out — read the issue a task refers to before guessing what it asks for.",
-    "- `repo_pr_review_status` says whether a reviewer has finished. Ask it before reading a review: one that has not landed has left nothing, so an empty list of threads means nothing yet rather than nothing to do.",
-    "- `repo_pr_threads` reads the review threads — the comments left on particular lines, which are not on the timeline `repo_issue_view` shows. `repo_pr_thread_reply` answers one and resolves it. Answer every thread: say what you changed and where, or why you did not, and resolve it either way so the record says what happened.",
-    ...(config.worktrees
-      ? [
-          "- `repo_worktrees` lists the worktrees your writing sub-agents committed in — each one's branch, whether a session is still in it, whether its commits are pushed — and releases one you will not keep. `repo_worktree` points every repo tool and your file reads at the worktree holding a branch, so you review — `repo_diff` with `base` shows what its commits add — push and open the pull request from there; call it with no branch to come back to your own checkout."
-        ]
-      : []),
-    "Never push to the default branch. Finish by opening a pull request and reporting its URL."
+    ...lines.map((line) => `- ${line}`),
+    ...(rules.length > 0 ? [rules.join(" ")] : [])
   ].join("\n");
 
   return definePlugin({
@@ -390,18 +460,19 @@ export function repo(config: RepoConfig): AgentPlugin {
     // into.
     tools: (ctx) => {
       const repoCtx = repoContext(config, ctx.runtime);
-      return {
+      return only({
         ...cloneTools(repoCtx),
         ...worktreeTools(repoCtx),
-        ...forgeTools(repoCtx),
+        ...prTools(repoCtx),
         ...reviewTools(repoCtx),
+        ...checkTools(repoCtx),
         ...(config.worktrees ? worktreesTools(config.worktrees) : {})
-      };
+      });
     },
 
     actions: (ctx) => {
       const repoCtx = repoContext(config, ctx.runtime);
-      return { ...forgeActions(repoCtx), ...reviewActions(repoCtx) };
+      return only({ ...prActions(repoCtx), ...reviewActions(repoCtx) });
     },
 
     context: [{ provider: { get: async () => context } }],

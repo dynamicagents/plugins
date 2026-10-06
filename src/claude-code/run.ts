@@ -6,6 +6,7 @@ import type {
   WorkspaceRuntimeKillOptions
 } from "@cloudflare/computer";
 import type { NoteData } from "@dynamicagents/core/subagent";
+import { GITHUB_ENV_KEYS, githubEnv } from "./github.js";
 import {
   parseStream,
   toProgress,
@@ -253,6 +254,12 @@ export interface LaunchOptions {
    * conversation to fork, and a caller that set it meant to resume one.
    */
   fork?: boolean;
+
+  /**
+   * Present GitHub's placeholder as `GH_TOKEN` and as git's credential, for a
+   * gateway holding the real token — see {@link file://./github.ts}.
+   */
+  github?: boolean;
 }
 
 export interface Launch {
@@ -389,6 +396,21 @@ export function buildLaunch(options: LaunchOptions): Launch {
     );
   }
 
+  /**
+   * Refused beside `github`: a host value would either hand the session a real
+   * token or point git's credential at something other than the placeholder.
+   */
+  const githubKey = options.github
+    ? GITHUB_ENV_KEYS.find((key) => options.env && key in options.env)
+    : undefined;
+  if (githubKey) {
+    throw new Error(
+      `claude-code: ${githubKey} cannot be set through \`env\` when \`githubToken\` ` +
+        "is configured. The session presents a placeholder and the egress " +
+        "gateway swaps in the GitHub token on the way out."
+    );
+  }
+
   const permissionMode = options.permissionMode ?? DEFAULT_PERMISSION_MODE;
 
   const argv = ["claude", "-p", shellQuote(options.prompt)];
@@ -438,6 +460,7 @@ export function buildLaunch(options: LaunchOptions): Launch {
         ? { IS_SANDBOX: "1" }
         : undefined),
       ...gitIdentityEnv(options.author),
+      ...(options.github ? githubEnv() : undefined),
       [CONFIG_DIR_ENV_KEY]: SESSION_CONFIG_DIR,
       [RESERVED_ENV_KEY]: CREDENTIAL_PLACEHOLDER
     }

@@ -59,15 +59,32 @@ The session launches with `CREDENTIAL_PLACEHOLDER`. `computerd` intercepts every
 outbound request and hands it to `claudeCodeEgress` on the **Worker** side, which:
 
 1. **swaps** the placeholder for a real credential, for `api.anthropic.com` only;
-2. **strips** every credential header from anything else;
-3. optionally **restricts the container to named hosts** — exact hostname match,
+2. **swaps** GitHub's placeholder for `githubToken`, for `github.com` and
+   `api.github.com` only, when it is configured (see below);
+3. **strips** every credential header from anything else;
+4. optionally **restricts the container to named hosts** — exact hostname match,
    no wildcards, and **off by default** (see below);
-4. **rotates** to the next credential when Anthropic says the current one's
+5. **rotates** to the next credential when Anthropic says the current one's
    bucket is spent (see below).
 
 A `postinstall` that dumps its environment learns the placeholder and nothing
 else. It runs as root, so `/proc/1/environ` is still readable — the placeholder is
 what protects the credential, not the process boundary.
+
+### GitHub, as the deployment's account
+
+`githubToken: () => env.GITHUB_TOKEN` lets a session push its branch, open its
+pull request and answer its review. The session gets a placeholder as
+`GH_TOKEN`, and git a credential helper for `https://github.com` that answers
+with it. The gateway swaps the placeholder for the token on GitHub's two hosts,
+over https only, and never follows a redirect with it on. A request that does
+not present the placeholder stays anonymous.
+
+What this does not bound: while a session runs, anything in the container — a
+`postinstall` included — can _use_ GitHub as the token's account, though it can
+never read the token. Scope the token to the repositories the agent works on, and
+give their default branches a ruleset: pull request required, no force push, no
+deletion.
 
 ### Egress is unrestricted by default
 
@@ -171,7 +188,7 @@ rotation and saves a Durable Object class, a binding and a migration.
   // `@dynamicagents/plugins/workspace`.
   "containers": [
     {
-      "class_name": "AnthropicCodingWorkspace",
+      "class_name": "ClaudeCoordinatorWorkspace",
       "scheduling_policy": "durable_object",
       "images": {
         "app": {
@@ -193,8 +210,8 @@ rotation and saves a Durable Object class, a binding and a migration.
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "AnthropicCodingWorkspace",
-        "name": "ANTHROPIC_CODING_WORKSPACE"
+        "class_name": "ClaudeCoordinatorWorkspace",
+        "name": "CLAUDE_COORDINATOR_WORKSPACE"
       }
     ]
   },
@@ -202,7 +219,7 @@ rotation and saves a Durable Object class, a binding and a migration.
   // object's SQLite. And a **new tag** — a class appended to a tag you have
   // already deployed is silently never created.
   "migrations": [
-    { "tag": "v5", "new_sqlite_classes": ["AnthropicCodingWorkspace"] }
+    { "tag": "v5", "new_sqlite_classes": ["ClaudeCoordinatorWorkspace"] }
   ],
   // The pool, in priority order — **exactly the credentials you have**.
   //
@@ -356,7 +373,7 @@ and the path does not exist.
 And a sub-agent runs a session as its model:
 
 ```ts
-export class AnthropicCodingWriterChild extends SubAgent<Env> {
+export class ClaudeCoordinatorWriterChild extends SubAgent<Env> {
   // `prepare` claims a workspace of this run's own and returns where its
   // checkout is; `settle` releases it on every terminal. Both are the host's:
   // which object a run gets, and how it acquires a checkout, are facts about a
@@ -368,8 +385,8 @@ export class AnthropicCodingWriterChild extends SubAgent<Env> {
       workspaceName: string;
       dir: string;
     };
-    const stub = this.env.ANTHROPIC_CODING_WORKSPACE.get(
-      this.env.ANTHROPIC_CODING_WORKSPACE.idFromName(workspaceName)
+    const stub = this.env.CLAUDE_COORDINATOR_WORKSPACE.get(
+      this.env.CLAUDE_COORDINATOR_WORKSPACE.idFromName(workspaceName)
     );
     return claudeCodeModel({
       config: CLAUDE_CODE_SESSION,

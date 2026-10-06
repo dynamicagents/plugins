@@ -92,7 +92,7 @@ import type { RepoGitResult } from "../repo/index.js";
  * - `./sync.ts` — the host's half of syncing, which nothing else will do.
  * - `./ca-trust.ts` — making a container able to speak TLS.
  * - `./git-identity.ts` — who a container's commits belong to.
- * - `./git-host.ts` — the operations that hold the forge credential.
+ * - `./git-host.ts` — the operations that hold the GitHub credential.
  *
  * Each takes a small explicit seam, and that is the test: a module that needed
  * the whole object back would be a module that did not want extracting.
@@ -118,7 +118,7 @@ export const WORKSPACE_DIR = "/workspace";
  *
  * `repo` is not always a repository. A host may pass a sentinel through here as
  * one — a scratchpad is modelled that way, which is what keys it to its own
- * object and its own container. Anything that is not a forge name works, as long
+ * object and its own container. Anything that is not a GitHub name works, as long
  * as no caller could clone something that collides with it.
  */
 export function workspaceName(callerKey: string, repo?: string): string {
@@ -211,7 +211,7 @@ const CONTAINER_WARM_ID = "container-warm-id";
  *
  * **The default, not the policy.** "Longest command" is a fact about the agent,
  * so one whose commands run longer must say so via
- * {@link WorkspaceObjectConfig.containerIdleMs} — `anthropic-coding` holds a
+ * {@link WorkspaceObjectConfig.containerIdleMs} — `claude-coordinator` holds a
  * `claude -p` session open for its whole 40-minute timeout.
  */
 const CONTAINER_IDLE_MS = 20 * 60_000;
@@ -317,7 +317,7 @@ class WorkspaceContainerHost extends DurableObject<Cloudflare.Env> {}
 const WorkspaceContainerBase = withWorkspaceContainer(WorkspaceContainerHost);
 
 /**
- * The forge credential, and who a commit made on this side is attributed to.
+ * The GitHub credential, and who a commit made on this side is attributed to.
  *
  * Config rather than an env read, because this class cannot name a consumer's
  * ambient `Env` — it is an interface `wrangler types` generates into *their*
@@ -331,7 +331,7 @@ const WorkspaceContainerBase = withWorkspaceContainer(WorkspaceContainerHost);
  */
 export interface WorkspaceGitConfig {
   /**
-   * The **name** of the binding holding the forge credential — never the
+   * The **name** of the binding holding the GitHub credential — never the
    * credential itself.
    *
    * `workspaceConfig()` is an ordinary method on the prototype, and on a Durable
@@ -405,7 +405,7 @@ export interface WorkspaceObjectConfig {
   egress: WorkspaceEgressPolicy;
   /** How this deployment installs dependencies for this agent's checkouts. */
   installPlan: InstallPlan;
-  /** Log prefix — `coding-workspace`, `anthropic-coding-workspace`. */
+  /** Log prefix — `coding-workspace`, `claude-coordinator-workspace`. */
   label: string;
   /**
    * How long this agent's container stays up after the last command **started**.
@@ -413,7 +413,7 @@ export interface WorkspaceObjectConfig {
    * A per-agent value because the invariant on {@link CONTAINER_IDLE_MS} — it
    * must exceed the longest command the shell allows — is an invariant about the
    * *agent*, and the two differ by a factor of four. The coder's longest command
-   * is a tool call; `anthropic-coding`'s is a whole `claude -p` session that runs
+   * is a tool call; `claude-coordinator`'s is a whole `claude -p` session that runs
    * detached for its entire timeout.
    *
    * Omit it for the default. Raise it, never lower it, and raise it whenever the
@@ -429,7 +429,7 @@ export interface WorkspaceObjectConfig {
    * old size. Which size, and why there is no default: {@link file://./README.md}.
    */
   instance: ContainerInstanceSize;
-  /** The forge credential and commit identity — see {@link WorkspaceGitConfig}. */
+  /** The GitHub credential and commit identity — see {@link WorkspaceGitConfig}. */
   git: WorkspaceGitConfig;
 }
 
@@ -444,7 +444,7 @@ export interface WorkspaceObjectConfig {
  *
  * **Base class fields run before subclass fields**, so as plain fields they
  * would read `undefined` from any `workspaceConfig()` that touches a subclass
- * field — which `AnthropicCodingWorkspace`'s does, for its credential store.
+ * field — which `ClaudeCoordinatorWorkspace`'s does, for its credential store.
  * Memoised getters remove the hazard rather than documenting it, which is what
  * lets a subclass implement the seam however it likes.
  */
@@ -455,7 +455,7 @@ export abstract class WorkspaceObjectBase<
    * This Worker's bindings, as the host's own generated `Env` spells them.
    *
    * Re-declared rather than inherited so a subclass reading a binding of its own
-   * — `anthropic-coding`'s reaches for its credential pool — gets its real type
+   * — `claude-coordinator`'s reaches for its credential pool — gets its real type
    * instead of the base's. `declare` because the field is the runtime's; this
    * only narrows what TypeScript believes about it.
    */
@@ -465,7 +465,7 @@ export abstract class WorkspaceObjectBase<
    * Everything this agent's workspace does differently. Called once, lazily.
    *
    * Read through {@link #cfg}, never directly: an implementation may build
-   * something real — `anthropic-coding`'s constructs its egress gateway — and this
+   * something real — `claude-coordinator`'s constructs its egress gateway — and this
    * is consulted on the busiest path in the object.
    */
   protected abstract workspaceConfig(): WorkspaceObjectConfig;
@@ -600,7 +600,7 @@ export abstract class WorkspaceObjectBase<
   });
 
   /**
-   * The forge credential, read at the moment it would be handed over.
+   * The GitHub credential, read at the moment it would be handed over.
    *
    * `#`-private, which is the only spelling actually unreachable over RPC — see
    * {@link WorkspaceGitConfig.tokenBinding} for why that matters here and not
@@ -860,7 +860,7 @@ export abstract class WorkspaceObjectBase<
       observer: createCloudflareObserver({ tracing }),
       // Git, running **here** rather than in the container.
       //
-      // This is what lets the forge token stay on this side of the boundary.
+      // This is what lets the GitHub token stay on this side of the boundary.
       // `createGitClient` binds isomorphic-git to `provider()` — the local
       // SQLite store, not the wire — so a clone, fetch or push executes next to
       // the data it writes, and the container never holds a credential at all.
@@ -977,7 +977,7 @@ export abstract class WorkspaceObjectBase<
   }
 
   /**
-   * Clone, fetch and push — the operations that need the forge token.
+   * Clone, fetch and push — the operations that need the GitHub token.
    *
    * The work is `./git-host.ts`, which owns why the credential stays on this
    * side of the boundary. What stays here is what only this object can do: the
@@ -1016,6 +1016,15 @@ export abstract class WorkspaceObjectBase<
   }
 
   /**
+   * A checkout's `origin`, from this object's storage. Starts no container and
+   * moves no deadline, like {@link checkoutDir}: a pull request polled for its
+   * review is not the workspace in use.
+   */
+  async gitOrigin(dir: string): Promise<string | undefined> {
+    return await this.#gitHost.origin(dir);
+  }
+
+  /**
    * Bring the workspace up to date, or say why git must not run.
    *
    * **Git here reads this object's storage**, so it has to be current first. The
@@ -1024,7 +1033,7 @@ export abstract class WorkspaceObjectBase<
    * did not finish, the workspace still holds the tree as it was before the
    * commit — and isomorphic-git, running here, would push a branch that does not
    * include it. That is the one failure worth stopping for: the push reports
-   * success, the forge shows an older tree, and nothing in either account says
+   * success, GitHub shows an older tree, and nothing in either account says
    * why.
    *
    * Refused rather than attempted, because every alternative is worse. Pushing

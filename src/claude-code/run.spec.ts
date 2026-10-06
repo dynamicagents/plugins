@@ -18,6 +18,7 @@ import {
   type SessionRuntime
 } from "./run.js";
 import { DEFAULT_PERMISSION_MODE } from "./config.js";
+import { GITHUB_TOKEN_PLACEHOLDER } from "./github.js";
 import { SESSION_STATE_DIR } from "../computer/paths.js";
 
 const EXEC = execIdFor("run-7");
@@ -1315,6 +1316,43 @@ describe("the reserved credential key", () => {
     });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(CREDENTIAL_PLACEHOLDER);
     expect(env.CI).toBe("1");
+  });
+});
+
+describe("the GitHub placeholder", () => {
+  const launch = (env?: Record<string, string>) =>
+    buildLaunch({
+      prompt: "p",
+      dir: "/workspace/repo",
+      github: true,
+      ...(env ? { env } : {})
+    });
+
+  it("presents the placeholder to gh and to git", () => {
+    const { env } = launch();
+    expect(env.GH_TOKEN).toBe(GITHUB_TOKEN_PLACEHOLDER);
+    expect(env.GIT_CONFIG_COUNT).toBe("1");
+    expect(env.GIT_CONFIG_KEY_0).toBe("credential.https://github.com.helper");
+    expect(env.GIT_CONFIG_VALUE_0).toContain("$GH_TOKEN");
+  });
+
+  it("is absent without github, so a host may set GH_TOKEN itself", () => {
+    const { env } = buildLaunch({
+      prompt: "p",
+      dir: "/workspace/repo",
+      env: { GH_TOKEN: "anything" }
+    });
+    expect(env.GH_TOKEN).toBe("anything");
+    expect(env.GIT_CONFIG_COUNT).toBeUndefined();
+  });
+
+  it("refuses a host setting a key it owns beside github", () => {
+    expect(() => launch({ GH_TOKEN: "ghp_REAL" })).toThrow(
+      /GH_TOKEN cannot be set through `env`/
+    );
+    expect(() => launch({ GIT_CONFIG_COUNT: "2" })).toThrow(
+      /GIT_CONFIG_COUNT cannot be set through `env`/
+    );
   });
 });
 

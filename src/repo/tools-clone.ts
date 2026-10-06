@@ -177,7 +177,7 @@ export function cloneTools(ctx: RepoContext): ToolSet {
         // Identity has to exist before the first commit. Written through the
         // container, and deliberately: the commits it names are made there, by
         // `repo_commit`, with no credential in sight — only the three operations
-        // that talk to the forge moved.
+        // that talk to GitHub moved.
         //
         // Why a refresh rewrites it, and what answers for a repository this
         // plugin never cloned, is on

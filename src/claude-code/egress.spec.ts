@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
 import type { CredentialState, CredentialStore } from "./credentials.js";
+import { GITHUB_TOKEN_PLACEHOLDER } from "./github.js";
 import capture from "../../test/fixtures/claude-code-probe-capture.json";
 
 /**
@@ -213,8 +214,8 @@ describe("the host restriction", () => {
 
   /**
    * The repo plugin keeps git on the Worker: clone, fetch and push all run as
-   * isomorphic-git inside the Durable Object, so the container never needs forge
-   * access and the forge token never enters it. That is true whether or not a
+   * isomorphic-git inside the Durable Object, so the container needs no GitHub
+   * access for it and the GitHub token never enters it. That is true whether or not a
    * restriction is configured — this only checks that a configured one bites.
    */
   it("refuses github.com when a restriction is configured", async () => {
@@ -376,6 +377,110 @@ describe("the host restriction", () => {
  * putting the real subscription token on the wire in plaintext, from the Worker,
  * at the request of code the workspace does not trust.
  */
+describe("the GitHub token", () => {
+  const GITHUB = "ghp_REAL_GITHUB_TOKEN";
+  const githubGateway = (token: () => string | undefined = () => GITHUB) =>
+    openGateway({ githubToken: token });
+  const basic = (user: string, password: string) =>
+    `Basic ${btoa(`${user}:${password}`)}`;
+
+  it("swaps the placeholder gh sends for the real token", async () => {
+    const sent = stubUpstream();
+    await githubGateway().fetch(
+      new Request("https://api.github.com/graphql", {
+        method: "POST",
+        headers: { authorization: `token ${GITHUB_TOKEN_PLACEHOLDER}` }
+      })
+    );
+    expect(sent[0]!.headers.get("authorization")).toBe(`Bearer ${GITHUB}`);
+  });
+
+  it("swaps git's Basic placeholder, keeping Basic", async () => {
+    const sent = stubUpstream();
+    await githubGateway().fetch(
+      new Request(
+        "https://github.com/o/r.git/info/refs?service=git-receive-pack",
+        {
+          headers: { authorization: basic("whoever", GITHUB_TOKEN_PLACEHOLDER) }
+        }
+      )
+    );
+    expect(sent[0]!.headers.get("authorization")).toBe(
+      basic("x-access-token", GITHUB)
+    );
+  });
+
+  /** A redirect goes back to the client, so the token rides one hop only. */
+  it("does not follow a redirect with the token on it", async () => {
+    const sent = stubUpstream();
+    await githubGateway().fetch(
+      new Request("https://api.github.com/repos/o/r/tarball", {
+        headers: { authorization: `Bearer ${GITHUB_TOKEN_PLACEHOLDER}` }
+      })
+    );
+    expect(sent[0]!.redirect).toBe("manual");
+  });
+
+  it("leaves a request without the placeholder anonymous", async () => {
+    const sent = stubUpstream();
+    await githubGateway(() => {
+      throw new Error("the token must not be read on this path");
+    }).fetch(
+      new Request("https://api.github.com/repos/o/r", {
+        headers: { authorization: "Bearer ghp_SOMETHING_ELSE" }
+      })
+    );
+    expect(sent[0]!.headers.get("authorization")).toBeNull();
+  });
+
+  it("never sends the token to another host", async () => {
+    const sent = stubUpstream();
+    await githubGateway().fetch(
+      new Request("https://codeload.github.com/o/r/tar.gz/main", {
+        headers: { authorization: `Bearer ${GITHUB_TOKEN_PLACEHOLDER}` }
+      })
+    );
+    expect(sent[0]!.headers.get("authorization")).toBeNull();
+  });
+
+  it("refuses the placeholder over http, before the token is read", async () => {
+    const sent = stubUpstream();
+    const response = await githubGateway(() => {
+      throw new Error("the token must not be read on this path");
+    }).fetch(
+      new Request("http://api.github.com/user", {
+        headers: { authorization: `Bearer ${GITHUB_TOKEN_PLACEHOLDER}` }
+      })
+    );
+    expect(response.status).toBe(403);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("answers 401 when no token is configured", async () => {
+    const sent = stubUpstream();
+    const response = await githubGateway(() => "").fetch(
+      new Request("https://api.github.com/user", {
+        headers: { authorization: `Bearer ${GITHUB_TOKEN_PLACEHOLDER}` }
+      })
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({
+      message: expect.stringContaining("no GitHub token")
+    });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("is anonymous GitHub, as before, without a GitHub token configured", async () => {
+    const sent = stubUpstream();
+    await openGateway().fetch(
+      new Request("https://api.github.com/user", {
+        headers: { authorization: `Bearer ${GITHUB_TOKEN_PLACEHOLDER}` }
+      })
+    );
+    expect(sent[0]!.headers.get("authorization")).toBeNull();
+  });
+});
+
 describe("plaintext to Anthropic", () => {
   it("refuses http, before the credential is even read", async () => {
     const sent = stubUpstream();

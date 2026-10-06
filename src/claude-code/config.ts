@@ -1,5 +1,5 @@
 /**
- * Everything one `anthropic-coding` deployment tunes, in one shape.
+ * Everything one deployment of this plugin tunes, in one shape.
  *
  * Config at instantiation rather than an `env` argument, for the reason the
  * whole package works this way: `Env` is the ambient interface `wrangler types`
@@ -151,11 +151,21 @@ export interface ClaudeCodeConfig {
    * {@link file://./egress.ts EgressConfig.restrictToHosts} for the full table
    * and for why open is the default.
    *
-   * Whatever this says, the container never needs forge access: `/repo` runs
-   * clone, fetch and push as isomorphic-git inside the workspace object, so the
-   * forge token stays on the Worker side.
+   * A restriction that leaves out `github.com` and `api.github.com` leaves out
+   * {@link githubToken} with them.
    */
   restrictToHosts?: readonly string[];
+
+  /**
+   * GitHub as the deployment's account, for a session that pushes its branch,
+   * opens its pull request and answers its review. Read per request, on the
+   * Worker side.
+   *
+   * The session gets a placeholder as `GH_TOKEN` and as git's credential, and
+   * the egress gateway swaps in this token for GitHub's hosts only — see
+   * {@link file://./github.ts}. Unset, `gh` and git reach GitHub anonymously.
+   */
+  githubToken?: () => string | undefined;
 
   /**
    * Ceiling on the whole session, enforced by the container runtime.

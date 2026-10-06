@@ -7,7 +7,7 @@
  * other than what it appears to name.
  */
 
-/** The forges a clone URL may name. `RepoConfig.allowedHosts` overrides it. */
+/** The hosts a clone URL may name. `RepoConfig.allowedHosts` overrides it. */
 export const DEFAULT_ALLOWED_HOSTS = ["github.com"];
 
 /** Branch names a push must never target, whatever the model believes. */
@@ -93,7 +93,7 @@ export function sameRepoUrl(a: string, b: string): boolean {
 }
 
 /**
- * A name a forge would actually issue — and one that is safe to use as a path
+ * A name GitHub would actually issue — and one that is safe to use as a path
  * segment and as a key.
  *
  * GitHub's rule for an owner and a repository alike is alphanumerics, `-`, `_`
@@ -106,11 +106,11 @@ export function sameRepoUrl(a: string, b: string): boolean {
  * is a separator in somebody else's key format, which is how two callers end up
  * sharing one workspace.
  */
-const FORGE_NAME = /^[A-Za-z0-9._-]+$/;
+const GITHUB_NAME = /^[A-Za-z0-9._-]+$/;
 
-function isForgeName(name: string): boolean {
+function isGitHubName(name: string): boolean {
   // `.` and `..` pass the character class and are exactly the two that must not.
-  return name !== "." && name !== ".." && FORGE_NAME.test(name);
+  return name !== "." && name !== ".." && GITHUB_NAME.test(name);
 }
 
 /**
@@ -118,7 +118,7 @@ function isForgeName(name: string): boolean {
  *
  * Anchored on the **parsed host** rather than matched in the string, so
  * `https://evil.example.com/github.com/owner/repo` is not a github.com URL.
- * Both names are then checked against {@link isForgeName}, so a name that could
+ * Both names are then checked against {@link isGitHubName}, so a name that could
  * traverse a path or split somebody else's key never gets as far as being one.
  *
  * `undefined` is a refusal at every caller, never a reason to carry on with a
@@ -135,6 +135,6 @@ export function parseRepo(
   if (!match) return undefined;
 
   const [, owner, repo] = match as unknown as [string, string, string];
-  if (!isForgeName(owner) || !isForgeName(repo)) return undefined;
+  if (!isGitHubName(owner) || !isGitHubName(repo)) return undefined;
   return { owner, repo };
 }

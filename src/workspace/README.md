@@ -91,7 +91,7 @@ is one the parent chose, so a sub-agent cannot compute the name itself. The spec
 git on a real container without either importing the other. What runs through it is
 `/repo`'s **unauthenticated** half: `status`, `diff`, `add`, `commit`, `checkout`. The
 three operations that authenticate — clone, fetch, push — never reach the container,
-so no command here carries a forge token.
+so no command here carries a GitHub token.
 
 It does **not** merge `env` into what it runs, deliberately: those commands are
 another plugin's, and it pins the git environment they need. A host environment

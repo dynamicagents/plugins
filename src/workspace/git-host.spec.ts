@@ -5,7 +5,7 @@ import { describeGitError, WorkspaceGitHost } from "./git-host.js";
 /**
  * The credential boundary, driven directly.
  *
- * `onAuth` is the whole of what keeps a forge token from reaching a host nobody
+ * `onAuth` is the whole of what keeps a GitHub token from reaching a host nobody
  * allowed. It is built per operation and handed to isomorphic-git, so the only
  * way to exercise it is to capture it from a fake client and call it with the
  * URLs git would — including the one it reaches by redirect, which is the case
@@ -23,7 +23,7 @@ import { describeGitError, WorkspaceGitHost } from "./git-host.js";
  */
 const NO_PRIOR_AUTH = {};
 
-const TOKEN = "forge-token";
+const TOKEN = "github-token";
 const ALLOWED = ["github.com"];
 
 /** A client that captures the `onAuth` it is given and reports success. */
@@ -57,7 +57,7 @@ function hostWith(git: GitClient, token: string | undefined) {
   });
 }
 
-describe("who the forge credential is handed to", () => {
+describe("who the GitHub credential is handed to", () => {
   it("authenticates to a host on the allowlist", async () => {
     const { git, onAuth } = captureAuth();
     await hostWith(git, TOKEN).fetch({
@@ -306,6 +306,29 @@ describe("what a clone leaves for the container's git", () => {
       "branch.main.remote=origin",
       "branch.main.merge=refs/heads/main"
     ]);
+  });
+});
+
+describe("reading a checkout's origin", () => {
+  const withConfig = (configGet: () => Promise<unknown>) =>
+    hostWith({ configGet: vi.fn(configGet) } as unknown as GitClient, TOKEN);
+
+  it("answers the url from the local store", async () => {
+    const host = withConfig(async () => "https://github.com/acme/widget.git");
+    expect(await host.origin("/workspace/widget")).toBe(
+      "https://github.com/acme/widget.git"
+    );
+  });
+
+  it("answers nothing for a directory with no checkout or no origin", async () => {
+    expect(
+      await withConfig(async () => undefined).origin("/w")
+    ).toBeUndefined();
+    expect(
+      await withConfig(async () => {
+        throw new Error("not a git repository");
+      }).origin("/w")
+    ).toBeUndefined();
   });
 });
 
