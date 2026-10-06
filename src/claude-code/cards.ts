@@ -287,15 +287,17 @@ export function toolResultCard(event: ToolResultEvent): Card {
   return done(event.content ? [section("Output", event.content, "text")] : []);
 }
 
-/** A thinking block, folded under its first line. Nothing for a redacted one. */
-export function thinkingCard(text: string): Card | undefined {
-  if (!text) return undefined;
+/**
+ * A thinking block, as the CLI says it: "Thought for 5s". What it thought is
+ * never on the card — see the `thinking` event in `./events.ts`.
+ */
+export function thinkingCard(durationMs: number | undefined): Card {
   return {
-    text: oneLine(text),
-    detail: {
-      title: "Thinking",
-      sections: [section("", text, "markdown")]
-    }
+    text:
+      durationMs === undefined
+        ? "Thought"
+        : `Thought for ${duration(Math.max(durationMs, 1000))}`,
+    detail: { title: "Thinking" }
   };
 }
 

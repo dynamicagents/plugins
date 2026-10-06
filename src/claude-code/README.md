@@ -407,8 +407,9 @@ What the session says as it works goes to the parent as **notes**, through
 on the key, so a note filed again after a restart is dropped, and two runs in one
 task never collide. Prose is a plain note; every tool call, its result and the
 session's start and end are a note with a **card** — the tool, what it acted on,
-its input and output folded beneath (`./cards.ts`). A card stays on the
-transcript and never reaches the thread. Nothing else is streamed at all —
+its input and output folded beneath (`./cards.ts`). A thinking block is a card
+too, saying only how long it took — "Thought for 5s" — and never what it said. A
+card stays on the transcript and never reaches the thread. Nothing else is streamed at all —
 Think's stall watchdog is off, so a silent stream is not cut.
 
 **A `jsonSchema` makes the answer data**, for a session whose answer a host acts

@@ -306,21 +306,15 @@ describe("toolResultCard", () => {
 });
 
 describe("the session's own cards", () => {
-  it("folds thinking under its first line, and skips a redacted block", () => {
-    expect(thinkingCard("Weigh the store.\nThen the viewer.")).toEqual({
-      text: "Weigh the store.",
-      detail: {
-        title: "Thinking",
-        sections: [
-          {
-            label: "",
-            body: "Weigh the store.\nThen the viewer.",
-            format: "markdown"
-          }
-        ]
-      }
+  it("says how long a thinking block took, the way the CLI does", () => {
+    expect(thinkingCard(4_600)).toEqual({
+      text: "Thought for 5s",
+      detail: { title: "Thinking" }
     });
-    expect(thinkingCard("")).toBeUndefined();
+    expect(thinkingCard(65_000).text).toBe("Thought for 1m 5s");
+    // A block that took less than a second still took one.
+    expect(thinkingCard(200).text).toBe("Thought for 1s");
+    expect(thinkingCard(undefined).text).toBe("Thought");
   });
 
   it("names the model and the mode a session started in", () => {

@@ -505,6 +505,34 @@ describe("buildLaunch", () => {
 });
 
 describe("drainRun", () => {
+  /**
+   * A thinking block is timed from the line before it, which a drain cut short
+   * may have read before the cut — so the cursor carries that line's time, and
+   * the next drain times from it.
+   */
+  it("times a thinking block from the time its cursor carries, and carries the next", async () => {
+    const thoughtAt = "2026-10-06T08:31:22.000Z";
+    const handle = fakeHandle([
+      stdout(
+        1,
+        line({
+          type: "assistant",
+          timestamp: thoughtAt,
+          message: { content: [{ type: "thinking", thinking: "private" }] }
+        })
+      ),
+      exit(2, 0)
+    ]);
+
+    const outcome = await drainRun(handle, {
+      ...FRESH,
+      since: Date.parse("2026-10-06T08:31:19.000Z")
+    });
+
+    expect(outcome.progress.map((p) => p.text)).toEqual(["Thought for 3s"]);
+    expect(outcome.cursor.since).toBe(Date.parse(thoughtAt));
+  });
+
   it("reports the run done on the exit event, with its result", async () => {
     const handle = fakeHandle([
       stdout(1, assistant("working")),

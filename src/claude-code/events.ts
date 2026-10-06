@@ -39,7 +39,6 @@ interface AssistantBlock {
   type: string;
   id?: string;
   text?: string;
-  thinking?: string;
   name?: string;
   input?: unknown;
 }
@@ -140,8 +139,14 @@ export type ClaudeCodeEvent =
   | { kind: "rateLimit"; info: RateLimitInfo }
   /** One `text` block of an assistant message, verbatim — it is markdown. */
   | { kind: "text"; text: string }
-  /** One `thinking` block. Empty when the API returned it redacted. */
-  | { kind: "thinking"; text: string }
+  /**
+   * One `thinking` block, as how long it took — never what it said. A block can
+   * run to thousands of tokens of private reasoning; a reader is told that the
+   * model thought, and for how long, the way the CLI itself says it. Timed from
+   * the line before it (see {@link ParsedStream.since}), and absent when no line
+   * before it carried a time, as for a session's first turn.
+   */
+  | { kind: "thinking"; durationMs?: number }
   | { kind: "toolUse"; id: string; name: string; input: unknown }
   /**
    * One `tool_result` block of a `user` line: a tool's answer going back to
@@ -196,6 +201,16 @@ export interface ParsedStream {
   sample?: string;
   /** Lines dropped for carrying `parent_tool_use_id`. See {@link parseStream}. */
   nested: number;
+  /**
+   * The `timestamp` of the last complete line that carried one, in epoch
+   * milliseconds — what the next thinking block is timed from.
+   *
+   * Handed back to the next call with `carry`, and for the same reason: the
+   * line a block is measured from may be one an earlier read parsed. The caller
+   * keeps it on its cursor, so a drain resumed on another isolate times the
+   * next block from the same line.
+   */
+  since?: number;
 }
 
 const EMPTY_USAGE: ClaudeCodeUsage = {
@@ -237,7 +252,10 @@ function readUsage(raw: unknown): ClaudeCodeUsage {
  * a reader: prose, the model's reasoning, and each tool it called. A message
  * that only calls tools is as much progress as one that narrates.
  */
-function readAssistant(message: Record<string, unknown>): ClaudeCodeEvent[] {
+function readAssistant(
+  message: Record<string, unknown>,
+  thought: number | undefined
+): ClaudeCodeEvent[] {
   const content = Array.isArray(message.content)
     ? (message.content as AssistantBlock[])
     : [];
@@ -251,8 +269,10 @@ function readAssistant(message: Record<string, unknown>): ClaudeCodeEvent[] {
       const text = str(block.text);
       if (text?.trim()) events.push({ kind: "text", text });
     } else if (block.type === "thinking") {
-      const text = typeof block.thinking === "string" ? block.thinking : "";
-      events.push({ kind: "thinking", text: text.trim() ? text : "" });
+      events.push({
+        kind: "thinking",
+        ...(thought === undefined ? {} : { durationMs: thought })
+      });
     } else if (block.type === "tool_use") {
       const id = str(block.id);
       const name = str(block.name);
@@ -349,8 +369,11 @@ function readDenial(event: Record<string, unknown>): ClaudeCodeEvent {
  * the filter.
  *
  * `result` and `init` are never nested and are read unconditionally.
+ *
+ * `since` is the last line's time from the previous call — see
+ * {@link ParsedStream.since}.
  */
-export function parseStream(buffer: string): ParsedStream {
+export function parseStream(buffer: string, since?: number): ParsedStream {
   const events: ClaudeCodeEvent[] = [];
   let skipped = 0;
   let nested = 0;
@@ -397,6 +420,8 @@ export function parseStream(buffer: string): ParsedStream {
       nested++;
       continue;
     }
+
+    const at = readTime(event.timestamp);
 
     switch (event.type) {
       case "system": {
@@ -449,7 +474,14 @@ export function parseStream(buffer: string): ParsedStream {
           skip(trimmed);
           break;
         }
-        events.push(...readAssistant(message));
+        // The model starts on a turn once the line before it is out — the
+        // tool result it answers, or the text before it — so that line's time
+        // is when this thinking began.
+        const thought =
+          at !== undefined && since !== undefined && at >= since
+            ? at - since
+            : undefined;
+        events.push(...readAssistant(message, thought));
         break;
       }
 
@@ -491,9 +523,18 @@ export function parseStream(buffer: string): ParsedStream {
       default:
         skip(trimmed);
     }
+
+    if (at !== undefined) since = at;
   }
 
-  return { events, carry, skipped, nested, ...(sample ? { sample } : {}) };
+  return {
+    events,
+    carry,
+    skipped,
+    nested,
+    ...(sample ? { sample } : {}),
+    ...(since === undefined ? {} : { since })
+  };
 }
 
 /**
@@ -533,6 +574,12 @@ function readRateLimit(
       ? { overageDisabledReason: str(info.overageDisabledReason) }
       : {})
   };
+}
+
+/** A line's `timestamp`, in epoch milliseconds, or `undefined`. */
+function readTime(value: unknown): number | undefined {
+  const ms = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 /** Whether a millisecond value is one `Date` can actually represent. */
@@ -665,7 +712,7 @@ function describe(event: ClaudeCodeEvent): Omit<NoteData, "key"> | undefined {
     case "toolResult":
       return toolResultCard(event);
     case "thinking":
-      return thinkingCard(event.text);
+      return thinkingCard(event.durationMs);
     case "denied":
       // The one progress note that is more useful than the session's own
       // account of itself. A refused tool call is invisible in the transcript —
