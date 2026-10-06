@@ -81,16 +81,12 @@ A host whose writing sub-agents each commit in a checkout of their own can hand 
 parent a way between them: `worktrees: { list, use, release }`. The plugin then
 offers `repo_worktrees`, to see each worktree's branch and state and to release
 one, and `repo_worktree`, which asks the host to point every repo tool at the
-worktree holding a branch — or back at the main checkout. A switch moves the
+worktree holding a branch — or back at the main checkout. The switch holds until
+the next one, and a host that moves the tools on its own says so where the model
+reads it every turn: the model remembers the switch's answer. A switch moves the
 installing agent's own tools, so a host passes `worktrees` to the parent's install
 and never to a sub-agent's. The host renders every answer; this plugin checks a
 branch's shape and passes the sentence through.
-
-Two hooks go with it. `beforeWrite` is asked before `repo_commit` or `repo_push`
-changes anything, with the origin a push would use, and a string it returns refuses
-with that sentence — for a checkout a session is still working in, or whose
-`.git/config` a session could have rewritten. `afterPush` is told the commit a push
-landed.
 
 ## Nothing is held for approval
 

@@ -38,7 +38,7 @@ export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
 
     repo_worktree: tool({
       description:
-        "Point every repo tool and your file reads at the worktree holding a branch a writing sub-agent reported — to review its commits with repo_diff, test it, push it and open the pull request from there. Call with no branch to come back to your own checkout.",
+        "Point every repo tool and your file reads at the worktree holding a branch a writing sub-agent reported, to read what it did. They stay there until you call this again; call it with no branch to come back to your own checkout.",
       inputSchema: z.object({
         branch: z
           .string()

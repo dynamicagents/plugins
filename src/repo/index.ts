@@ -279,33 +279,6 @@ export interface RepoConfig {
     repo: string;
   }) => void;
   /**
-   * Asked before `repo_commit` or `repo_push` changes anything. A string refuses
-   * with that sentence; `undefined` lets it through.
-   *
-   * For a host whose checkouts something else may be working in, or may have
-   * rewritten — a sub-agent's session that has not finished, a `.git/config` a
-   * session had a shell over. Only the host knows either, and a refusal here is
-   * the only place the model hears it before the write lands. `url` is the
-   * origin a push would go to, read from the checkout.
-   */
-  beforeWrite?: (write: {
-    tool: "repo_commit" | "repo_push";
-    dir: string;
-    branch?: string;
-    url?: string;
-  }) => Promise<string | undefined>;
-  /**
-   * Called once a push has landed, with the commit it put on the remote.
-   *
-   * A throw is caught and logged: the push happened, and the model must be told
-   * so whatever a host's bookkeeping does.
-   */
-  afterPush?: (push: {
-    dir: string;
-    branch: string;
-    commit: string;
-  }) => Promise<void>;
-  /**
    * The worktrees a host keeps for its sub-agents' work, and the way between
    * them.
    *
@@ -361,6 +334,10 @@ export interface RepoWorktrees {
    * Point every repo tool — and whatever else the host routes the same way — at
    * the worktree holding `branch`, or back at the main checkout when it is absent.
    * Answers what the model now has in front of it.
+   *
+   * The switch holds until the next one. This answer is what the model
+   * remembers, so a host that moves the tools on its own says so where the
+   * model reads it every turn.
    */
   use(branch?: string): Promise<string>;
   /** Give up `branch`'s worktree, and the unpushed work in it. */
@@ -418,9 +395,7 @@ export function repo(config: RepoConfig): AgentPlugin {
     has("repo_worktrees") &&
       "`repo_worktrees` lists the worktrees your writing sub-agents committed in — each one's branch, whether a session is still in it, whether its commits are pushed — and releases one you will not keep.",
     has("repo_worktree") &&
-      (has("repo_diff") && has("repo_push") && has("repo_open_pr")
-        ? "`repo_worktree` points every repo tool and your file reads at the worktree holding a branch, so you review — `repo_diff` with `base` shows what its commits add — push and open the pull request from there; call it with no branch to come back to your own checkout."
-        : "`repo_worktree` points every repo tool and your file reads at the worktree holding a branch; call it with no branch to come back to your own checkout.")
+      "`repo_worktree` points every repo tool and your file reads at the worktree holding a branch, and they stay there until you call it again — with no branch to come back to your own checkout."
   ];
   const lines = [
     has("repo_clone") &&
