@@ -246,11 +246,13 @@ function readAssistant(message: Record<string, unknown>): ClaudeCodeEvent[] {
   for (const block of content) {
     if (!asRecord(block)) continue;
     if (block.type === "text") {
-      const text = str(block.text)?.trim();
-      if (text) events.push({ kind: "text", text });
+      // Trimmed only to ask whether it is empty: indentation is a code block's
+      // and trailing spaces a hard break's, so the event keeps it verbatim.
+      const text = str(block.text);
+      if (text?.trim()) events.push({ kind: "text", text });
     } else if (block.type === "thinking") {
       const text = typeof block.thinking === "string" ? block.thinking : "";
-      events.push({ kind: "thinking", text: text.trim() });
+      events.push({ kind: "thinking", text: text.trim() ? text : "" });
     } else if (block.type === "tool_use") {
       const id = str(block.id);
       const name = str(block.name);

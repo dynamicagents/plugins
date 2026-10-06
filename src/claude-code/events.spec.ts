@@ -122,7 +122,11 @@ describe("parseStream", () => {
       message: {
         content: [
           { type: "thinking", thinking: " a deliberation " },
-          { type: "text", text: "editing\n\n- one\n- two" },
+          {
+            type: "text",
+            text: "editing\n\n    indented code  \n- one\n- two"
+          },
+          { type: "text", text: "  \n " },
           { type: "tool_use", id: "toolu_1", name: "Edit", input: { a: 1 } },
           { type: "tool_use", id: "toolu_2", name: "Bash", input: {} },
           // No id: nothing could complete its card.
@@ -132,9 +136,10 @@ describe("parseStream", () => {
     });
 
     expect(parseStream(buffer).events).toEqual([
-      { kind: "thinking", text: "a deliberation" },
-      // Verbatim: it is markdown, and its line breaks are its structure.
-      { kind: "text", text: "editing\n\n- one\n- two" },
+      { kind: "thinking", text: " a deliberation " },
+      // Verbatim: it is markdown, and its indentation and line breaks are its
+      // structure. A block of only whitespace says nothing.
+      { kind: "text", text: "editing\n\n    indented code  \n- one\n- two" },
       { kind: "toolUse", id: "toolu_1", name: "Edit", input: { a: 1 } },
       { kind: "toolUse", id: "toolu_2", name: "Bash", input: {} }
     ]);
