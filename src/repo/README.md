@@ -21,8 +21,14 @@ repo({
 
 Tools: `repo_clone`, `repo_fetch`, `repo_status`, `repo_diff`, `repo_commit`,
 `repo_push`, `repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment`,
-`repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`, and — for a host
-that keeps worktrees, below — `repo_worktrees` and `repo_worktree`.
+`repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`, `repo_pr_checks`,
+and — for a host that keeps worktrees, below — `repo_worktrees` and `repo_worktree`.
+
+`tools: [...]` offers only the tools named, and the context the model reads names
+only those. An agent that coordinates others' work — reading pull requests, never
+writing one — takes the read tools and nothing it would be told to finish with.
+Core's `restrictTools` is the wrong instrument here: it drops a plugin's context
+whole.
 
 Everything past `repo_open_pr` is what a model reaches for `gh` to do — read an
 issue, check a pull request, leave a comment, answer a review. They are here
@@ -239,6 +245,7 @@ practical one for an agent whose entire view of the work is the diff.
 
 ## Requirements
 
-A `GITHUB_TOKEN` secret with contents + pull-request write, a container with
+A `GITHUB_TOKEN` secret with contents + pull-request write (and checks + commit
+statuses read, for `repo_pr_checks`), a container with
 `git` on it for the local half, and a `git` implementation on the host's side for
 the three operations that authenticate.

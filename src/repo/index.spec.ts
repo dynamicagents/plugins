@@ -4,6 +4,7 @@ import type { Tool, ToolSet } from "ai";
 import {
   graphqlEndpoint,
   repo,
+  REPO_TOOL_NAMES,
   type RepoConfig,
   type RepoExec,
   type RepoGit,
@@ -2775,10 +2776,10 @@ describe("a host that keeps worktrees", () => {
 
     expect(await run(main, "repo_worktrees", {})).toBe("listed");
     expect(
-      await run(main, "repo_worktrees", { release: "anthropic-coding/t/1" })
+      await run(main, "repo_worktrees", { release: "claude-coordinator/t/1" })
     ).toBe("released");
     expect(
-      await run(main, "repo_worktree", { branch: "anthropic-coding/t/1" })
+      await run(main, "repo_worktree", { branch: "claude-coordinator/t/1" })
     ).toBe("switched");
     expect(await run(main, "repo_worktree", {})).toBe("switched");
     expect(await run(main, "repo_worktree", { branch: "--help" })).toMatch(
@@ -2793,8 +2794,8 @@ describe("a host that keeps worktrees", () => {
     );
     expect(asked).toEqual([
       "list",
-      "release anthropic-coding/t/1",
-      "use anthropic-coding/t/1",
+      "release claude-coordinator/t/1",
+      "use claude-coordinator/t/1",
       "use (checkout)"
     ]);
   });
@@ -2921,5 +2922,169 @@ describe("a host that keeps worktrees", () => {
 
     expect(result).toMatch(/refusing to push "coder\/x"/);
     expect(result).toContain("check repo_status and repo_diff");
+  });
+});
+
+describe("a pull request's checks", () => {
+  const SHA = "abc1234def5678";
+
+  /** The forge by REST path suffix; anything unlisted is a 404. */
+  const checks = async (rest: Record<string, unknown>) => {
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const path = new URL(String(input)).pathname;
+        const hit = Object.entries(rest).find(([suffix]) =>
+          path.endsWith(suffix)
+        )?.[1];
+        return new Response(JSON.stringify(hit ?? {}), {
+          status: hit === undefined ? 404 : 200
+        });
+      });
+    try {
+      return await run(tools(recorder().exec), "repo_pr_checks", {
+        dir: "/w/r",
+        number: 42
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  const pr = { "/pulls/42": { head: { sha: SHA } } };
+
+  it("names what failed and what is still running, from both CI APIs", async () => {
+    const result = await checks({
+      ...pr,
+      [`/commits/${SHA}/check-runs`]: {
+        total_count: 3,
+        check_runs: [
+          { name: "lint", status: "completed", conclusion: "success" },
+          {
+            name: "test",
+            status: "completed",
+            conclusion: "failure",
+            html_url: "https://github.com/o/r/runs/1"
+          },
+          { name: "build", status: "in_progress", conclusion: null }
+        ]
+      },
+      [`/commits/${SHA}/status`]: {
+        statuses: [{ context: "deploy/preview", state: "error" }]
+      }
+    });
+
+    expect(result).toContain(
+      "Checks on #42 at abc1234: 2 failed, 1 still running, 1 passed."
+    );
+    expect(result).toContain("- test (failure) https://github.com/o/r/runs/1");
+    expect(result).toContain("- deploy/preview (error)");
+    expect(result).toContain("Still running:\n- build");
+    expect(result).not.toContain("Every check has finished");
+  });
+
+  it("says when every check has passed", async () => {
+    const result = await checks({
+      ...pr,
+      [`/commits/${SHA}/check-runs`]: {
+        total_count: 2,
+        check_runs: [
+          { name: "lint", status: "completed", conclusion: "success" },
+          { name: "docs", status: "completed", conclusion: "skipped" }
+        ]
+      },
+      [`/commits/${SHA}/status`]: { statuses: [] }
+    });
+
+    expect(result).toContain("0 failed, 0 still running, 2 passed.");
+    expect(result).toContain("Every check has finished and passed.");
+  });
+
+  it("does not call a truncated read all passed", async () => {
+    const result = await checks({
+      ...pr,
+      [`/commits/${SHA}/check-runs`]: {
+        total_count: 250,
+        check_runs: [{ name: "a", status: "completed", conclusion: "success" }]
+      },
+      [`/commits/${SHA}/status`]: { statuses: [] }
+    });
+
+    expect(result).toContain("Only the first 100 of 250 check runs were read.");
+    expect(result).not.toContain("Every check has finished");
+  });
+
+  it("says when nothing has reported yet", async () => {
+    const result = await checks({
+      ...pr,
+      [`/commits/${SHA}/check-runs`]: { total_count: 0, check_runs: [] },
+      [`/commits/${SHA}/status`]: { statuses: [] }
+    });
+
+    expect(result).toContain(
+      "No checks have reported on #42's latest commit (abc1234)."
+    );
+  });
+});
+
+describe("choosing the tools", () => {
+  const plugin = (selection?: RepoConfig["tools"]) =>
+    repo({
+      exec: recorder().exec,
+      git: gitRecorder().git,
+      token: () => TOKEN,
+      worktrees: {
+        list: async () => "",
+        use: async () => "",
+        release: async () => ""
+      },
+      ...(selection ? { tools: selection } : {})
+    });
+  const contextOf = async (p: ReturnType<typeof repo>) =>
+    (
+      p.context as { provider: { get: () => Promise<string> } }[]
+    )[0]!.provider.get();
+
+  it("offers every tool, and says so, when nothing is chosen", async () => {
+    const all = plugin();
+    const ctx = testPluginContext({ runtime: () => undefined });
+    const offered = [
+      ...Object.keys(all.tools!(ctx)),
+      ...Object.keys(all.actions!(ctx))
+    ];
+
+    expect(offered.sort()).toEqual([...REPO_TOOL_NAMES].sort());
+    expect(await contextOf(all)).toContain(
+      "Finish by opening a pull request and reporting its URL."
+    );
+  });
+
+  /**
+   * An agent that coordinates others' work: it reads pull requests and never
+   * writes one, so nothing it is told may name a tool it does not have.
+   */
+  it("offers only the chosen tools, and tells the model about only those", async () => {
+    const chosen = [
+      "repo_clone",
+      "repo_pr_view",
+      "repo_pr_review_status",
+      "repo_pr_threads",
+      "repo_pr_checks",
+      "repo_worktrees"
+    ] as const;
+    const some = plugin(chosen);
+    const ctx = testPluginContext({ runtime: () => undefined });
+
+    expect(Object.keys(some.tools!(ctx)).sort()).toEqual([...chosen].sort());
+    expect(Object.keys(some.actions!(ctx))).toEqual([]);
+
+    const context = await contextOf(some);
+    for (const name of REPO_TOOL_NAMES.filter(
+      (name) => !(chosen as readonly string[]).includes(name)
+    )) {
+      expect(context).not.toContain(`\`${name}\``);
+    }
+    expect(context).toContain("`repo_pr_checks`");
+    expect(context).not.toContain("Never push");
   });
 });
