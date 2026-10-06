@@ -148,66 +148,142 @@ describe("parseStream", () => {
   /**
    * A thinking block is the one block whose content never leaves the parser: it
    * can be thousands of tokens of private reasoning. What a reader gets is how
-   * long it took, timed from the line the model was answering.
+   * long it streamed — from the read that brought its first `thinking_tokens`
+   * line to the read that brought the block, so nothing that came before the
+   * model started thinking is counted.
    */
   describe("a thinking block", () => {
-    const at = (iso: string, value: Record<string, unknown>) =>
-      line({ ...value, timestamp: iso });
-    const toolResult = (iso: string) =>
-      at(iso, {
+    const T0 = Date.parse("2026-10-06T08:31:00.000Z");
+    const iso = (ms: number) => new Date(T0 + ms).toISOString();
+    const toolResult = (ms: number) =>
+      line({
         type: "user",
+        timestamp: iso(ms),
         message: {
           content: [
             { type: "tool_result", tool_use_id: "toolu_1", content: "ok" }
           ]
         }
       });
-    const thinking = (iso: string) =>
-      at(iso, {
+    const tokens = (estimated: number) =>
+      line({
+        type: "system",
+        subtype: "thinking_tokens",
+        estimated_tokens: estimated,
+        estimated_tokens_delta: estimated
+      });
+    const thinking = (ms: number, id = "msg_1") =>
+      line({
         type: "assistant",
+        timestamp: iso(ms),
         message: {
+          id,
           content: [{ type: "thinking", thinking: "a private deliberation" }]
         }
       });
+    /** Each read arrives at `ms`, carrying the last read's start on. */
+    const reads = (...steps: [number, string][]) => {
+      let from: number | undefined;
+      const events: ClaudeCodeEvent[] = [];
+      for (const [ms, buffer] of steps) {
+        const parsed = parseStream(buffer, {
+          now: T0 + ms,
+          ...(from === undefined ? {} : { thinkingFrom: from })
+        });
+        events.push(...parsed.events);
+        from = parsed.thinkingFrom;
+      }
+      return { events, from };
+    };
 
-    it("is timed from the line before it, and carries none of its text", () => {
-      const parsed = parseStream(
-        toolResult("2026-10-06T08:31:19.679Z") +
-          thinking("2026-10-06T08:31:24.431Z")
+    it("is timed from its first token line to its own line, and carries none of its text", () => {
+      const { events, from } = reads(
+        [0, toolResult(0)],
+        [800, tokens(50)],
+        [2_000, tokens(200)],
+        [5_400, thinking(5_400)]
       );
-      expect(parsed.events.at(-1)).toEqual({
+      expect(events.at(-1)).toEqual({
         kind: "thinking",
-        durationMs: 4_752
+        messageId: "msg_1",
+        durationMs: 4_600
       });
-      const notes = toProgress(parsed.events, 0);
+      // The block's own line clears the start.
+      expect(from).toBeUndefined();
+      const notes = toProgress(events, 0);
       expect(notes.at(-1)).toEqual({
         key: "claude:1",
         text: "Thought for 5s",
-        detail: { title: "Thinking" }
+        detail: { title: "Thinking", ref: "msg_1" }
       });
       expect(JSON.stringify(notes)).not.toContain("deliberation");
     });
 
     /**
-     * The line it is timed from can arrive in an earlier read, and on another
-     * isolate after a resume — so its time travels with the carry.
+     * The failure the token line exists to avoid: a minute of retries between
+     * the tool result and the first token is not a minute of thought.
      */
-    it("is timed across reads from the time the last read handed back", () => {
-      const first = parseStream(toolResult("2026-10-06T08:31:19.000Z"));
-      expect(first.since).toBe(Date.parse("2026-10-06T08:31:19.000Z"));
-
-      const second = parseStream(
-        thinking("2026-10-06T08:31:22.000Z"),
-        first.since
+    it("does not count a retry or anything else before thinking started", () => {
+      const retry = line({ type: "system", subtype: "api_retry", attempt: 1 });
+      const { events } = reads(
+        [0, toolResult(0)],
+        [1_000, retry],
+        [61_000, tokens(50)],
+        [63_000, thinking(63_000)]
       );
-      expect(second.events).toEqual([{ kind: "thinking", durationMs: 3_000 }]);
-      expect(second.since).toBe(Date.parse("2026-10-06T08:31:22.000Z"));
+      expect(events.at(-1)).toMatchObject({ durationMs: 2_000 });
     });
 
-    it("has no time when no line before it carried one", () => {
-      expect(
-        parseStream(init() + thinking("2026-10-06T08:31:22.000Z")).events.at(-1)
-      ).toEqual({ kind: "thinking" });
+    it("has no time when no token line came before it", () => {
+      const { events } = reads([0, toolResult(0)], [2_500, thinking(2_500)]);
+      expect(events.at(-1)).toEqual({ kind: "thinking", messageId: "msg_1" });
+      expect(toProgress(events, 0).at(-1)?.text).toBe("Thought");
+    });
+
+    /**
+     * A drain that re-attached is handed what was printed meanwhile in one
+     * burst. Timed on that read, a minute-long block would read as instant.
+     */
+    it("has no time when its line arrives long after the CLI stamped it", () => {
+      const { events } = reads(
+        [0, toolResult(0)],
+        [90_000, tokens(50) + thinking(30_000)]
+      );
+      expect(events.at(-1)).toEqual({ kind: "thinking", messageId: "msg_1" });
+    });
+
+    /**
+     * Every line with a timestamp ends whatever was pending — so token lines
+     * from before a tool's result, an inner agent's included, never start the
+     * block that answers it.
+     */
+    it("starts only after the last message before it", () => {
+      const { events } = reads(
+        [0, tokens(50)],
+        [50_000, toolResult(50_000)],
+        [51_000, tokens(50)],
+        [53_000, thinking(53_000)]
+      );
+      expect(events.at(-1)).toMatchObject({ durationMs: 2_000 });
+    });
+
+    it("is not timed without a clock", () => {
+      expect(parseStream(tokens(50) + thinking(0)).events).toEqual([
+        { kind: "thinking", messageId: "msg_1" }
+      ]);
+    });
+
+    it("folds a message's blocks into one card, by the message", () => {
+      const { events } = reads(
+        [0, toolResult(0)],
+        [500, tokens(50)],
+        [9_000, thinking(9_000) + tokens(4) + tokens(300) + thinking(9_010)]
+      );
+      expect(toProgress(events, 0).map((note) => note.detail)).toEqual([
+        expect.objectContaining({ ref: "toolu_1" }),
+        { title: "Thinking", ref: "msg_1" },
+        { title: "Thinking", ref: "msg_1" }
+      ]);
     });
   });
 

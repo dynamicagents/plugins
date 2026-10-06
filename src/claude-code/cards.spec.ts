@@ -307,14 +307,17 @@ describe("toolResultCard", () => {
 
 describe("the session's own cards", () => {
   it("says how long a thinking block took, the way the CLI does", () => {
-    expect(thinkingCard(4_600)).toEqual({
+    expect(thinkingCard(4_600, "msg_1")).toEqual({
       text: "Thought for 5s",
+      detail: { title: "Thinking", ref: "msg_1" }
+    });
+    expect(thinkingCard(65_000, undefined)).toEqual({
+      text: "Thought for 1m 5s",
       detail: { title: "Thinking" }
     });
-    expect(thinkingCard(65_000).text).toBe("Thought for 1m 5s");
     // A block that took less than a second still took one.
-    expect(thinkingCard(200).text).toBe("Thought for 1s");
-    expect(thinkingCard(undefined).text).toBe("Thought");
+    expect(thinkingCard(200, undefined).text).toBe("Thought for 1s");
+    expect(thinkingCard(undefined, undefined).text).toBe("Thought");
   });
 
   it("names the model and the mode a session started in", () => {

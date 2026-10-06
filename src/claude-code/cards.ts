@@ -288,16 +288,24 @@ export function toolResultCard(event: ToolResultEvent): Card {
 }
 
 /**
- * A thinking block, as the CLI says it: "Thought for 5s". What it thought is
- * never on the card — see the `thinking` event in `./events.ts`.
+ * A thinking block, as the CLI says it: "Thought for 5s", or "Thought" when it
+ * was not timed. What it thought is never on the card — see the `thinking`
+ * event in `./events.ts`.
+ *
+ * Its message is its `ref`, so a message's blocks are one card: a message
+ * that thinks twice ends on a second block of a few milliseconds, and the CLI
+ * shows the two as one thought.
  */
-export function thinkingCard(durationMs: number | undefined): Card {
+export function thinkingCard(
+  durationMs: number | undefined,
+  messageId: string | undefined
+): Card {
   return {
     text:
       durationMs === undefined
         ? "Thought"
         : `Thought for ${duration(Math.max(durationMs, 1000))}`,
-    detail: { title: "Thinking" }
+    detail: { title: "Thinking", ...(messageId ? { ref: messageId } : {}) }
   };
 }
 

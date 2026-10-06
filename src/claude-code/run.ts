@@ -500,10 +500,10 @@ export interface DrainCursor {
    */
   stderr?: string;
   /**
-   * The time of the last line read — what the next thinking block is timed
-   * from. See `ParsedStream.since` in `./events.ts`.
+   * When the pending thinking block began streaming, on this drain's clock —
+   * see `ParsedStream.thinkingFrom` in `./events.ts`.
    */
-  since?: number;
+  thinkingFrom?: number;
 }
 
 /** A cursor for a session that has not started yet. */
@@ -843,7 +843,7 @@ export async function drainRun(
   const progress: NoteData[] = [];
   let emitted = cursor.emitted;
   let buffer = cursor.carry;
-  let since = cursor.since;
+  let thinkingFrom = cursor.thinkingFrom;
   let seq = cursor.seq;
   let result = cursor.result;
   // This drain's reading only — see `DrainOutcome`. Starting undefined also
@@ -889,9 +889,12 @@ export async function drainRun(
    * most one incomplete line.
    */
   const absorb = (): void => {
-    const parsed = parseStream(buffer, since);
+    const parsed = parseStream(buffer, {
+      now: now(),
+      ...(thinkingFrom === undefined ? {} : { thinkingFrom })
+    });
     buffer = parsed.carry;
-    since = parsed.since;
+    thinkingFrom = parsed.thinkingFrom;
     for (const event of parsed.events) {
       if (event.kind === "result") result = event.result;
       // The first one only, and it is the id of whatever this drain is actually
@@ -980,7 +983,7 @@ export async function drainRun(
     seq,
     carry: buffer,
     emitted,
-    ...(since === undefined ? {} : { since }),
+    ...(thinkingFrom === undefined ? {} : { thinkingFrom }),
     ...(sessionId ? { sessionId } : {}),
     ...(result ? { result } : {}),
     ...(stderr ? { stderr } : {})

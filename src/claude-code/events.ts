@@ -142,11 +142,14 @@ export type ClaudeCodeEvent =
   /**
    * One `thinking` block, as how long it took — never what it said. A block can
    * run to thousands of tokens of private reasoning; a reader is told that the
-   * model thought, and for how long, the way the CLI itself says it. Timed from
-   * the line before it (see {@link ParsedStream.since}), and absent when no line
-   * before it carried a time, as for a session's first turn.
+   * model thought, and for how long, the way the CLI itself says it.
+   *
+   * `durationMs` is measured, never inferred: see
+   * {@link ParsedStream.thinkingFrom} for where it starts, and it is absent
+   * whenever that cannot be trusted. `messageId` is the API message the block
+   * belongs to — a message can carry more than one.
    */
-  | { kind: "thinking"; durationMs?: number }
+  | { kind: "thinking"; messageId?: string; durationMs?: number }
   | { kind: "toolUse"; id: string; name: string; input: unknown }
   /**
    * One `tool_result` block of a `user` line: a tool's answer going back to
@@ -202,16 +205,47 @@ export interface ParsedStream {
   /** Lines dropped for carrying `parent_tool_use_id`. See {@link parseStream}. */
   nested: number;
   /**
-   * The `timestamp` of the last complete line that carried one, in epoch
-   * milliseconds — what the next thinking block is timed from.
+   * When the pending thinking block began streaming, on the caller's clock:
+   * the `now` of the read that brought its first `system/thinking_tokens`
+   * line.
    *
-   * Handed back to the next call with `carry`, and for the same reason: the
-   * line a block is measured from may be one an earlier read parsed. The caller
-   * keeps it on its cursor, so a drain resumed on another isolate times the
-   * next block from the same line.
+   * That line is the one sign on the stream that thinking is under way. The
+   * CLI prints it as the block's text arrives, so it comes after everything
+   * that is not thinking: request setup, the wait for a first token, an API
+   * retry's back-off, a compaction. The line before a block — the tool result
+   * it answers — comes before all of those, and timing from it is how a minute
+   * of retries reads as a minute of thought. The token line carries no time of
+   * its own, which is why the caller's clock stamps it.
+   *
+   * Cleared by every line that carries a `timestamp`, so a start belongs to
+   * the block that follows the last message and never to work before it. Handed
+   * back with `carry`, for the same reason, and kept on the caller's cursor.
    */
-  since?: number;
+  thinkingFrom?: number;
 }
+
+/** What {@link parseStream} times a thinking block against. */
+export interface ParseClock {
+  /** When this read arrived, in epoch milliseconds. */
+  now: number;
+  /** {@link ParsedStream.thinkingFrom} from the previous read. */
+  thinkingFrom?: number;
+}
+
+/**
+ * How far a thinking line's arrival may be from its own `timestamp` for the
+ * block to be timed.
+ *
+ * Both ends of a block are timed by when they arrive, which is only the truth
+ * while the drain reads live. A drain that re-attached after a cut is handed
+ * what was printed meanwhile in one burst, and its arrival times are the
+ * replay's — so a block whose line arrived far from when the CLI stamped it
+ * reads "Thought", with no time. Locally a line arrives 5–31 ms after its
+ * stamp; a re-attach has been measured at about a second. A container clock
+ * this far from the Worker's degrades every block to no time, rather than to a
+ * wrong one.
+ */
+export const LIVE_SLACK_MS = 5_000;
 
 const EMPTY_USAGE: ClaudeCodeUsage = {
   input: 0,
@@ -256,6 +290,7 @@ function readAssistant(
   message: Record<string, unknown>,
   thought: number | undefined
 ): ClaudeCodeEvent[] {
+  const messageId = str(message.id);
   const content = Array.isArray(message.content)
     ? (message.content as AssistantBlock[])
     : [];
@@ -271,6 +306,7 @@ function readAssistant(
     } else if (block.type === "thinking") {
       events.push({
         kind: "thinking",
+        ...(messageId ? { messageId } : {}),
         ...(thought === undefined ? {} : { durationMs: thought })
       });
     } else if (block.type === "tool_use") {
@@ -370,10 +406,12 @@ function readDenial(event: Record<string, unknown>): ClaudeCodeEvent {
  *
  * `result` and `init` are never nested and are read unconditionally.
  *
- * `since` is the last line's time from the previous call — see
- * {@link ParsedStream.since}.
+ * `clock` is when this read arrived, and the pending thinking block's start
+ * from the previous read — see {@link ParsedStream.thinkingFrom}. Without it no
+ * block is timed.
  */
-export function parseStream(buffer: string, since?: number): ParsedStream {
+export function parseStream(buffer: string, clock?: ParseClock): ParsedStream {
+  let thinkingFrom = clock?.thinkingFrom;
   const events: ClaudeCodeEvent[] = [];
   let skipped = 0;
   let nested = 0;
@@ -447,6 +485,10 @@ export function parseStream(buffer: string, since?: number): ParsedStream {
           events.push(readDenial(event));
           break;
         }
+        if (event.subtype === "thinking_tokens") {
+          if (clock) thinkingFrom ??= clock.now;
+          break;
+        }
         if (event.subtype === "api_retry") {
           events.push({
             kind: "retry",
@@ -474,12 +516,13 @@ export function parseStream(buffer: string, since?: number): ParsedStream {
           skip(trimmed);
           break;
         }
-        // The model starts on a turn once the line before it is out — the
-        // tool result it answers, or the text before it — so that line's time
-        // is when this thinking began.
+        // Ended by its own line's arrival, and trusted only on a live read.
         const thought =
-          at !== undefined && since !== undefined && at >= since
-            ? at - since
+          clock !== undefined &&
+          thinkingFrom !== undefined &&
+          at !== undefined &&
+          Math.abs(clock.now - at) <= LIVE_SLACK_MS
+            ? clock.now - thinkingFrom
             : undefined;
         events.push(...readAssistant(message, thought));
         break;
@@ -524,7 +567,7 @@ export function parseStream(buffer: string, since?: number): ParsedStream {
         skip(trimmed);
     }
 
-    if (at !== undefined) since = at;
+    if (at !== undefined) thinkingFrom = undefined;
   }
 
   return {
@@ -533,7 +576,7 @@ export function parseStream(buffer: string, since?: number): ParsedStream {
     skipped,
     nested,
     ...(sample ? { sample } : {}),
-    ...(since === undefined ? {} : { since })
+    ...(thinkingFrom === undefined ? {} : { thinkingFrom })
   };
 }
 
@@ -712,7 +755,7 @@ function describe(event: ClaudeCodeEvent): Omit<NoteData, "key"> | undefined {
     case "toolResult":
       return toolResultCard(event);
     case "thinking":
-      return thinkingCard(event.durationMs);
+      return thinkingCard(event.durationMs, event.messageId);
     case "denied":
       // The one progress note that is more useful than the session's own
       // account of itself. A refused tool call is invisible in the transcript —
