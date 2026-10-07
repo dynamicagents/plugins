@@ -449,7 +449,8 @@ a session that way.
 **A cut stream is re-attached, not failed.** When the RPC stream under a live
 session drops, the drain re-attaches from that cursor on a freshly opened
 workspace instead of failing the run — failing it would stop a session that is
-still running. `drain` in `./model.ts` has when it gives up.
+still running. `drain` in `./model.ts` has when it gives up, and a run that
+does files the session's end on the transcript.
 
 **`runId` namespaces the exec id, and it is not optional.** Runs are concurrent —
 sessions in a scratchpad share their parent's container — so two sessions sharing an id would

@@ -340,6 +340,18 @@ export function resultCard(result: ClaudeCodeResult): Card {
   };
 }
 
+/** A session its run gave up on before reading its end, and why. */
+export function lostCard(why: string): Card {
+  return {
+    text: "Session ended before its run read it to the end",
+    detail: {
+      title: "Session",
+      status: "error",
+      sections: [section("Why", why, "text")]
+    }
+  };
+}
+
 function duration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;

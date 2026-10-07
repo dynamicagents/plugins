@@ -5,6 +5,7 @@ import type {
   WorkspaceRuntimeExecHandle
 } from "@cloudflare/computer";
 import {
+  AttachGivenUpError,
   attachRun,
   buildLaunch,
   drainRun,
@@ -1125,12 +1126,56 @@ describe("attachRun", () => {
     } as SessionRuntime & { looks: number };
   }
 
+  /** A session's own time limit, which is the bound a caller passes. */
+  const SESSION_LIMIT_MS = 40 * 60_000;
+
   it("waits for the release rather than failing the turn", async () => {
     const runtime = releasesAfter(3);
-    const handle = await attachRun(runtime, FRESH, { wait: async () => {} });
+    const handle = await attachRun(runtime, FRESH, {
+      maxWaitMs: SESSION_LIMIT_MS,
+      wait: async () => {}
+    });
 
     expect(handle.id).toBe(EXEC);
     expect(runtime.looks).toBe(4);
+  });
+
+  /**
+   * A workspace object reset by the platform leaves the dead connection's
+   * subscriber held past half a minute. Giving up then fails the run, and its
+   * host stops a session that was healthy all along.
+   */
+  it("waits out a subscriber held for minutes, and logs how long once", async () => {
+    // Released after five minutes of looks.
+    let clock = 0;
+    const runtime = releasesAfter(Number.POSITIVE_INFINITY);
+    const getExec = runtime.getExec.bind(runtime);
+    runtime.getExec = async (id, options) => {
+      if (clock >= 5 * 60_000) return fakeHandle([exit(1, 0)]);
+      return await getExec(id, options);
+    };
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const handle = await attachRun(runtime, FRESH, {
+        maxWaitMs: SESSION_LIMIT_MS,
+        now: () => clock,
+        wait: async (ms) => {
+          clock += ms;
+        }
+      });
+
+      expect(handle.id).toBe(EXEC);
+      expect(info.mock.calls.map(([message]) => message)).toEqual([
+        "[claude-code] the previous drain is still attached — waiting",
+        "[claude-code] attached after waiting out the previous drain"
+      ]);
+      expect(info.mock.calls[1]?.[1]).toEqual({
+        execId: EXEC,
+        waitedMs: clock
+      });
+    } finally {
+      info.mockRestore();
+    }
   });
 
   /**
@@ -1154,36 +1199,54 @@ describe("attachRun", () => {
     };
 
     await expect(
-      attachRun(runtime, FRESH, { wait: async () => {} })
+      attachRun(runtime, FRESH, {
+        maxWaitMs: SESSION_LIMIT_MS,
+        wait: async () => {}
+      })
     ).rejects.toThrow(/execution was lost/);
     expect(looks).toBe(1);
   });
 
   /**
-   * The bound is what keeps this an optimisation rather than a hang: a
-   * subscriber that is never released has to fail the turn, which recovery
-   * retries on a fresh isolate.
+   * The bound is what keeps this a wait rather than a hang: a subscriber that
+   * is never released has to fail the run, with a report the parent can act on.
    */
   it("gives up once the budget is gone, and not a millisecond past it", async () => {
     const runtime = releasesAfter(Number.POSITIVE_INFINITY);
     // A clock the waits drive, so the bound is asserted exactly rather than
     // waited out in real time.
     let clock = 0;
-    await expect(
-      attachRun(runtime, FRESH, {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const failed = await attachRun(runtime, FRESH, {
+        maxWaitMs: SESSION_LIMIT_MS,
         now: () => clock,
         wait: async (ms) => {
           clock += ms;
         }
-      })
-    ).rejects.toThrow(/already has a live subscriber/);
-    // **The equality is the assertion.** A schedule whose final doubling
-    // straddles the bound overshoots it and takes one more look on the far
-    // side, which every weaker check here — that it retried at all, that it
-    // eventually threw — passes happily.
-    expect(clock).toBe(30_000);
-    // And it did wait repeatedly to get there, rather than rethrowing early.
-    expect(runtime.looks).toBeGreaterThan(5);
+      }).catch((err: unknown) => err as Error);
+
+      expect(failed).toBeInstanceOf(AttachGivenUpError);
+      expect((failed as Error).message).toMatch(/could not be re-attached/);
+      expect(String((failed as Error).cause)).toMatch(
+        /already has a live subscriber/
+      );
+      // **The equality is the assertion.** A schedule whose final doubling
+      // straddles the bound overshoots it and takes one more look on the far
+      // side, which every weaker check here — that it retried at all, that it
+      // eventually threw — passes happily.
+      expect(clock).toBe(SESSION_LIMIT_MS);
+      // And it did wait repeatedly to get there, rather than rethrowing early.
+      expect(runtime.looks).toBeGreaterThan(5);
+      expect(warn).toHaveBeenCalledWith(
+        "[claude-code] gave up waiting out the previous drain",
+        { execId: EXEC, waitedMs: SESSION_LIMIT_MS }
+      );
+    } finally {
+      warn.mockRestore();
+      info.mockRestore();
+    }
   });
 });
 
@@ -1282,6 +1345,7 @@ describe("attachRun, when stopped", () => {
     await expect(
       attachRun(runtime, FRESH, {
         signal: replaced.signal,
+        maxWaitMs: 40 * 60_000,
         wait: async () => {
           waits++;
           if (waits === 2) replaced.abort();

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { ENTRY_SECTION_MAX_CHARS } from "@dynamicagents/core/artifacts";
 import {
   initCard,
+  lostCard,
   resultCard,
   thinkingCard,
   toolCallCard,
@@ -354,6 +355,23 @@ describe("the session's own cards", () => {
         status: "error",
         sections: [
           { label: "Errors", body: "ran out of turns", format: "text" }
+        ]
+      }
+    });
+  });
+
+  it("says a session's run gave up on it, and why", () => {
+    expect(lostCard("the stream could not be re-attached")).toEqual({
+      text: "Session ended before its run read it to the end",
+      detail: {
+        title: "Session",
+        status: "error",
+        sections: [
+          {
+            label: "Why",
+            body: "the stream could not be re-attached",
+            format: "text"
+          }
         ]
       }
     });
