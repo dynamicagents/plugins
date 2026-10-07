@@ -420,10 +420,61 @@ describe("claudeCodeModel", () => {
       ending: "cut"
     };
     const box = container({ [SESSION]: { ...cut, next: cut } });
-    const { model } = harness(box);
+    const { model, notes } = harness(box);
 
     await expect(streamed(model)).rejects.toThrow(/disconnected prematurely/);
     expect(box.calls.exec.map((c) => c.id)).toEqual([SESSION, SESSION]);
+    // Nothing stored, so nothing says the session started — or that it ended.
+    expect(notes.map((n) => n.key)).not.toContain(`${SESSION}:lost`);
+  });
+
+  /**
+   * A re-attach given up on fails the run, and the host stops the session — so
+   * the transcript says it ended, or the next run's start reads as more of it.
+   */
+  it("files the session's end when its run gives up re-attaching", async () => {
+    const box = container({});
+    const gaveUp = new Error(
+      "claude-code: the session's stream to its container was cut, and the " +
+        "container held on to the old connection for the whole of the " +
+        "session's time limit, so it could not be re-attached."
+    );
+    const { model, notes, map } = harness(box, {
+      workspace: async () => ({
+        runtime: {
+          ...box.runtime,
+          getExec: async () => {
+            throw gaveUp;
+          }
+        },
+        [Symbol.dispose]: () => {}
+      })
+    });
+    // A session part-way through, its drain cut.
+    map.set(`claude-code:${RUN}:brief`, "the brief");
+    map.set(`claude-code:${RUN}:cursor`, {
+      execId: SESSION,
+      seq: 2,
+      carry: "",
+      emitted: 2,
+      sessionId: "sess-1"
+    });
+
+    await expect(streamed(model)).rejects.toThrow(/could not be re-attached/);
+
+    expect(notes).toEqual([
+      {
+        key: `${SESSION}:lost`,
+        text: "Session ended before its run read it to the end",
+        detail: {
+          title: "Session",
+          status: "error",
+          sections: [{ label: "Why", body: gaveUp.message, format: "text" }]
+        }
+      }
+    ]);
+    // Stopping it is the host's, in its settle.
+    expect(box.calls.killed).toEqual([]);
   });
 
   /** A container replaced under the cut is the report `resume` already makes. */
@@ -590,7 +641,7 @@ describe("claudeCodeModel", () => {
     const box = container({
       [SESSION]: { events: [say(SESSION, 1, "working")], ending: "hang" }
     });
-    const { model } = harness(box);
+    const { model, notes } = harness(box);
     const cancel = new AbortController();
 
     const running = streamed(model, call(undefined, cancel.signal));
@@ -599,6 +650,10 @@ describe("claudeCodeModel", () => {
 
     await expect(running).rejects.toThrow(/cancelled/);
     expect(box.calls.killed).toEqual([FOLLOW_UP, SESSION]);
+    expect(notes.at(-1)).toMatchObject({
+      key: `${SESSION}:lost`,
+      detail: { sections: [{ label: "Why", body: "cancelled" }] }
+    });
   });
 
   /**

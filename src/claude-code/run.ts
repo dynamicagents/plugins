@@ -681,6 +681,10 @@ export function isExecLost(err: unknown): boolean {
  * caller can await to know the attachment is gone. {@link attachRun} answers by
  * waiting rather than by failing.
  *
+ * A workspace object reset by the platform leaves its dead connection's
+ * attachment held far longer: past thirty seconds, with the session mid-call
+ * and printing nothing.
+ *
  * **Matched on the message, not on a code, and that is not laziness.** This one
  * is raised inside the container image rather than by the runtime client: the
  * string appears nowhere in the Worker bundle, and it arrives here as a plain
@@ -698,32 +702,12 @@ function isExecSubscribed(err: unknown): boolean {
   );
 }
 
-/**
- * How long {@link attachRun} waits out a subscriber that has not been released.
- *
- * Bounded, because what it is waiting on may not be a teardown at all: an
- * isolate that is genuinely wedged holding the stream releases it when it dies,
- * and nothing here can tell that apart from one that is a moment from
- * finishing. Exceeding this rethrows, so the turn fails and Think's recovery
- * retries it on a fresh isolate — which is the right escalation, and the one
- * this whole mechanism exists to stop being the *first* resort.
- *
- * Sized well above what the race costs in practice. The race normally clears
- * on the first or second look, and a deployment where it took fifteen seconds is
- * what this is sized to outlast.
- */
-const ATTACH_MAX_MS = 30_000;
-
 /** The first gap between attach attempts, doubled up to {@link ATTACH_CAP_MS}. */
 const ATTACH_BACKOFF_MS = 250;
 
 /**
- * The ceiling on that doubling.
- *
- * Without it the last gap before {@link ATTACH_MAX_MS} would be most of the
- * budget, so a subscriber released early in it would still be waited out to the
- * end. What this buys is that the wait ends soon after the release, rather than
- * at the next power of two.
+ * The ceiling on that doubling, so the wait ends soon after the release rather
+ * than at the next power of two.
  */
 const ATTACH_CAP_MS = 2_000;
 
@@ -769,13 +753,24 @@ export async function startRun(
       { execId: options.execId }
     );
     return await attachRun(runtime, freshCursor(options.execId), {
-      signal: options.signal
+      signal: options.signal,
+      maxWaitMs: options.timeoutMs
     });
   }
 }
 
-/** The clock and the wait, injectable so a spec can drive the bound. */
 export interface AttachOptions {
+  /**
+   * How long to wait out a subscriber that has not been released: the
+   * session's own `timeoutMs`.
+   *
+   * Giving up fails the run, and a failed run is stopped by its host — so a
+   * shorter bound kills a healthy session, and past this one the session is
+   * over anyway. How long a release actually took is logged when the attach
+   * lands.
+   */
+  maxWaitMs: number;
+  /** The clock and the wait, injectable so a spec can drive the bound. */
   now?: () => number;
   wait?: (ms: number) => Promise<void>;
   /** Stops the wait — see `DrainOptions.signal`. */
@@ -796,51 +791,72 @@ export interface AttachOptions {
  *
  * Everything else is rethrown on the first look, `EEXEC_LOST` above all: it is
  * the runtime saying the container was replaced, `resume` turns it into a report
- * for the model, and a retry loop would sit on it for {@link ATTACH_MAX_MS}
- * learning nothing.
+ * for the model, and a retry loop would sit on it learning nothing.
  */
 export async function attachRun(
   runtime: SessionRuntime,
   cursor: DrainCursor,
-  options: AttachOptions = {}
+  options: AttachOptions
 ): Promise<WorkspaceRuntimeExecHandle<"utf8">> {
   const now = options.now ?? Date.now;
   const wait = options.wait ?? sleep;
-  const deadline = now() + ATTACH_MAX_MS;
+  const started = now();
+  const deadline = started + options.maxWaitMs;
   let backoff = ATTACH_BACKOFF_MS;
+  let waited = false;
 
   for (;;) {
+    let handle: WorkspaceRuntimeExecHandle<"utf8">;
     try {
-      return await runtime.getExec(cursor.execId, {
+      handle = await runtime.getExec(cursor.execId, {
         encoding: "utf8",
         // `0` is a legal seq and also the beginning, so a fresh cursor resumes
         // from the start either way. A stored cursor names its own place.
         resume: cursor.seq
       });
     } catch (err) {
-      // Rethrown rather than retried once the budget is gone, so the step still
-      // fails on a subscriber that is never coming back — just not first.
-      if (
-        !isExecSubscribed(err) ||
-        now() >= deadline ||
-        options.signal?.aborted
-      )
-        throw err;
+      if (!isExecSubscribed(err) || options.signal?.aborted) throw err;
+      if (now() >= deadline) {
+        const waitedMs = now() - started;
+        console.warn("[claude-code] gave up waiting out the previous drain", {
+          execId: cursor.execId,
+          waitedMs
+        });
+        throw new Error(
+          "claude-code: the session's stream to its container was cut, and the " +
+            "container held on to the old connection for the whole of the " +
+            "session's time limit, so it could not be re-attached. The cut is " +
+            "the platform's, not the session's; what the session did so far is " +
+            "in its workspace and on the transcript.",
+          { cause: err }
+        );
+      }
+      // Logged once each way rather than per look: how long a release takes
+      // is the number worth reading, and over a session-long bound a line per
+      // look would bury it.
+      if (!waited) {
+        waited = true;
+        console.info(
+          "[claude-code] the previous drain is still attached — waiting",
+          { execId: cursor.execId, maxWaitMs: options.maxWaitMs }
+        );
+      }
       // Clamped to what is left, so the last gap lands *on* the deadline rather
-      // than past it. Uncapped, a schedule whose final doubling straddles the
-      // bound would take one more look on the far side of it — and the bound
-      // would be a number in a comment rather than one the code keeps.
-      const waitMs = Math.min(backoff, deadline - now());
-      // One line per wait, not per attempt: this is the condition whose
-      // frequency is worth watching, and it went unnamed in the logs for as
-      // long as retries were absorbing it one at a time.
-      console.info(
-        "[claude-code] the previous drain is still attached — waiting",
-        { execId: cursor.execId, waitMs }
-      );
-      await wait(waitMs);
+      // than past it, and the bound is one the code keeps.
+      await wait(Math.min(backoff, deadline - now()));
       backoff = Math.min(backoff * 2, ATTACH_CAP_MS);
+      continue;
     }
+    if (waited) {
+      console.info(
+        "[claude-code] attached after waiting out the previous drain",
+        {
+          execId: cursor.execId,
+          waitedMs: now() - started
+        }
+      );
+    }
+    return handle;
   }
 }
 

@@ -194,7 +194,10 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     ): Promise<DrainOutcome> {
       let handle;
       try {
-        handle = await attachRun(runtime, cursor, { signal: sinks.signal });
+        handle = await attachRun(runtime, cursor, {
+          signal: sinks.signal,
+          maxWaitMs: timeoutMs
+        });
       } catch (err) {
         if (!isExecLost(err)) throw err;
         console.warn("[claude-code] the session's container was replaced", {
