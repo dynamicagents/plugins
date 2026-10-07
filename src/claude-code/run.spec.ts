@@ -5,6 +5,7 @@ import type {
   WorkspaceRuntimeExecHandle
 } from "@cloudflare/computer";
 import {
+  AttachGivenUpError,
   attachRun,
   buildLaunch,
   drainRun,
@@ -1226,7 +1227,7 @@ describe("attachRun", () => {
         }
       }).catch((err: unknown) => err as Error);
 
-      expect(failed).toBeInstanceOf(Error);
+      expect(failed).toBeInstanceOf(AttachGivenUpError);
       expect((failed as Error).message).toMatch(/could not be re-attached/);
       expect(String((failed as Error).cause)).toMatch(
         /already has a live subscriber/

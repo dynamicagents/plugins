@@ -6,7 +6,12 @@ import {
   type SessionOutcome,
   type SessionRecord
 } from "./model.js";
-import { execIdFor, followUpExecIdFor, type SessionRuntime } from "./run.js";
+import {
+  AttachGivenUpError,
+  execIdFor,
+  followUpExecIdFor,
+  type SessionRuntime
+} from "./run.js";
 
 /**
  * The session as a sub-agent's model, against a scripted container.
@@ -434,7 +439,7 @@ describe("claudeCodeModel", () => {
    */
   it("files the session's end when its run gives up re-attaching", async () => {
     const box = container({});
-    const gaveUp = new Error(
+    const gaveUp = new AttachGivenUpError(
       "claude-code: the session's stream to its container was cut, and the " +
         "container held on to the old connection for the whole of the " +
         "session's time limit, so it could not be re-attached."
@@ -475,6 +480,35 @@ describe("claudeCodeModel", () => {
     ]);
     // Stopping it is the host's, in its settle.
     expect(box.calls.killed).toEqual([]);
+  });
+
+  /**
+   * A transient failure is retried by re-entering the turn, which reads on from
+   * the stored cursor — so it says nothing about the session's end.
+   */
+  it("files no end for a re-attach that may yet succeed", async () => {
+    const box = container({});
+    const { model, notes, map } = harness(box, {
+      workspace: async () => ({
+        runtime: {
+          ...box.runtime,
+          getExec: async () => {
+            throw new Error("container unreachable");
+          }
+        },
+        [Symbol.dispose]: () => {}
+      })
+    });
+    map.set(`claude-code:${RUN}:brief`, "the brief");
+    map.set(`claude-code:${RUN}:cursor`, {
+      execId: SESSION,
+      seq: 2,
+      carry: "",
+      emitted: 2
+    });
+
+    await expect(streamed(model)).rejects.toThrow(/unreachable/);
+    expect(notes).toEqual([]);
   });
 
   /** A container replaced under the cut is the report `resume` already makes. */

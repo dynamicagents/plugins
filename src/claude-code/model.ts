@@ -7,6 +7,7 @@ import type { ClaudeCodeConfig, PermissionMode } from "./config.js";
 import type { ClaudeCodeResult, RateLimitInfo } from "./events.js";
 import { claudeCodeSession, requireCredentials } from "./session.js";
 import {
+  AttachGivenUpError,
   execIdFor,
   followUpExecIdFor,
   type DrainCursor,
@@ -257,41 +258,28 @@ export function claudeCodeModel(
       ...(signal ? { signal } : {})
     };
 
-    /** {@link drainToEnd}, filing the session's end if the run gives up on it. */
-    const drain = async (
-      execId: string,
-      begin: (runtime: SessionRuntime) => Promise<DrainOutcome>
-    ): Promise<SessionEnd> => {
-      try {
-        return await drainToEnd(execId, begin);
-      } catch (err) {
-        await fileLost(execId, err);
-        throw err;
-      }
-    };
-
     /**
-     * The session's end card, when the run gives up before reading the real
-     * one. Without it the transcript shows a session that never ended, and a
-     * retry's start reads as more of it.
+     * The session's end card, filed where the run gives up on a session it will
+     * never read to its end: a re-attach given up on, or a cancel that stops it.
+     * Without it the transcript shows a session that never ended, and a retry's
+     * start reads as more of it.
      *
-     * Only for an exec that stored a cursor, which the session's `init` line
-     * does the moment it names the session — so never for one that did not
-     * start. Keyed on the exec, so a recovered turn that fails again files it
-     * once.
+     * Not on any other throw: a transient one is retried by re-entering this
+     * turn, which reads on from the stored cursor. Keyed on the exec, so a card
+     * filed twice is filed once.
      */
-    const fileLost = async (execId: string, err: unknown): Promise<void> => {
-      try {
-        const at = await storage.get<DrainCursor>(KEYS.cursor);
-        if (at?.execId !== execId) return;
-        const card = lostCard(err instanceof Error ? err.message : String(err));
-        await options.note(`${execId}:lost`, card.text, card.detail);
-      } catch (noteErr) {
-        console.warn("[claude-code] a lost session's end was not filed", {
-          execId,
-          err: String(noteErr)
-        });
-      }
+    const fileLost = async (execId: string, reason: unknown): Promise<void> => {
+      const card = lostCard(
+        reason instanceof Error ? reason.message : String(reason)
+      );
+      await options
+        .note(`${execId}:lost`, card.text, card.detail)
+        .catch((err: unknown) =>
+          console.warn("[claude-code] a lost session's end was not filed", {
+            execId,
+            err: String(err)
+          })
+        );
     };
 
     /**
@@ -304,7 +292,7 @@ export function claudeCodeModel(
      * checkpoint stored fail the run as before: a stream that breaks every time
      * it opens is not a blip.
      */
-    const drainToEnd = async (
+    const drain = async (
       execId: string,
       begin: (runtime: SessionRuntime) => Promise<DrainOutcome>
     ): Promise<SessionEnd> => {
@@ -323,6 +311,7 @@ export function claudeCodeModel(
           const moved =
             after?.execId === execId &&
             (cursor?.execId !== execId || after.seq > cursor.seq);
+          if (err instanceof AttachGivenUpError) await fileLost(execId, err);
           if (!isStreamCut(err) || signal?.aborted || (stalled && !moved))
             throw err;
           stalled = !moved;
@@ -348,7 +337,9 @@ export function claudeCodeModel(
             err: String(err)
           })
         );
-        throw signal?.reason ?? new Error("the session was stopped");
+        const reason = signal?.reason ?? new Error("the session was stopped");
+        await fileLost(execId, reason);
+        throw reason;
       }
       return {
         exitCode: outcome.exitCode,

@@ -702,6 +702,15 @@ function isExecSubscribed(err: unknown): boolean {
   );
 }
 
+/**
+ * {@link attachRun} giving up on a subscriber that was never released. Unlike
+ * a transient failure, nothing retries it: the run fails, and its host stops
+ * the session.
+ */
+export class AttachGivenUpError extends Error {
+  override name = "AttachGivenUpError";
+}
+
 /** The first gap between attach attempts, doubled up to {@link ATTACH_CAP_MS}. */
 const ATTACH_BACKOFF_MS = 250;
 
@@ -822,7 +831,7 @@ export async function attachRun(
           execId: cursor.execId,
           waitedMs
         });
-        throw new Error(
+        throw new AttachGivenUpError(
           "claude-code: the session's stream to its container was cut, and the " +
             "container held on to the old connection for the whole of the " +
             "session's time limit, so it could not be re-attached. The cut is " +
