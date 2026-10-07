@@ -11,7 +11,11 @@ import {
   type InstallProbe,
   type InstallState
 } from "./install.js";
-import { DepsSnapshot, type DepsSnapshotRecord } from "./deps-snapshot.js";
+import {
+  DepsSnapshot,
+  packageRootSet,
+  type DepsSnapshotRecord
+} from "./deps-snapshot.js";
 import { openWorkspace, openWorkspaceFs } from "./index.js";
 import { DEFAULT_SCRATCH_DIR } from "../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
@@ -1280,10 +1284,14 @@ describe("releasing a container", () => {
    */
   it("takes the snapshot a finished install asked for before it stops the container", async () => {
     const stub = freshWorkspace("release-takes-due");
-    const tree = { dir: "/workspace/api", fingerprint: "the-lockfile" };
+    const tree = {
+      dir: "/workspace/api",
+      fingerprint: "the-lockfile",
+      at: Date.now()
+    };
 
     await runInDurableObject(stub, async (instance, state) => {
-      await state.storage.put("install:tree", { ...tree, at: Date.now() });
+      await state.storage.put("install:tree", tree);
       await state.storage.put("deps:snapshot-due", tree);
       const calls: string[] = [];
       const take = vi
@@ -1479,6 +1487,7 @@ describe("launching the container", () => {
         roots: [
           { dir, fingerprint: await rootFingerprint(probe, dir, INSTALL_PLAN) }
         ],
+        rootSet: await packageRootSet(ws.fs, dir),
         at: Date.now()
       };
       await runInDurableObject(stub, (_instance, state) =>

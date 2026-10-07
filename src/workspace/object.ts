@@ -618,10 +618,8 @@ export abstract class WorkspaceObjectBase<
     ready: () => this.#ready(),
     waitUntil: (promise) => this.ctx.waitUntil(promise),
     containerGone: () => this.#containerGone(),
-    installed: async (tree) => {
-      await this.#snapshot.markDue(tree);
-      await this.#snapshotDue.set(new Date());
-    },
+    installedRecords: (tree) => this.#snapshot.dueEntries(tree),
+    installed: async () => void (await this.#snapshotDue.set(new Date())),
     tag: () => this.#tag,
     id: () => this.ctx.id.toString()
   });
@@ -633,6 +631,7 @@ export abstract class WorkspaceObjectBase<
     image: () => this.#image,
     workspace: () => this.#workspace,
     rootFingerprint: (dir) => this.#install.rootFingerprint(dir),
+    tree: () => this.#install.tree(),
     tag: () => this.#tag,
     id: () => this.ctx.id.toString()
   });
@@ -1441,8 +1440,7 @@ export abstract class WorkspaceObjectBase<
     // An install's snapshot the wake has not taken yet would go with the disk
     // it is of, so it is taken here first. Not for a reclaim, which keeps
     // nothing. Either way, one in flight needs the container running.
-    if (reason === "idle")
-      await this.#snapshot.takeDue(() => this.#install.tree());
+    if (reason === "idle") await this.#snapshot.takeDue();
     await this.#snapshot.settled();
     // Hang up the session to computerd first: a destroy that cuts it live
     // surfaces as an uncaught `Network connection lost`. The workspace
@@ -1719,7 +1717,17 @@ export abstract class WorkspaceObjectBase<
 
   /** An install finished in this container — see `./deps-snapshot.ts`. */
   async #onDepsSnapshot(): Promise<void> {
-    await this.#snapshot.takeDue(() => this.#install.tree());
+    // The record is read from this object's storage — each root's inputs, and
+    // which roots there are — so the install's own pull has to have landed: it
+    // carries the submodules a bootstrap cloned. One still moving comes back;
+    // one that failed is left to the stop, which drains before it takes.
+    const synced = await this.#sync.drain(SYNC_DRAIN_BUDGET_MS);
+    if (synced === "incomplete") {
+      await this.#snapshotDue.set(new Date(Date.now() + SYNC_DRAIN_RESUME_MS));
+      return;
+    }
+    if (synced === "failed") return;
+    await this.#snapshot.takeDue();
   }
 
   /** The idle-reclaim deadline came due. */

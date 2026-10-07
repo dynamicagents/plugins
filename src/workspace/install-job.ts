@@ -166,8 +166,22 @@ export interface InstallJobDeps {
   waitUntil: (promise: Promise<unknown>) => void;
   /** A container was replaced, so nothing believed about it still holds. */
   containerGone: () => Promise<void>;
-  /** An install exited 0, so this container now holds the tree for `fingerprint`. */
-  installed: (tree: { dir: string; fingerprint: string }) => Promise<void>;
+  /**
+   * Storage entries the host keeps about a tree an install finished, written in
+   * the same write as that install's verdict — nothing can read the one without
+   * the other.
+   */
+  installedRecords: (tree: {
+    dir: string;
+    fingerprint: string;
+    at: number;
+  }) => Record<string, unknown>;
+  /** After that write: an install exited 0, so this container holds the tree. */
+  installed: (tree: {
+    dir: string;
+    fingerprint: string;
+    at: number;
+  }) => Promise<void>;
   tag: () => string;
   id: () => string;
 }
@@ -343,10 +357,12 @@ export class InstallJob {
 
   /** The tree this container holds, if a finished install says it does. */
   async tree(): Promise<
-    { dir: string; fingerprint: string | null } | undefined
+    { dir: string; fingerprint: string | null; at: number } | undefined
   > {
     const tree = await this.#tree();
-    return tree && { dir: tree.dir, fingerprint: tree.fingerprint };
+    return (
+      tree && { dir: tree.dir, fingerprint: tree.fingerprint, at: tree.at }
+    );
   }
 
   /**
@@ -954,6 +970,9 @@ export class InstallJob {
           command,
           seconds: Math.round((Date.now() - startedAt) / 1000)
         });
+        const installed = tree?.fingerprint
+          ? { dir: tree.dir, fingerprint: tree.fingerprint, at: tree.at }
+          : undefined;
         const kept = await settle(
           {
             state: "done",
@@ -963,19 +982,22 @@ export class InstallJob {
             ms: Date.now() - startedAt,
             tail
           },
-          tree ? { [CONTAINER_TREE_KEY]: tree } : undefined
+          tree
+            ? {
+                ...(installed ? this.deps.installedRecords(installed) : {}),
+                [CONTAINER_TREE_KEY]: tree
+              }
+            : undefined
         );
         // Outside the verdict: a host that cannot act on the news must not turn
         // a finished install into a failed one, which the catch below would.
-        if (kept && tree?.fingerprint)
-          await this.deps
-            .installed({ dir: tree.dir, fingerprint: tree.fingerprint })
-            .catch((err: unknown) => {
-              console.warn(
-                `[${this.deps.tag()}] could not act on a finished install`,
-                { id: this.deps.id(), err: String(err) }
-              );
-            });
+        if (kept && installed)
+          await this.deps.installed(installed).catch((err: unknown) => {
+            console.warn(
+              `[${this.deps.tag()}] could not act on a finished install`,
+              { id: this.deps.id(), err: String(err) }
+            );
+          });
       } else {
         // Logged, and this line is not optional. This is the *ordinary* way an
         // install fails — the other paths are all exceptional — and it used to

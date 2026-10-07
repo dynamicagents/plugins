@@ -4,8 +4,10 @@ import type { Workspace } from "@cloudflare/computer";
 import { freshWorkspace } from "../../test/workspace/do.js";
 import {
   DepsSnapshot,
+  packageRootSet,
   type DepsSnapshotRecord,
-  type ExpectedTree
+  type ExpectedTree,
+  type InstalledTree
 } from "./deps-snapshot.js";
 
 /**
@@ -16,11 +18,26 @@ import {
 
 const IMAGE = "registry.cloudflare.com/account/test-workspace-app@sha256:a";
 const DIR = "/workspace/repo";
-const TREE: ExpectedTree = { dir: DIR, fingerprint: "f".repeat(64) };
+const TREE: InstalledTree = { dir: DIR, fingerprint: "f".repeat(64), at: 1 };
 const ROOTS: Record<string, string | null> = {
   [DIR]: "root-digest",
   [`${DIR}/core`]: "core-digest"
 };
+const PACKAGES = [`${DIR}/package.json`, `${DIR}/core/package.json`];
+const GITMODULES = '[submodule "core"]\n\tpath = core\n';
+
+/** The checkout's filesystem, as far as {@link packageRootSet} reads it. */
+function checkoutFs(packages = PACKAGES, gitmodules = GITMODULES) {
+  return {
+    find: async () => packages.map((path) => ({ path, type: "file" })),
+    readFile: async (path: string) => {
+      if (path === `${DIR}/.gitmodules`) return gitmodules;
+      throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+    }
+  } as unknown as Workspace["fs"];
+}
+
+const ROOT_SET = await packageRootSet(checkoutFs(), DIR);
 
 const RECORD: DepsSnapshotRecord = {
   id: "snap-1",
@@ -32,6 +49,7 @@ const RECORD: DepsSnapshotRecord = {
     { dir: DIR, fingerprint: "root-digest" },
     { dir: `${DIR}/core`, fingerprint: "core-digest" }
   ],
+  rootSet: ROOT_SET,
   at: 0
 };
 
@@ -42,22 +60,29 @@ interface Stand {
   roots?: string;
   /** What each root's inputs hash to now. */
   fingerprints?: Record<string, string | null>;
+  /** The `package.json` files the checkout has now. */
+  packages?: string[];
+  gitmodules?: string;
+  /** The tree the install record names; changeable as a test runs. */
+  tree?: InstalledTree;
   snapshot?: (options?: ContainerSnapshotOptions) => Promise<ContainerSnapshot>;
 }
 
 /** A `DepsSnapshot` on `storage`, over a stand-in container and checkout. */
 function standIn(storage: DurableObjectStorage, stand: Stand = {}) {
   const taken: (ContainerSnapshotOptions | undefined)[] = [];
+  const current = { tree: "tree" in stand ? stand.tree : TREE };
   const container = {
     running: stand.running ?? true,
     snapshotContainer: async (options?: ContainerSnapshotOptions) => {
       taken.push(options);
       return stand.snapshot
         ? await stand.snapshot(options)
-        : { id: "snap-new", size: 42, name: options?.name };
+        : { id: `snap-${taken.length + 1}`, size: 42, name: options?.name };
     }
   } as unknown as Container;
   const workspace = {
+    fs: checkoutFs(stand.packages, stand.gitmodules),
     runtime: {
       exec: async () => ({
         result: async () => ({
@@ -76,16 +101,17 @@ function standIn(storage: DurableObjectStorage, stand: Stand = {}) {
     image: () => ("image" in stand ? stand.image : IMAGE),
     workspace: () => workspace,
     rootFingerprint: async (dir) => fingerprints[dir] ?? null,
+    tree: async () => current.tree,
     tag: () => "spec",
     id: () => "spec-id"
   });
-  return { snapshot, taken };
+  return { snapshot, taken, current };
 }
 
 const expecting = (tree: ExpectedTree | undefined) => async () => tree;
 
 describe("taking a snapshot", () => {
-  it("records what it was taken on, and what every root's inputs were", async () => {
+  it("records what it was taken on, every root's inputs, and which roots there are", async () => {
     const stub = freshWorkspace("snapshot-take");
     const { record, taken } = await runInDurableObject(stub, async (_i, s) => {
       const { snapshot, taken } = standIn(s.storage);
@@ -94,19 +120,21 @@ describe("taking a snapshot", () => {
     });
     expect(taken).toEqual([{ name: `deps-${"f".repeat(16)}` }]);
     expect(record).toMatchObject({
-      id: "snap-new",
+      id: "snap-2",
       size: 42,
       image: IMAGE,
       dir: DIR,
       fingerprint: TREE.fingerprint,
-      roots: RECORD.roots
+      roots: RECORD.roots,
+      rootSet: ROOT_SET
     });
   });
 
   it.each([
     ["a container that is not running", { running: false }],
     ["no prepared image", { image: undefined }],
-    ["a disk with no tree on it", { roots: "" }]
+    ["a disk with no tree on it", { roots: "" }],
+    ["a tree the install record no longer names", { tree: { ...TREE, at: 2 } }]
   ])("takes nothing from %s", async (_name, stand: Stand) => {
     const stub = freshWorkspace("snapshot-take-nothing");
     const { record, taken } = await runInDurableObject(stub, async (_i, s) => {
@@ -129,6 +157,61 @@ describe("taking a snapshot", () => {
       return await snapshot.get();
     });
     expect(record).toEqual(RECORD);
+  });
+
+  /** A reinstall empties the tree before it rebuilds it. */
+  it("records nothing when the tree changed while it was taken", async () => {
+    const stub = freshWorkspace("snapshot-take-changed");
+    const after = await runInDurableObject(stub, async (_i, s) => {
+      let reinstall = () => {};
+      const { snapshot, taken, current } = standIn(s.storage, {
+        snapshot: async () => {
+          reinstall();
+          return { id: "snap-torn", size: 1 };
+        }
+      });
+      reinstall = () => {
+        current.tree = undefined;
+      };
+      await snapshot.take(TREE);
+      return { taken: taken.length, record: await snapshot.get() };
+    });
+    expect(after).toEqual({ taken: 1, record: undefined });
+  });
+
+  it("takes a later install's snapshot after the one in flight, not instead of it", async () => {
+    const stub = freshWorkspace("snapshot-take-queued");
+    const later: InstalledTree = {
+      ...TREE,
+      fingerprint: "e".repeat(64),
+      at: 2
+    };
+    const record = await runInDurableObject(stub, async (_i, s) => {
+      let finish = () => {};
+      const gate = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      let calls = 0;
+      const { snapshot, current } = standIn(s.storage, {
+        snapshot: async () => {
+          calls += 1;
+          if (calls === 1) await gate;
+          return { id: `snap-${calls}`, size: 1 };
+        }
+      });
+      const first = snapshot.take(TREE);
+      await scheduler.wait(1);
+      // The second install finishes while the first snapshot is still taken.
+      current.tree = later;
+      const second = snapshot.take(later);
+      finish();
+      await Promise.all([first, second]);
+      return await snapshot.get();
+    });
+    expect(record).toMatchObject({
+      id: "snap-2",
+      fingerprint: later.fingerprint
+    });
   });
 
   /** A stop destroys the container a snapshot is still reading. */
@@ -159,18 +242,15 @@ describe("taking a snapshot", () => {
 });
 
 describe("the snapshot an install asks for", () => {
-  /** Mark `TREE` due, then take what is due while the container holds `held`. */
-  async function due(
-    name: string,
-    held: { dir: string; fingerprint: string | null } | undefined
-  ) {
+  /** Ask for `TREE`, then take what is due while the install record names `held`. */
+  async function due(name: string, held: InstalledTree | undefined) {
     const stub = freshWorkspace(name);
     return await runInDurableObject(stub, async (_i, s) => {
-      const { snapshot, taken } = standIn(s.storage);
-      await snapshot.markDue(TREE);
-      await snapshot.takeDue(async () => held);
+      const { snapshot, taken } = standIn(s.storage, { tree: held });
+      await s.storage.put(snapshot.dueEntries(TREE));
+      await snapshot.takeDue();
       // Asked once: a second take finds nothing due.
-      await snapshot.takeDue(async () => held);
+      await snapshot.takeDue();
       return {
         taken: taken.length,
         record: await snapshot.get(),
@@ -179,7 +259,7 @@ describe("the snapshot an install asks for", () => {
     });
   }
 
-  it("is taken once, while the container holds the tree it was asked for", async () => {
+  it("is taken once, while the install record names the tree it was asked for", async () => {
     const after = await due("due-held", TREE);
     expect(after.taken).toBe(1);
     expect(after.record?.fingerprint).toBe(TREE.fingerprint);
@@ -187,9 +267,10 @@ describe("the snapshot an install asks for", () => {
   });
 
   it.each([
-    ["holds another tree", { dir: DIR, fingerprint: "other" }],
-    ["holds none", undefined]
-  ])("is let go when the container %s", async (_name, held) => {
+    ["names another tree", { ...TREE, fingerprint: "other" }],
+    ["names the same lockfile installed again", { ...TREE, at: 2 }],
+    ["names none", undefined]
+  ])("is let go when the install record %s", async (_name, held) => {
     const after = await due("due-moved", held);
     expect(after.taken).toBe(0);
     expect(after.stillDue).toBeUndefined();
@@ -199,7 +280,7 @@ describe("the snapshot an install asks for", () => {
     const stub = freshWorkspace("due-forgotten");
     const stillDue = await runInDurableObject(stub, async (_i, s) => {
       const { snapshot } = standIn(s.storage);
-      await snapshot.markDue(TREE);
+      await s.storage.put(snapshot.dueEntries(TREE));
       await snapshot.forgetDue();
       return await s.storage.get("deps:snapshot-due");
     });
@@ -241,6 +322,16 @@ describe("restoring a snapshot", () => {
       "when a root's inputs changed",
       TREE,
       { fingerprints: { ...ROOTS, [`${DIR}/core`]: "moved" } }
+    ],
+    [
+      "when a package root was added",
+      TREE,
+      { packages: [...PACKAGES, `${DIR}/plugins/package.json`] }
+    ],
+    [
+      "when a submodule was declared",
+      TREE,
+      { gitmodules: `${GITMODULES}[submodule "plugins"]\n\tpath = plugins\n` }
     ]
   ])(
     "boots the image for a snapshot %s",

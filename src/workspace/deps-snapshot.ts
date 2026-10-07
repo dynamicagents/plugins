@@ -24,12 +24,23 @@ import { DEPS_ROOTS_COMMAND, parseDepsRoots } from "./container-deps.js";
  * - **Every package root's inputs unchanged.** A bootstrap installs roots the
  *   fingerprint does not cover — a submodule's lockfile — and a restore brings
  *   all of them back at once.
+ * - **The same set of package roots.** A root added since — a new submodule —
+ *   has no tree in the snapshot, and restoring it would skip the install that
+ *   gives it one: see {@link packageRootSet}.
  *
  * What came up is then checked, not assumed: the setup mounts the restored trees
  * and reads the marker, and only a match is adopted as installed. Anything else —
  * an expired snapshot, which the platform reports as a failed start, after which
  * the backend's restart takes the image — drops the record, and the install runs
  * and snapshots again.
+ *
+ * ## Taken of the tree it was asked for, and nothing since
+ *
+ * An install asks for its snapshot in the same write as its verdict, so a stop
+ * that comes before the wake still sees the request. Snapshots run one at a
+ * time, and one is recorded only if the install record still names the tree it
+ * was taken of: a reinstall empties the tree before it rebuilds it, and a
+ * snapshot taken across that is of neither.
  *
  * ## The record outlives the container, and the snapshot outlives the record
  *
@@ -58,6 +69,8 @@ export interface DepsSnapshotRecord {
   fingerprint: string;
   /** Every package root with a tree on the disk, and its inputs' digest then. */
   roots: { dir: string; fingerprint: string | null }[];
+  /** {@link packageRootSet} of the checkout then. */
+  rootSet: string;
   at: number;
 }
 
@@ -67,6 +80,11 @@ export interface ExpectedTree {
   fingerprint: string;
 }
 
+/** A tree an install finished, as its record names it — `at` tells two apart. */
+export interface InstalledTree extends ExpectedTree {
+  at: number;
+}
+
 export interface DepsSnapshotDeps {
   storage: DurableObjectStorage;
   container: () => Container | undefined;
@@ -74,8 +92,44 @@ export interface DepsSnapshotDeps {
   image: () => string | undefined;
   workspace: () => Workspace;
   rootFingerprint: (dir: string) => Promise<string | null>;
+  /** The tree the install record says this container holds. */
+  tree: () => Promise<
+    { dir: string; fingerprint: string | null; at: number } | undefined
+  >;
   tag: () => string;
   id: () => string;
+}
+
+/**
+ * Which package roots a checkout has, as one digest: every directory under
+ * `dir` with a `package.json`, and the submodules `.gitmodules` declares — one a
+ * bootstrap clones in the container has no `package.json` here until then.
+ */
+export async function packageRootSet(
+  fs: Workspace["fs"],
+  dir: string
+): Promise<string> {
+  const found = await fs
+    .find(dir, "**/package.json", { exclude: ["**/.git", "**/node_modules"] })
+    .catch((err: { code?: string }) => {
+      if (err?.code === "ENOENT") return [];
+      throw err;
+    });
+  const gitmodules = await fs
+    .readFile(`${dir}/.gitmodules`, "utf8")
+    .catch(() => "");
+  const input = [
+    ...found.map((entry) => entry.path).sort(),
+    "\0.gitmodules",
+    gitmodules
+  ].join("\n");
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(input)
+  );
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /**
@@ -175,48 +229,44 @@ export class DepsSnapshot {
   }
 
   /**
-   * Snapshot the running container, which has just installed `tree`.
+   * Snapshot the running container, which has just installed `tree`, after any
+   * snapshot already in flight — a later install's request is never dropped for
+   * an earlier one's.
    *
    * Never throws: a container that cannot be snapshotted installs again next
    * time, which is today's cost and no worse.
    */
-  async take(tree: ExpectedTree): Promise<void> {
-    if (this.#taking) return;
-    this.#taking = this.#take(tree).finally(() => {
-      this.#taking = undefined;
-    });
-    await this.#taking;
+  async take(tree: InstalledTree): Promise<void> {
+    const turn = (this.#taking ?? Promise.resolve()).then(() =>
+      this.#take(tree)
+    );
+    this.#taking = turn;
+    try {
+      await turn;
+    } finally {
+      if (this.#taking === turn) this.#taking = undefined;
+    }
   }
 
-  /** A snapshot in flight, finished — for whatever is about to stop the container. */
+  /** Snapshots in flight, finished — for whatever is about to stop the container. */
   async settled(): Promise<void> {
     await this.#taking;
   }
 
   /**
-   * An install finished in the running container, so snapshot it before it
-   * stops. In storage rather than only in the wake that takes it: a stop can
-   * come first, and must take it then — see {@link takeDue}.
+   * The entries that ask for `tree`'s snapshot, for the install to write with
+   * its verdict — see the file comment, and {@link takeDue}.
    */
-  async markDue(tree: ExpectedTree): Promise<void> {
-    await this.deps.storage.put(DUE_KEY, tree);
+  dueEntries(tree: InstalledTree): Record<string, unknown> {
+    return { [DUE_KEY]: tree };
   }
 
-  /**
-   * Take the snapshot an install asked for, while the container still holds its
-   * tree — `current` is the tree the install record says it holds.
-   */
-  async takeDue(
-    current: () => Promise<
-      { dir: string; fingerprint: string | null } | undefined
-    >
-  ): Promise<void> {
-    const due = await this.deps.storage.get<ExpectedTree>(DUE_KEY);
+  /** Take the snapshot an install asked for, if one is waiting. */
+  async takeDue(): Promise<void> {
+    const due = await this.deps.storage.get<InstalledTree>(DUE_KEY);
     if (!due) return;
     await this.deps.storage.delete(DUE_KEY);
-    const tree = await current();
-    if (tree?.dir === due.dir && tree.fingerprint === due.fingerprint)
-      await this.take(due);
+    await this.take(due);
   }
 
   /** The container went, and the disk an asked-for snapshot was of with it. */
@@ -257,22 +307,44 @@ export class DepsSnapshot {
     return { seeded: true };
   }
 
-  /** Why `record` must not be restored now, or `undefined` if it may. */
+  /**
+   * Why `record` must not be restored now, or `undefined` if it may. A check
+   * that throws refuses: a start must not fail for a snapshot it can go without.
+   */
   async #refusal(
     record: DepsSnapshotRecord,
     expected: () => Promise<ExpectedTree | undefined>
   ): Promise<string | undefined> {
     if (record.image !== this.deps.image()) return "taken on another image";
-    const tree = await expected();
-    if (!tree) return "there is nothing to install here";
-    if (record.dir !== tree.dir) return "taken for another checkout";
-    if (record.fingerprint !== tree.fingerprint)
-      return "the install's inputs have changed";
-    for (const root of record.roots) {
-      if ((await this.deps.rootFingerprint(root.dir)) !== root.fingerprint)
-        return `${root.dir} has changed`;
+    try {
+      const tree = await expected();
+      if (!tree) return "there is nothing to install here";
+      if (record.dir !== tree.dir) return "taken for another checkout";
+      if (record.fingerprint !== tree.fingerprint)
+        return "the install's inputs have changed";
+      for (const root of record.roots) {
+        if ((await this.deps.rootFingerprint(root.dir)) !== root.fingerprint)
+          return `${root.dir} has changed`;
+      }
+      if (
+        (await packageRootSet(this.deps.workspace().fs, tree.dir)) !==
+        record.rootSet
+      )
+        return "the checkout's package roots have changed";
+      return undefined;
+    } catch (err) {
+      return `it could not be checked: ${String(err)}`;
     }
-    return undefined;
+  }
+
+  /** Whether the install record still names `tree`. */
+  async #holds(tree: InstalledTree): Promise<boolean> {
+    const now = await this.deps.tree();
+    return (
+      now?.dir === tree.dir &&
+      now.fingerprint === tree.fingerprint &&
+      now.at === tree.at
+    );
   }
 
   async #drop(record: DepsSnapshotRecord, reason: string): Promise<void> {
@@ -286,10 +358,12 @@ export class DepsSnapshot {
     });
   }
 
-  async #take(tree: ExpectedTree): Promise<void> {
+  async #take(tree: InstalledTree): Promise<void> {
     const container = this.deps.container();
     const image = this.deps.image();
     if (!container?.running || image === undefined) return;
+    // Replaced, or reinstalling, since the install asked.
+    if (!(await this.#holds(tree))) return;
     const startedAt = Date.now();
     try {
       const roots = await this.#roots();
@@ -307,9 +381,17 @@ export class DepsSnapshot {
           dir,
           fingerprint: await this.deps.rootFingerprint(dir)
         });
+      const rootSet = await packageRootSet(this.deps.workspace().fs, tree.dir);
       const snapshot = await container.snapshotContainer({
         name: `deps-${tree.fingerprint.slice(0, 16)}`
       });
+      if (!(await this.#holds(tree))) {
+        console.warn(
+          `[${this.deps.tag()}] discarded a dependency snapshot taken while the tree changed`,
+          { id: this.deps.id(), snapshot: snapshot.id, dir: tree.dir }
+        );
+        return;
+      }
       await this.deps.storage.put(RECORD_KEY, {
         id: snapshot.id,
         size: snapshot.size,
@@ -317,6 +399,7 @@ export class DepsSnapshot {
         dir: tree.dir,
         fingerprint: tree.fingerprint,
         roots: fingerprinted,
+        rootSet,
         at: Date.now()
       } satisfies DepsSnapshotRecord);
       console.info(`[${this.deps.tag()}] took a dependency snapshot`, {
@@ -363,6 +446,7 @@ function isRecord(value: unknown): value is DepsSnapshotRecord {
     typeof r.image === "string" &&
     typeof r.dir === "string" &&
     typeof r.fingerprint === "string" &&
+    typeof r.rootSet === "string" &&
     Array.isArray(r.roots) &&
     r.roots.every((root) => typeof root?.dir === "string")
   );

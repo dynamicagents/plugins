@@ -28,7 +28,8 @@ A mount point cannot be removed, so `rm -rf node_modules` empties it and then fa
 A new container does not reinstall when it can help it. Once an install finishes,
 the object snapshots the container, and a later cold start restores that snapshot
 — the trees with it — when it was taken on the same image for the same install
-inputs, every package root's included. The setup then mounts the restored trees and
+inputs, every package root's included, and the checkout has no package root the
+snapshot lacks. The setup then mounts the restored trees and
 adopts the install only if the marker in it matches. Anything else boots the image
 and installs as before. A host can hand one workspace's snapshot to another of the
 same class with `depsSnapshot()` and `seedDepsSnapshot()` — a worktree at the path
