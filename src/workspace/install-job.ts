@@ -9,6 +9,7 @@ import { JobLifecycle } from "@dynamicagents/core/job";
 import {
   installFingerprint,
   resolveInstallCommand,
+  rootFingerprint,
   type InstallPlan,
   type InstallProbe,
   type InstallState
@@ -49,8 +50,9 @@ function execWasLost(err: unknown): boolean {
  * ## What decides that an install is needed
  *
  * The tree lives on the container's disk (see `./container-deps.ts`), so it goes
- * with the container. {@link CONTAINER_TREE_KEY} records a successful install and
- * is cleared whenever that container is seen gone.
+ * with the container. {@link CONTAINER_TREE_KEY} records a successful install — or
+ * a tree restored with a snapshot of the container that ran one, through
+ * {@link InstallJob.adopt} — and is cleared whenever that container is seen gone.
  */
 
 /**
@@ -164,8 +166,16 @@ export interface InstallJobDeps {
   waitUntil: (promise: Promise<unknown>) => void;
   /** A container was replaced, so nothing believed about it still holds. */
   containerGone: () => Promise<void>;
+  /** An install exited 0, so this container now holds the tree for `fingerprint`. */
+  installed: (tree: { dir: string; fingerprint: string }) => Promise<void>;
   tag: () => string;
   id: () => string;
+}
+
+/** Where an install goes: the checkout, and the repository for its override. */
+export interface InstallTarget {
+  dir: string;
+  repo?: string;
 }
 
 export class InstallJob {
@@ -299,6 +309,68 @@ export class InstallJob {
   /** Where the last install ran, for the container setup's marker read. */
   async dir(): Promise<string | undefined> {
     return (await this.#job.context())?.dir;
+  }
+
+  /** Where the last install ran, and for which repository's override. */
+  async target(): Promise<InstallTarget | undefined> {
+    const context = await this.#job.context();
+    if (!context?.dir) return undefined;
+    return {
+      dir: context.dir,
+      ...(context.repo ? { repo: context.repo } : {})
+    };
+  }
+
+  /**
+   * The fingerprint an install into `target` would write as its marker, from the
+   * checkout as it stands — `null` when there is nothing to install there.
+   */
+  async fingerprintFor(target: InstallTarget): Promise<string | null> {
+    const probe = this.#probe();
+    const resolution = await resolveInstallCommand(
+      probe,
+      target.dir,
+      this.deps.plan(),
+      target.repo
+    );
+    return await installFingerprint(probe, target.dir, resolution);
+  }
+
+  /** What `dir`'s install inputs hash to — see `rootFingerprint`. */
+  async rootFingerprint(dir: string): Promise<string | null> {
+    return await rootFingerprint(this.#probe(), dir, this.deps.plan());
+  }
+
+  /** The tree this container holds, if a finished install says it does. */
+  async tree(): Promise<
+    { dir: string; fingerprint: string | null } | undefined
+  > {
+    const tree = await this.#tree();
+    return tree && { dir: tree.dir, fingerprint: tree.fingerprint };
+  }
+
+  /**
+   * Record a tree this container came up holding — restored with a snapshot of
+   * the container that installed it — as if this container had installed it.
+   *
+   * Only for a tree whose marker the setup read and matched against the checkout
+   * as it stands; see `./deps-snapshot.ts`. So the last install's context moves
+   * to it too: a checkout that moved since that install would otherwise read as
+   * missing its tree, and arm an install that finds the tree already there.
+   */
+  async adopt(tree: { dir: string; fingerprint: string }): Promise<void> {
+    await this.deps.storage.put(CONTAINER_TREE_KEY, {
+      dir: tree.dir,
+      fingerprint: tree.fingerprint,
+      at: Date.now()
+    } satisfies ContainerTree);
+    const context = await this.#job.context();
+    if (context?.dir === tree.dir && context.fingerprint !== tree.fingerprint)
+      await this.#job.putContext({ ...context, fingerprint: tree.fingerprint });
+    console.info(`[${this.deps.tag()}] adopted a restored dependency tree`, {
+      id: this.deps.id(),
+      dir: tree.dir
+    });
   }
 
   /** The container went away, and its tree with it. */
@@ -852,8 +924,10 @@ export class InstallJob {
     const settle = async (
       verdict: InstallState,
       also?: Record<string, unknown>
-    ): Promise<void> => {
-      if (!(await run.write(verdict, also))) await superseded();
+    ): Promise<boolean> => {
+      if (await run.write(verdict, also)) return true;
+      await superseded();
+      return false;
     };
 
     try {
@@ -880,7 +954,7 @@ export class InstallJob {
           command,
           seconds: Math.round((Date.now() - startedAt) / 1000)
         });
-        await settle(
+        const kept = await settle(
           {
             state: "done",
             command,
@@ -891,6 +965,17 @@ export class InstallJob {
           },
           tree ? { [CONTAINER_TREE_KEY]: tree } : undefined
         );
+        // Outside the verdict: a host that cannot act on the news must not turn
+        // a finished install into a failed one, which the catch below would.
+        if (kept && tree?.fingerprint)
+          await this.deps
+            .installed({ dir: tree.dir, fingerprint: tree.fingerprint })
+            .catch((err: unknown) => {
+              console.warn(
+                `[${this.deps.tag()}] could not act on a finished install`,
+                { id: this.deps.id(), err: String(err) }
+              );
+            });
       } else {
         // Logged, and this line is not optional. This is the *ordinary* way an
         // install fails — the other paths are all exceptional — and it used to

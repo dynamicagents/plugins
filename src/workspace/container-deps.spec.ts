@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Workspace } from "@cloudflare/computer";
-import { ContainerDeps, depsSetupCommand } from "./container-deps.js";
+import {
+  ContainerDeps,
+  DEPS_ROOTS_COMMAND,
+  depsSetupCommand,
+  parseDepsRoots
+} from "./container-deps.js";
 
 /**
  * The script is verified end to end against a real shell outside this suite
@@ -51,6 +56,34 @@ describe("depsSetupCommand", () => {
   it("reads the marker only when there is a directory to read it in", () => {
     expect(command).toContain("/workspace/repo/node_modules/.da-installed");
     expect(depsSetupCommand("/workspace")).not.toContain("MARKER");
+  });
+
+  /** A restored disk has the trees and none of the mounts. */
+  it("records each root it mounts beside the tree, where an install cannot empty it", () => {
+    expect(command).toContain('printf %s "$dir" > "$disk.root"');
+  });
+
+  it("mounts every recorded root again before it reads the marker through one", () => {
+    const remount = command.indexOf(
+      'for f in /var/lib/workspace-deps/*.root; do [ -f "$f" ] && /usr/local/sbin/workspace-deps-mount "$(cat "$f")"; done'
+    );
+    expect(remount).toBeGreaterThan(command.indexOf("for tool in"));
+    expect(remount).toBeLessThan(command.indexOf("MARKER"));
+  });
+});
+
+describe("the recorded roots", () => {
+  it("lists every root file, and succeeds on a disk with none", () => {
+    expect(DEPS_ROOTS_COMMAND).toContain("/var/lib/workspace-deps/*.root");
+    expect(DEPS_ROOTS_COMMAND.endsWith("; true")).toBe(true);
+  });
+
+  it("reads each absolute path once, and nothing else", () => {
+    expect(
+      parseDepsRoots(
+        "/workspace/repo\n/workspace/repo/core\n\n/workspace/repo\nnoise\n"
+      )
+    ).toEqual(["/workspace/repo", "/workspace/repo/core"]);
   });
 });
 

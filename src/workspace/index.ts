@@ -91,7 +91,15 @@ export {
 // The dependency install, exported because a host that wants to report on one —
 // or a spec that drives it — needs the type, not because anything but
 // `./object.ts` constructs it.
-export { InstallJob, type InstallJobDeps } from "./install-job.js";
+export {
+  InstallJob,
+  type InstallJobDeps,
+  type InstallTarget
+} from "./install-job.js";
+
+// The record a host passes from one workspace to another with
+// `depsSnapshot` and `seedDepsSnapshot`.
+export type { DepsSnapshotRecord } from "./deps-snapshot.js";
 
 // The pull the library owns no alarm for. Its constants are exported because a
 // host deferring to a drain has to back off at the same rate this does.

@@ -43,7 +43,11 @@ function refusingWorkspace(err: Error): Workspace {
 /** A job wired to one workspace's real storage, and nothing else it does not need. */
 function jobOn(
   storage: DurableObjectStorage,
-  workspace?: Workspace
+  workspace?: Workspace,
+  installed: (tree: {
+    dir: string;
+    fingerprint: string;
+  }) => Promise<void> = async () => {}
 ): InstallJob {
   return new InstallJob({
     storage,
@@ -63,6 +67,7 @@ function jobOn(
     ready: async () => {},
     waitUntil: () => {},
     containerGone: async () => {},
+    installed,
     tag: () => "spec",
     id: () => "spec-id"
   });
@@ -385,5 +390,126 @@ describe("an install this isolate is driving is not re-attached", () => {
     });
     expect(reattached).toEqual([]);
     expect(after.state).toBe("done");
+  });
+});
+
+describe("what an install leaves for the next container", () => {
+  const COMMAND = "npm ci --no-audit --no-fund";
+
+  /** A checkout that installs, whose command exits with `exitCode`. */
+  function finishing(exitCode: number): Workspace {
+    const present = new Set([
+      "/workspace/repo/package.json",
+      "/workspace/repo/package-lock.json"
+    ]);
+    return {
+      fs: {
+        exists: async (path: string) => present.has(path),
+        readFile: async () => "{}"
+      },
+      runtime: {
+        exec: async () => ({
+          result: async () => ({ exitCode, stdout: "", stderr: "" }),
+          [Symbol.dispose]: () => {}
+        }),
+        getExec: async () => {
+          throw new Error("nothing here re-attaches");
+        }
+      }
+    } as unknown as Workspace;
+  }
+
+  /** The alarm's placeholder for an install into `/workspace/repo`, run to its end. */
+  async function runArmed(storage: DurableObjectStorage, job: InstallJob) {
+    const armedAt = Date.now();
+    await storage.put("install", {
+      state: "running",
+      command: COMMAND,
+      startedAt: armedAt
+    } satisfies InstallState);
+    await storage.put("install:armed", armedAt);
+    await storage.put("install:context", {
+      dir: "/workspace/repo",
+      command: COMMAND
+    });
+    await job.onRun();
+  }
+
+  /**
+   * The snapshot a host takes on this is restored only into a start whose
+   * expected fingerprint equals the one recorded here — so the two have to be
+   * the same function of the checkout.
+   */
+  it("reports the tree it finished, under the fingerprint a restore is checked against", async () => {
+    const stub = freshWorkspace("install-reports");
+    const result = await runInDurableObject(stub, async (_instance, s) => {
+      const reported: { dir: string; fingerprint: string }[] = [];
+      const job = jobOn(s.storage, finishing(0), async (tree) => {
+        reported.push(tree);
+      });
+      await runArmed(s.storage, job);
+      return {
+        reported,
+        tree: await job.tree(),
+        expected: await job.fingerprintFor({ dir: "/workspace/repo" })
+      };
+    });
+    expect(result.expected).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.tree?.fingerprint).toBe(result.expected);
+    expect(result.reported).toEqual([
+      { dir: "/workspace/repo", fingerprint: result.expected }
+    ]);
+  });
+
+  it("reports nothing for an install that failed", async () => {
+    const stub = freshWorkspace("install-reports-failure");
+    const reported = await runInDurableObject(stub, async (_instance, s) => {
+      const seen: unknown[] = [];
+      const job = jobOn(s.storage, finishing(1), async (tree) => {
+        seen.push(tree);
+      });
+      await runArmed(s.storage, job);
+      return seen;
+    });
+    expect(reported).toEqual([]);
+  });
+
+  it("stays finished when the host cannot act on the report", async () => {
+    const stub = freshWorkspace("install-report-throws");
+    const state = await runInDurableObject(stub, async (_instance, s) => {
+      const job = jobOn(s.storage, finishing(0), async () => {
+        throw new Error("no alarm today");
+      });
+      await runArmed(s.storage, job);
+      return (await job.read()).state;
+    });
+    expect(state).toBe("done");
+  });
+
+  it("moves a stale install context to the tree it adopts", async () => {
+    const stub = freshWorkspace("install-adopt-moved");
+    const state = await runInDurableObject(stub, async (_instance, s) => {
+      await seedFinishedInstall(s.storage, { tree: false });
+      const job = jobOn(s.storage);
+      await job.adopt({
+        dir: "/workspace/probe",
+        fingerprint: "the-new-lockfile"
+      });
+      await job.armIfTreeMissing();
+      return (await s.storage.get<InstallState>("install"))?.state;
+    });
+    expect(state).toBe("done");
+  });
+
+  it("treats an adopted tree as this container's own", async () => {
+    const stub = freshWorkspace("install-adopt");
+    const state = await runInDurableObject(stub, async (_instance, s) => {
+      await seedFinishedInstall(s.storage, { tree: false });
+      const job = jobOn(s.storage);
+      await job.adopt({ dir: "/workspace/probe", fingerprint: "the-lockfile" });
+      await job.armIfTreeMissing();
+      return (await s.storage.get<InstallState>("install"))?.state;
+    });
+    expect(state).toBe("done");
   });
 });

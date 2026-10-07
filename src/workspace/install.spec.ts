@@ -3,6 +3,7 @@ import {
   DEFAULT_INSTALL_PLAN,
   installFingerprint,
   resolveInstallCommand,
+  rootFingerprint,
   type InstallProbe,
   type InstallPlan
 } from "./install.js";
@@ -363,5 +364,37 @@ describe("installFingerprint", () => {
   it("has nothing to fingerprint when nothing will be installed", async () => {
     const skip = await resolve({ [at("README.md")]: "" });
     expect(await installFingerprint(probe({}), DIR, skip)).toBeNull();
+  });
+});
+
+/**
+ * A package root a bootstrap installs without being pointed at — a submodule —
+ * which a restored snapshot brings back alongside the root the install ran in.
+ */
+describe("rootFingerprint", () => {
+  const files = {
+    [at("package.json")]: "{}",
+    [at("package-lock.json")]: '{"lockfileVersion":3}'
+  };
+  const of = (f: Record<string, string>) =>
+    rootFingerprint(probe(f), DIR, DEFAULT_INSTALL_PLAN);
+
+  it("changes with any lockfile the plan knows, without knowing which one installs", async () => {
+    const before = await of(files);
+    expect(before).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      await of({ ...files, [at("package-lock.json")]: '{"lockfileVersion":2}' })
+    ).not.toBe(before);
+    expect(await of({ ...files, [at("pnpm-lock.yaml")]: "" })).not.toBe(before);
+  });
+
+  it("changes with the manager's configuration", async () => {
+    expect(
+      await of({ ...files, [at(".npmrc")]: "legacy-peer-deps=true\n" })
+    ).not.toBe(await of(files));
+  });
+
+  it("is null for a directory with nothing an install reads", async () => {
+    expect(await of({ [at("README.md")]: "" })).toBeNull();
   });
 });

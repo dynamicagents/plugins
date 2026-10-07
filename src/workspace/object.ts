@@ -23,8 +23,13 @@ import { createGitClient } from "@cloudflare/computer/git";
 import { createCloudflareObserver } from "@cloudflare/computer/observe/cloudflare";
 import { ContainerTrust } from "./ca-trust.js";
 import { ContainerDeps } from "./container-deps.js";
+import {
+  DepsSnapshot,
+  type DepsSnapshotRecord,
+  type ExpectedTree
+} from "./deps-snapshot.js";
 import { ContainerGitIdentity } from "./git-identity.js";
-import { InstallJob } from "./install-job.js";
+import { InstallJob, type InstallTarget } from "./install-job.js";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 import { WorkspaceGitHost } from "./git-host.js";
 import {
@@ -89,6 +94,7 @@ import type { RepoGitResult } from "../repo/index.js";
  * and each carries the reasoning for its own decisions:
  *
  * - `./install-job.ts` — when a dependency install runs, and every guard on it.
+ * - `./deps-snapshot.ts` — starting a container from one that already installed.
  * - `./sync.ts` — the host's half of syncing, which nothing else will do.
  * - `./ca-trust.ts` — making a container able to speak TLS.
  * - `./git-identity.ts` — who a container's commits belong to.
@@ -192,6 +198,9 @@ const RELEASE_ASKED_KEY = "container-release-asked";
 
 /** Where the container-warm wake keeps its current schedule id. */
 const CONTAINER_WARM_ID = "container-warm-id";
+
+/** Where the dependency-snapshot wake keeps its current schedule id. */
+const DEPS_SNAPSHOT_ID = "deps-snapshot-id";
 
 /**
  * How long a container stays up after the last command **started**.
@@ -522,6 +531,7 @@ export abstract class WorkspaceObjectBase<
         idleReclaim: () => this.#onIdleReclaim(),
         containerIdle: (payload) => this.#onContainerIdle(payload),
         containerWarm: () => this.#onContainerWarm(),
+        depsSnapshot: () => this.#onDepsSnapshot(),
         syncRetry: (payload?: SyncDrainIntent) => this.#onSyncDrain(payload)
       },
       onError: (err: unknown) => {
@@ -563,6 +573,19 @@ export abstract class WorkspaceObjectBase<
   });
 
   /**
+   * Snapshot a container that just installed — see `./deps-snapshot.ts`.
+   *
+   * From the alarm rather than the install's drain, which a model turn's
+   * `waitUntil` may own.
+   */
+  readonly #snapshotDue = namedDeadline({
+    storage: this.ctx.storage,
+    scheduler: this.#wake.scheduler,
+    key: DEPS_SNAPSHOT_ID,
+    callback: "depsSnapshot"
+  });
+
+  /**
    * Come back and move the next block of an outstanding pull.
    *
    * **The callback name is on disk in deployed objects, so it may not change.**
@@ -595,6 +618,18 @@ export abstract class WorkspaceObjectBase<
     ready: () => this.#ready(),
     waitUntil: (promise) => this.ctx.waitUntil(promise),
     containerGone: () => this.#containerGone(),
+    installed: async () => void (await this.#snapshotDue.set(new Date())),
+    tag: () => this.#tag,
+    id: () => this.ctx.id.toString()
+  });
+
+  /** The next container's dependency trees — see `./deps-snapshot.ts`. */
+  readonly #snapshot = new DepsSnapshot({
+    storage: this.ctx.storage,
+    container: () => this.ctx.container,
+    image: () => this.#image,
+    workspace: () => this.#workspace,
+    rootFingerprint: (dir) => this.#install.rootFingerprint(dir),
     tag: () => this.#tag,
     id: () => this.ctx.id.toString()
   });
@@ -656,6 +691,10 @@ export abstract class WorkspaceObjectBase<
    * The binding name, the egress policy and the instance size are the
    * subclass's — see {@link WorkspaceObjectConfig}, which carries the warnings
    * on each.
+   *
+   * `launch` is how a start restores a dependency snapshot instead of booting
+   * the image — see `./deps-snapshot.ts`. Never in the env: the env is part of
+   * what a running container is matched against.
    */
   #backendMemo?: ContainerBackend;
 
@@ -663,8 +702,13 @@ export abstract class WorkspaceObjectBase<
     return (this.#backendMemo ??= this.#newBackend());
   }
 
+  /** The image a start boots, as the deploy prepared it. */
+  get #image(): string | undefined {
+    return this.ctx.container?.images?.[IMAGE_NAME];
+  }
+
   #newBackend(): ContainerBackend {
-    const image: string | undefined = this.ctx.container?.images?.[IMAGE_NAME];
+    const image = this.#image;
     return new ContainerBackend({
       container: () => this,
       workspace: {
@@ -674,7 +718,8 @@ export abstract class WorkspaceObjectBase<
       egress: this.#cfg.egress,
       name: IMAGE_NAME,
       instance: this.#cfg.instance,
-      containerEnv: image === undefined ? {} : { [IMAGE_ENV]: image }
+      containerEnv: image === undefined ? {} : { [IMAGE_ENV]: image },
+      launch: this.#snapshot.launch
     });
   }
 
@@ -782,17 +827,56 @@ export abstract class WorkspaceObjectBase<
     return this.#readying;
   }
 
-  /** One start, run for whoever got there first — see {@link #ready}. */
+  /**
+   * One start, run for whoever got there first — see {@link #ready}.
+   *
+   * A cold start restores the dependency snapshot when one fits, and the marker
+   * the setup reads decides whether what came up is adopted as installed — see
+   * `./deps-snapshot.ts`.
+   */
   async #readyNow(): Promise<void> {
     // Read **before** `ready()`, which starts a stopped container.
-    if (!this.ctx.container?.running) await this.#containerGone();
-    await this.#workspace.ready();
-    // Before the first exec, which pushes the whole tree into a new container.
-    await this.#purgeSyncedTrees();
-    await this.#trust.ensure();
-    await this.#gitIdentity.ensure();
-    const found = await this.#deps.ensure(await this.#install.dir());
-    if (found) await this.#install.reconcile(found.marker);
+    let restoring: DepsSnapshotRecord | undefined;
+    if (!this.ctx.container?.running) {
+      await this.#containerGone();
+      restoring = await this.#snapshot.arm(() => this.#expectedTree());
+    }
+    try {
+      await this.#workspace.ready();
+      // Before the first exec, which pushes the whole tree into a new container.
+      await this.#purgeSyncedTrees();
+      await this.#trust.ensure();
+      await this.#gitIdentity.ensure();
+      const found = await this.#deps.ensure(
+        restoring?.dir ?? (await this.#install.dir())
+      );
+      if (found) await this.#install.reconcile(found.marker);
+      if (
+        restoring &&
+        (await this.#snapshot.restored(restoring, found?.marker))
+      )
+        await this.#install.adopt(restoring);
+    } finally {
+      this.#snapshot.disarm();
+    }
+  }
+
+  /**
+   * The install a cold start would owe: where the last one ran, or the checkout
+   * when none has — a worktree seeded before its first install.
+   */
+  async #expectedTree(): Promise<ExpectedTree | undefined> {
+    const target =
+      (await this.#install.target()) ?? (await this.#checkoutTarget());
+    if (!target) return undefined;
+    const fingerprint = await this.#install.fingerprintFor(target);
+    return fingerprint ? { dir: target.dir, fingerprint } : undefined;
+  }
+
+  async #checkoutTarget(): Promise<InstallTarget | undefined> {
+    const record = await this.ctx.storage.get<CheckoutRecord>(CHECKOUT_KEY);
+    if (!record?.dir) return undefined;
+    return { dir: record.dir, ...(record.repo ? { repo: record.repo } : {}) };
   }
 
   /**
@@ -1103,6 +1187,30 @@ export abstract class WorkspaceObjectBase<
     return await this.#install.start(req);
   }
 
+  /**
+   * This workspace's dependency snapshot, for another of the same class to start
+   * from — see {@link seedDepsSnapshot}. Starts no container and moves no
+   * deadline.
+   */
+  async depsSnapshot(): Promise<DepsSnapshotRecord | undefined> {
+    return await this.#snapshot.get();
+  }
+
+  /**
+   * Start this workspace's next container from `record`, another workspace's
+   * dependency snapshot, when it fits the checkout here — a worktree at the same
+   * path as the checkout it was cut from. Call it after the checkout and before
+   * the first command.
+   *
+   * A snapshot is that workspace's whole disk, so offer one only between
+   * workspaces of the same caller.
+   */
+  async seedDepsSnapshot(
+    record: DepsSnapshotRecord
+  ): Promise<{ seeded: boolean; reason?: string }> {
+    return await this.#snapshot.seed(record, () => this.#expectedTree());
+  }
+
   // --- lifecycle ---------------------------------------------------------------
 
   /**
@@ -1140,10 +1248,9 @@ export abstract class WorkspaceObjectBase<
    *
    * The counterpart to {@link reclaimIfIdle}, and the difference is the whole
    * reason both exist. A reclaim is for a workspace nobody wants again: it empties
-   * storage, so the checkout and the dependency tree go with the container. This is
-   * for a workspace that will be worked in again — the next task on the same
-   * repository has to skip the clone and the install, which is the cost the whole
-   * design is arranged around.
+   * storage, so the checkout and the dependency snapshot go with the container.
+   * This is for a workspace that will be worked in again — the next task on the
+   * same repository skips the clone, and the install by restoring the snapshot.
    *
    * **Why a caller needs this at all.** The idle deadline would eventually do it,
    * but it cannot be tuned down to meet a cost target: `containerIdleMs` must
@@ -1327,6 +1434,8 @@ export abstract class WorkspaceObjectBase<
       reason,
       running: this.ctx.container?.running ?? false
     });
+    // A snapshot needs the container running, and takes seconds.
+    await this.#snapshot.settled();
     // Hang up the session to computerd first: a destroy that cuts it live
     // surfaces as an uncaught `Network connection lost`. The workspace
     // reconnects on its next use, and `close()` swallows its own failures.
@@ -1598,6 +1707,15 @@ export abstract class WorkspaceObjectBase<
     if (outcome === "failed") {
       await this.#sync.arm((payload?.attempt ?? 0) + 1);
     }
+  }
+
+  /** An install finished in this container — see `./deps-snapshot.ts`. */
+  async #onDepsSnapshot(): Promise<void> {
+    // Read again rather than carried: a container replaced since took its tree
+    // record, and the disk that tree was on, with it.
+    const tree = await this.#install.tree();
+    if (!tree?.fingerprint) return;
+    await this.#snapshot.take({ dir: tree.dir, fingerprint: tree.fingerprint });
   }
 
   /** The idle-reclaim deadline came due. */

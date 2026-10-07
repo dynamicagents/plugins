@@ -3,7 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { Workspace } from "@cloudflare/computer";
 import type { TestWorkspaceDO } from "../../test/worker.js";
 import { freshWorkspace, workspaceNamespace } from "../../test/workspace/do.js";
-import { DEFAULT_INSTALL_PLAN, type InstallState } from "./install.js";
+import {
+  DEFAULT_INSTALL_PLAN,
+  installFingerprint,
+  resolveInstallCommand,
+  rootFingerprint,
+  type InstallProbe,
+  type InstallState
+} from "./install.js";
+import type { DepsSnapshotRecord } from "./deps-snapshot.js";
 import { openWorkspace, openWorkspaceFs } from "./index.js";
 import { DEFAULT_SCRATCH_DIR } from "../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
@@ -1412,6 +1420,69 @@ describe("launching the container", () => {
     const after = await connectOnce(await redeployed(stub), IMAGE_A, true);
 
     expect(after).toEqual({ starts: [], destroys: 0 });
+  });
+
+  /**
+   * A cold start with a snapshot that fits restores it — once: the backend's
+   * restart after a start that never came up boots the image. Here nothing comes
+   * up, so nothing confirms the tree, and the record is let go.
+   */
+  it("restores a fitting dependency snapshot into a cold start, and drops it when nothing confirms it", async () => {
+    const stub = freshWorkspace("launch-snapshot");
+    const dir = "/workspace/probe";
+    await seedNodeCheckout(stub, dir);
+    await stub.noteCheckout({ dir, kind: "repo" });
+    {
+      using ws = await openWorkspace(stub);
+      const probe: InstallProbe = {
+        exists: (path) => pathExists(ws.fs, path),
+        readFile: (path) => ws.fs.readFile(path, "utf8")
+      };
+      const resolution = await resolveInstallCommand(probe, dir, INSTALL_PLAN);
+      const record: DepsSnapshotRecord = {
+        id: "snap-1",
+        size: 1,
+        image: IMAGE_A,
+        dir,
+        fingerprint: (await installFingerprint(probe, dir, resolution))!,
+        roots: [
+          { dir, fingerprint: await rootFingerprint(probe, dir, INSTALL_PLAN) }
+        ],
+        at: Date.now()
+      };
+      await runInDurableObject(stub, (_instance, state) =>
+        state.storage.put("deps:snapshot", record)
+      );
+    }
+
+    const after = await runInDurableObject(
+      await redeployed(stub),
+      async (instance, state) => {
+        const starts: ContainerStartupOptions[] = [];
+        Object.defineProperty(state, "container", {
+          configurable: true,
+          value: {
+            running: false,
+            images: { app: IMAGE_A },
+            start: (options: ContainerStartupOptions) =>
+              void starts.push(options),
+            monitor: () => new Promise<void>(() => {}),
+            destroy: async () => {},
+            interceptOutboundHttp: () =>
+              Promise.reject(new Error("stand-in: no egress"))
+          }
+        });
+        await instance.__getWorkspaceStub().catch(() => {});
+        return { starts, record: await state.storage.get("deps:snapshot") };
+      }
+    );
+
+    expect(after.starts[0]).toMatchObject({
+      containerSnapshot: { id: "snap-1" }
+    });
+    expect(after.starts[0]).not.toHaveProperty("image");
+    expect(after.starts.slice(1).every((s) => s.image === IMAGE_A)).toBe(true);
+    expect(after.record).toBeUndefined();
   });
 
   it("replaces a running container when a deploy brought a new image", async () => {

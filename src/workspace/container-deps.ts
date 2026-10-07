@@ -14,6 +14,11 @@ import { deploymentFault } from "./container-fault.js";
  * this installs ahead of the real binaries on `PATH`. Mounting earlier cannot
  * work: a bootstrap that initialises submodules and installs each of them in one
  * command creates the directories the mounts belong in.
+ *
+ * A container restored from a snapshot (see `./deps-snapshot.ts`) has the trees
+ * on its disk and none of the mounts, which are kernel state. So each mount
+ * records its package root beside its tree, and the setup mounts every recorded
+ * root again before it reads the marker through one.
  */
 
 /** Where the trees live on the container's disk. */
@@ -40,6 +45,26 @@ const WRAPPED = [
 
 /** Written into the tree by a successful host install; see `./install-job.ts`. */
 export const INSTALLED_MARKER = ".da-installed";
+
+/**
+ * The package root a tree belongs to, written beside it as `<tree>.root`.
+ *
+ * Beside rather than inside: `npm ci` empties the tree it installs into, and the
+ * hash a tree is named by cannot be turned back into the path.
+ */
+const ROOT_SUFFIX = ".root";
+
+/** Every package root with a tree on this container's disk, one per line. */
+export const DEPS_ROOTS_COMMAND = `for f in ${DEPS_DISK}/*${ROOT_SUFFIX}; do [ -f "$f" ] && { cat "$f"; echo; }; done; true`;
+
+/** {@link DEPS_ROOTS_COMMAND}'s output as paths, each once. */
+export function parseDepsRoots(stdout: string): string[] {
+  const roots = stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("/"));
+  return [...new Set(roots)];
+}
 
 /**
  * The per-container setup, and a read of the marker under `dir`.
@@ -73,7 +98,7 @@ export function depsSetupCommand(workspaceDir: string, dir?: string): string {
     'nm="$dir/node_modules"',
     'mountpoint -q "$nm" && exit 0',
     `disk="${DEPS_DISK}/$(printf %s "$dir" | sha256sum | cut -c1-16)"`,
-    'mkdir -p "$disk" "$nm" && mount --bind "$disk" "$nm" && exit 0',
+    `mkdir -p "$disk" "$nm" && mount --bind "$disk" "$nm" && { printf %s "$dir" > "$disk${ROOT_SUFFIX}"; exit 0; }`,
     `echo "workspace-deps: could not put $nm on the container's disk" >&2`,
     "exit 1"
   ].join("\n");
@@ -94,6 +119,9 @@ export function depsSetupCommand(workspaceDir: string, dir?: string): string {
     `install -m 755 /tmp/workspace-deps-mount ${MOUNT_HELPER} || exit 1`,
     `printf '%s\\n' ${shellQuote(wrapper)} > /tmp/workspace-deps-wrap`,
     `for tool in ${WRAPPED.join(" ")}; do install -m 755 /tmp/workspace-deps-wrap "${WRAPPER_DIR}/$tool" || exit 1; done`,
+    // A root that is not in this checkout is left alone by the helper, and one
+    // that cannot be mounted reads as no marker below — an install, not a fault.
+    `for f in ${DEPS_DISK}/*${ROOT_SUFFIX}; do [ -f "$f" ] && ${MOUNT_HELPER} "$(cat "$f")"; done`,
     ...(dir
       ? [
           `echo "MARKER $(cat ${shellQuote(`${dir}/node_modules/${INSTALLED_MARKER}`)} 2>/dev/null || echo -)"`

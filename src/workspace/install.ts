@@ -188,6 +188,11 @@ function pinnedManager(packageJson: string): string | undefined {
   }
 }
 
+/** Every lockfile the plan names, each once. */
+function planLockfiles(plan: InstallPlan): string[] {
+  return [...new Set(plan.rules.flatMap((r) => [...r.lockfiles]))];
+}
+
 /**
  * Every lockfile the plan knows of that is present in `dir`.
  *
@@ -199,9 +204,8 @@ async function knownLockfiles(
   dir: string,
   plan: InstallPlan
 ): Promise<string[]> {
-  const names = [...new Set(plan.rules.flatMap((r) => [...r.lockfiles]))];
   const present: string[] = [];
-  for (const name of names) {
+  for (const name of planLockfiles(plan)) {
     if (await fs.exists(`${dir}/${name}`)) present.push(name);
   }
   return present;
@@ -391,10 +395,41 @@ export async function installFingerprint(
     ...INSTALL_CONFIG_FILES
   ];
 
+  return await digestFiles(fs, dir, names, resolution.command);
+}
+
+/**
+ * The same digest for a package root an install reached without being pointed
+ * at it — a submodule a bootstrap installs, say — where there is no command to
+ * fold in, and every lockfile the plan knows stands in for the one it would pick.
+ *
+ * For `./deps-snapshot.ts`, which restores every root's tree at once and so has
+ * to know none of them moved.
+ */
+export async function rootFingerprint(
+  fs: InstallProbe,
+  dir: string,
+  plan: InstallPlan
+): Promise<string | null> {
+  return await digestFiles(
+    fs,
+    dir,
+    ["package.json", ...planLockfiles(plan), ...INSTALL_CONFIG_FILES],
+    ""
+  );
+}
+
+/** `prefix`, then every file of `names` present in `dir`; null when none is. */
+async function digestFiles(
+  fs: InstallProbe,
+  dir: string,
+  names: readonly string[],
+  prefix: string
+): Promise<string | null> {
   // Names as well as contents. Two lockfiles will not collide on content in
   // practice, but a digest that cannot say *which* file it read is one that
   // silently depends on the caller resolving them in the same order forever.
-  let input = resolution.command;
+  let input = prefix;
   let found = false;
   for (const name of names) {
     if (!(await fs.exists(`${dir}/${name}`))) continue;
