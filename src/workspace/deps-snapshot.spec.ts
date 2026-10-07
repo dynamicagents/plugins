@@ -158,6 +158,55 @@ describe("taking a snapshot", () => {
   });
 });
 
+describe("the snapshot an install asks for", () => {
+  /** Mark `TREE` due, then take what is due while the container holds `held`. */
+  async function due(
+    name: string,
+    held: { dir: string; fingerprint: string | null } | undefined
+  ) {
+    const stub = freshWorkspace(name);
+    return await runInDurableObject(stub, async (_i, s) => {
+      const { snapshot, taken } = standIn(s.storage);
+      await snapshot.markDue(TREE);
+      await snapshot.takeDue(async () => held);
+      // Asked once: a second take finds nothing due.
+      await snapshot.takeDue(async () => held);
+      return {
+        taken: taken.length,
+        record: await snapshot.get(),
+        stillDue: await s.storage.get("deps:snapshot-due")
+      };
+    });
+  }
+
+  it("is taken once, while the container holds the tree it was asked for", async () => {
+    const after = await due("due-held", TREE);
+    expect(after.taken).toBe(1);
+    expect(after.record?.fingerprint).toBe(TREE.fingerprint);
+    expect(after.stillDue).toBeUndefined();
+  });
+
+  it.each([
+    ["holds another tree", { dir: DIR, fingerprint: "other" }],
+    ["holds none", undefined]
+  ])("is let go when the container %s", async (_name, held) => {
+    const after = await due("due-moved", held);
+    expect(after.taken).toBe(0);
+    expect(after.stillDue).toBeUndefined();
+  });
+
+  it("is forgotten with the container", async () => {
+    const stub = freshWorkspace("due-forgotten");
+    const stillDue = await runInDurableObject(stub, async (_i, s) => {
+      const { snapshot } = standIn(s.storage);
+      await snapshot.markDue(TREE);
+      await snapshot.forgetDue();
+      return await s.storage.get("deps:snapshot-due");
+    });
+    expect(stillDue).toBeUndefined();
+  });
+});
+
 describe("restoring a snapshot", () => {
   /** Arm on `stand`, then read what the next two starts would launch with. */
   async function launches(

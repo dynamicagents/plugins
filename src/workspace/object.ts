@@ -618,7 +618,10 @@ export abstract class WorkspaceObjectBase<
     ready: () => this.#ready(),
     waitUntil: (promise) => this.ctx.waitUntil(promise),
     containerGone: () => this.#containerGone(),
-    installed: async () => void (await this.#snapshotDue.set(new Date())),
+    installed: async (tree) => {
+      await this.#snapshot.markDue(tree);
+      await this.#snapshotDue.set(new Date());
+    },
     tag: () => this.#tag,
     id: () => this.ctx.id.toString()
   });
@@ -769,6 +772,7 @@ export abstract class WorkspaceObjectBase<
     this.#gitIdentity.forget();
     this.#deps.forget();
     await this.#install.containerGone();
+    await this.#snapshot.forgetDue();
   }
 
   /**
@@ -1434,7 +1438,11 @@ export abstract class WorkspaceObjectBase<
       reason,
       running: this.ctx.container?.running ?? false
     });
-    // A snapshot needs the container running, and takes seconds.
+    // An install's snapshot the wake has not taken yet would go with the disk
+    // it is of, so it is taken here first. Not for a reclaim, which keeps
+    // nothing. Either way, one in flight needs the container running.
+    if (reason === "idle")
+      await this.#snapshot.takeDue(() => this.#install.tree());
     await this.#snapshot.settled();
     // Hang up the session to computerd first: a destroy that cuts it live
     // surfaces as an uncaught `Network connection lost`. The workspace
@@ -1711,11 +1719,7 @@ export abstract class WorkspaceObjectBase<
 
   /** An install finished in this container — see `./deps-snapshot.ts`. */
   async #onDepsSnapshot(): Promise<void> {
-    // Read again rather than carried: a container replaced since took its tree
-    // record, and the disk that tree was on, with it.
-    const tree = await this.#install.tree();
-    if (!tree?.fingerprint) return;
-    await this.#snapshot.take({ dir: tree.dir, fingerprint: tree.fingerprint });
+    await this.#snapshot.takeDue(() => this.#install.tree());
   }
 
   /** The idle-reclaim deadline came due. */

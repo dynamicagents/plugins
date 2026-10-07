@@ -11,7 +11,7 @@ import {
   type InstallProbe,
   type InstallState
 } from "./install.js";
-import type { DepsSnapshotRecord } from "./deps-snapshot.js";
+import { DepsSnapshot, type DepsSnapshotRecord } from "./deps-snapshot.js";
 import { openWorkspace, openWorkspaceFs } from "./index.js";
 import { DEFAULT_SCRATCH_DIR } from "../scratch/index.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
@@ -1271,6 +1271,37 @@ describe("releasing a container", () => {
         close.mockRestore();
       }
       expect(calls).toEqual(["close", "destroy"]);
+    });
+  });
+
+  /**
+   * An install asks for its snapshot through a wake, and a host releasing the
+   * container at the end of a short task can get there first.
+   */
+  it("takes the snapshot a finished install asked for before it stops the container", async () => {
+    const stub = freshWorkspace("release-takes-due");
+    const tree = { dir: "/workspace/api", fingerprint: "the-lockfile" };
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await state.storage.put("install:tree", { ...tree, at: Date.now() });
+      await state.storage.put("deps:snapshot-due", tree);
+      const calls: string[] = [];
+      const take = vi
+        .spyOn(DepsSnapshot.prototype, "take")
+        .mockImplementation(async (taken) => {
+          calls.push(`take ${taken.fingerprint}`);
+        });
+      Object.defineProperty(state, "container", {
+        configurable: true,
+        value: { running: false, destroy: async () => calls.push("destroy") }
+      });
+      try {
+        expect(await instance.releaseContainer()).toEqual({ released: true });
+      } finally {
+        take.mockRestore();
+      }
+      expect(calls).toEqual(["take the-lockfile", "destroy"]);
+      expect(await state.storage.get("deps:snapshot-due")).toBeUndefined();
     });
   });
 

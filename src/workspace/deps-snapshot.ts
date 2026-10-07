@@ -42,6 +42,9 @@ import { DEPS_ROOTS_COMMAND, parseDepsRoots } from "./container-deps.js";
 /** Where the record lives. */
 const RECORD_KEY = "deps:snapshot";
 
+/** The tree a finished install asked to have snapshotted, until it is. */
+const DUE_KEY = "deps:snapshot-due";
+
 export interface DepsSnapshotRecord {
   /** The platform's snapshot id. */
   id: string;
@@ -188,6 +191,37 @@ export class DepsSnapshot {
   /** A snapshot in flight, finished — for whatever is about to stop the container. */
   async settled(): Promise<void> {
     await this.#taking;
+  }
+
+  /**
+   * An install finished in the running container, so snapshot it before it
+   * stops. In storage rather than only in the wake that takes it: a stop can
+   * come first, and must take it then — see {@link takeDue}.
+   */
+  async markDue(tree: ExpectedTree): Promise<void> {
+    await this.deps.storage.put(DUE_KEY, tree);
+  }
+
+  /**
+   * Take the snapshot an install asked for, while the container still holds its
+   * tree — `current` is the tree the install record says it holds.
+   */
+  async takeDue(
+    current: () => Promise<
+      { dir: string; fingerprint: string | null } | undefined
+    >
+  ): Promise<void> {
+    const due = await this.deps.storage.get<ExpectedTree>(DUE_KEY);
+    if (!due) return;
+    await this.deps.storage.delete(DUE_KEY);
+    const tree = await current();
+    if (tree?.dir === due.dir && tree.fingerprint === due.fingerprint)
+      await this.take(due);
+  }
+
+  /** The container went, and the disk an asked-for snapshot was of with it. */
+  async forgetDue(): Promise<void> {
+    await this.deps.storage.delete(DUE_KEY);
   }
 
   async get(): Promise<DepsSnapshotRecord | undefined> {
