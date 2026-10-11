@@ -110,7 +110,15 @@ function fake(
         seen.opened.push(name);
         return {
           fs,
-          runtime: {},
+          // `getWorkspace` reads the backend list and whether there are assets
+          // once, when it opens the stub, rather than per query — so a stub
+          // owes both even on a path that never runs a command. No backend
+          // connects on the filesystem path, which is what makes it cheap
+          // enough to front every file tool, so the empty list is the real
+          // answer here and not a stand-in. See `WorkspaceObjectBase`'s
+          // `__getWorkspaceFsStub` in `../workspace/object.ts`.
+          runtime: { backends: async () => [] },
+          hasAssets: false,
           useThink: false,
           [Symbol.dispose]: () => {}
         };
