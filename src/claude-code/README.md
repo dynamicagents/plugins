@@ -421,8 +421,9 @@ reports once.
 assistant messages say, so narration streamed as text would become the result.
 What the session says as it works goes to the parent as **notes**, through
 `note`, each keyed on its exec and its position: the parent's transcript dedupes
-on the key, so a note filed again after a restart is dropped, and two runs in one
-task never collide. Prose is a plain note; every tool call, its result and the
+on the key, so a note filed again after a restart is dropped, and a run that
+carries on a session — continuing the page of the run before it — never collides
+with that run. Prose is a plain note; every tool call, its result and the
 session's start and end are a note with a **card** — the tool, what it acted on,
 its input and output folded beneath (`./cards.ts`). A thinking block is a card
 too, saying only how long it streamed — "Thought for 5s", timed from its first

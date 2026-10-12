@@ -239,9 +239,10 @@ export function claudeCodeModel(
     };
     /**
      * Each note, filed as it is parsed, then the cursor behind it. Keyed on the
-     * exec as well as the position: the parent's transcript is one per task and
-     * dedupes on the key, so a run's notes must not collide with another run's
-     * — or with its own follow-up's, which counts from zero again.
+     * exec as well as the position: the parent's transcript dedupes on the key,
+     * and a run that carries on a session continues the page of the run before
+     * it, so its notes must not collide with that run's — or with its own
+     * follow-up's, which counts from zero again.
      */
     const sinks = {
       onProgress: (note: NoteData) =>
