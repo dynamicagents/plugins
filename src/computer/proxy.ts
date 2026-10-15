@@ -1,8 +1,10 @@
 import type { WorkspaceLike } from "@cloudflare/think";
-import type { WorkspaceClient } from "@cloudflare/computer";
+import type { WorkspaceAdvisory } from "../workspace/advisory.js";
+import type { ComputerClient } from "./client.js";
 import { withFileLock } from "./file-lock.js";
 import { writeGate } from "./gate.js";
 import {
+  openWorkspace,
   openWorkspaceFs,
   workspaceNameFromRuntime
 } from "../workspace/open.js";
@@ -37,11 +39,20 @@ import type { ComputerConfig } from "./index.js";
  * {@link ROUTE}. `computer()`'s tools route through this rather than through
  * their own config, which is what makes a workspace built from another config,
  * or without its runtime, a wrong workspace for both rather than a split.
+ *
+ * A sandbox's workspace carries one too — `./sandbox.ts` — so the tools reach
+ * whichever kind the agent's workspace is.
  */
 export interface WorkspaceRoute {
+  /** Which plugin's tools and context this workspace is for. */
+  kind: "workspace" | "sandbox";
   /** The workspace the running turn names. Read per call. */
   name(): string;
-  host(name: string): DurableObjectStub<WorkspaceHost>;
+  /** For a command: the container started. */
+  open(name: string): Promise<ComputerClient>;
+  /** For the file tools, which a workspace may serve without its container. */
+  openFs(name: string): Promise<ComputerClient>;
+  advisories(name: string): Promise<readonly WorkspaceAdvisory[]>;
 }
 
 /**
@@ -100,11 +111,11 @@ async function orNull<T>(read: Promise<T>): Promise<T | null> {
  * and a `stat` that throws across the boundary leaves the object an unhandled
  * rejection to log for it.
  */
-function statOrNull(fs: WorkspaceClient["fs"], path: string) {
+function statOrNull(fs: ComputerClient["fs"], path: string) {
   // Called as a method, never through `.call`: on an RPC stub `.call` is read
   // as a remote method.
   const remote = fs as {
-    statOrNull?: (p: string) => ReturnType<WorkspaceClient["fs"]["stat"]>;
+    statOrNull?: (p: string) => ReturnType<ComputerClient["fs"]["stat"]>;
   };
   if (typeof remote.statOrNull === "function") return remote.statOrNull(path);
   return orNull(fs.stat(path));
@@ -161,28 +172,40 @@ export function computerWorkspace(
   config: ComputerConfig,
   runtime?: () => unknown
 ): WorkspaceLike {
-  const cwd = config.cwd ?? "/workspace";
-
-  // Resolved per call, never memoized: the name belongs to the turn, and a
-  // stale one would route this caller's writes into another's files.
-  const named = () =>
-    workspaceNameFromRuntime(runtime?.()) ?? config.workspaceName();
   const host = (name: string): DurableObjectStub<WorkspaceHost> =>
     config.binding.get(config.binding.idFromName(name));
+  return routedWorkspace(
+    {
+      kind: "workspace",
+      // Resolved per call, never memoized: the name belongs to the turn, and a
+      // stale one would route this caller's writes into another's files.
+      name: () =>
+        workspaceNameFromRuntime(runtime?.()) ?? config.workspaceName(),
+      open: (name) => openWorkspace(host(name)),
+      // Opened without starting a container — see
+      // `WorkspaceHost.__getWorkspaceFsStub`.
+      openFs: (name) => openWorkspaceFs(host(name)),
+      advisories: (name) => host(name).advisories()
+    },
+    config.cwd ?? "/workspace"
+  );
+}
 
-  /**
-   * One call, against the workspace this turn names. Opened without starting a
-   * container — see `WorkspaceHost.__getWorkspaceFsStub`.
-   */
+/** Think's file tools over `route`, carrying it for `computer()` to find. */
+export function routedWorkspace(
+  route: WorkspaceRoute,
+  cwd: string
+): WorkspaceLike {
+  /** One call, against the workspace this turn names. */
   const withFs = async <T>(
     path: string,
     verb: string,
-    body: (fs: WorkspaceClient["fs"], name: string) => Promise<T>
+    body: (fs: ComputerClient["fs"], name: string) => Promise<T>
   ): Promise<T> => {
     const refusal = guardPath(path, verb);
     if (refusal) throw new Error(refusal);
-    const name = named();
-    using ws = await openWorkspaceFs(host(name));
+    const name = route.name();
+    using ws = await route.openFs(name);
     return await body(ws.fs, name);
   };
 
@@ -194,13 +217,13 @@ export function computerWorkspace(
   const withWritableFs = <T>(
     path: string,
     verb: string,
-    body: (fs: WorkspaceClient["fs"], name: string) => Promise<T>
+    body: (fs: ComputerClient["fs"], name: string) => Promise<T>
   ): Promise<T> =>
     withFs(path, verb, async (fs, name) => {
       // Fails open, for the reason the tools' own write gate does: a read of
       // another Durable Object's state must not take out a working tool.
-      const lost = await host(name)
-        .advisories()
+      const lost = await route
+        .advisories(name)
         .then(writeGate, () => undefined);
       if (lost) throw new Error(lost);
       return body(fs, name);
@@ -270,7 +293,6 @@ export function computerWorkspace(
     // evicted media, projected skills — and none of that belongs in a
     // repository's checkout. Without it Think skips both, with a warning.
   };
-  const route: WorkspaceRoute = { name: named, host };
   Object.defineProperty(workspace, ROUTE, { value: route });
   return workspace as WorkspaceLike;
 }
