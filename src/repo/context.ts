@@ -1,5 +1,6 @@
 import type { ActionContext } from "@cloudflare/think";
-import { mcpClient, type McpAnswer } from "./mcp.js";
+import { sha256Hex, truncateOutput } from "@dynamicagents/core";
+import { githubMcp, type GithubMcpCall } from "./mcp.js";
 import {
   DEFAULT_ALLOWED_HOSTS,
   GITHUB_HOST,
@@ -56,35 +57,6 @@ export const GITHUB_PAGE_SIZE = 100;
  * tools talk to — see `./mcp.ts` for why Enterprise is not supported.
  */
 const GRAPHQL_URL = `${API_BASE}/graphql`;
-
-/**
- * Middle-out truncation, so both the head of a diff and its tail survive.
- *
- * Deliberately a **copy** of `/workspace`'s function of the same name, not an
- * import. `npm run verify:exports` fails any subpath whose module graph
- * reaches a sibling's directory, and its own advice for a shared helper is to
- * duplicate it — installing `repo` must not drag `/workspace` (and therefore
- * `@cloudflare/computer`) into a consumer's bundle. Fifteen lines is a cheaper
- * price than that coupling, and it is the same reason `exec` is injected here
- * rather than imported.
- *
- * The `half < 1` guard is not padding: without it a small `max` makes `half`
- * zero or negative, and `slice(-0)` is `slice(0)` — the whole string — so the
- * function would return *more* than it was given.
- */
-export function truncateOutput(text: string, max: number): string {
-  if (text.length <= max) return text;
-
-  const marker = (dropped: number) =>
-    `\n\n… [${dropped} characters omitted from the middle] …\n\n`;
-
-  const half = Math.floor((max - marker(text.length).length) / 2);
-  if (half < 1) return text.slice(0, Math.max(0, max));
-
-  return (
-    text.slice(0, half) + marker(text.length - half * 2) + text.slice(-half)
-  );
-}
 
 /**
  * What one container command produced — plus one bit the container did not.
@@ -238,15 +210,9 @@ export interface RepoContext {
   }>;
   /**
    * One call to GitHub's hosted MCP server — every read this plugin makes.
-   *
-   * `tool` is this plugin's own name, for the failure log; `name` is the MCP
-   * tool, which must be one of `./mcp.ts`'s allowlist.
+   * See {@link file://./mcp.ts GithubMcpCall}.
    */
-  mcp: (
-    tool: string,
-    name: string,
-    args: Record<string, unknown>
-  ) => Promise<McpAnswer>;
+  mcp: GithubMcpCall;
   /**
    * One REST call, for what is left on it: opening a pull request and
    * commenting. Both are writes, and both are `coding`'s rather than
@@ -293,17 +259,6 @@ export function actionTask(ctx: ActionContext): string {
         "the repo plugin's actions run only in turns core started for a task"
     );
   return task;
-}
-
-/** A hex SHA-256, so a key names a body without carrying it. */
-export async function sha256(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(text)
-  );
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 export function repoContext(
@@ -748,10 +703,10 @@ export function repoContext(
     fetchOrigin,
     pushBranch,
     origin,
-    // Keyed on the config, so one plugin instance keeps one MCP session
+    // Keyed on the config, so one plugin instance keeps one MCP connection
     // however many times its tools are rebuilt — the reason the git queue
     // above is keyed the same way.
-    mcp: mcpClient(config, credential, logFailure),
+    mcp: githubMcp(config, credential, logFailure),
     github,
     githubGraphql,
     githubRepo

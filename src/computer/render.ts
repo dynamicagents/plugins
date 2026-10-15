@@ -2,7 +2,7 @@ import type {
   WorkspaceClient,
   WorkspaceRuntimeStatus
 } from "@cloudflare/computer";
-import { truncateOutput } from "../workspace/format.js";
+import { truncateOutput } from "@dynamicagents/core";
 
 /**
  * Turning a result into the text a model reads.

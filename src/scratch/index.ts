@@ -1,6 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { definePlugin } from "@dynamicagents/core";
+import { definePlugin, truncateOutput } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
 
 /**
@@ -165,27 +165,6 @@ export interface ScratchConfig {
    * Returning nothing means "no opinion", which is treated as ready.
    */
   afterOpen?: (scratch: Scratchpad) => Promise<ScratchReadiness | void>;
-}
-
-/**
- * Bound what reaches the model, keeping both ends.
- *
- * A copy rather than an import, for the reason {@link ScratchExec} is injected:
- * `verify:exports` fails any subpath that reaches a sibling's files, and `/repo`
- * carries the same copy for the same reason.
- */
-export function truncateOutput(text: string, max: number): string {
-  if (text.length <= max) return text;
-
-  const marker = (dropped: number) =>
-    `\n\n… [${dropped} characters omitted from the middle] …\n\n`;
-
-  const half = Math.floor((max - marker(text.length).length) / 2);
-  if (half < 1) return text.slice(0, Math.max(0, max));
-
-  return (
-    text.slice(0, half) + marker(text.length - half * 2) + text.slice(-half)
-  );
 }
 
 /**

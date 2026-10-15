@@ -84,15 +84,20 @@ rather than against the manifest.
 ## The GitHub MCP route
 
 `/repo` reads GitHub through its **hosted MCP server**, from the Worker, with the
-deployment's token as `Authorization: Bearer`. `src/repo/mcp.ts` is the whole
-transport, and two things in it are policy rather than configuration:
+deployment's token as `Authorization: Bearer`. The transport is not here:
+`@dynamicagents/core/mcp` holds it, over the official `@modelcontextprotocol/client`,
+and core is where the protocol decisions are explained. `src/repo/mcp.ts` is the
+policy that is GitHub's, and two things in it are policy rather than configuration:
 
-- **`MCP_TOOLS` is an allowlist**, sent as `X-MCP-Tools`. Adding a name to it is a
-  code change somebody reads, which is the point — a host that could widen it could
-  hand the token to a tool nobody reviewed.
-- **`MCP_URL` is the read-only endpoint.** Both caps, not either: the list is the
-  narrow bound and the path is the one that still holds if the list is edited
+- **`GITHUB_MCP_TOOLS` is an allowlist**, sent as `X-MCP-Tools`. Adding a name to it
+  is a code change somebody reads, which is the point — a host that could widen it
+  could hand the token to a tool nobody reviewed.
+- **`GITHUB_MCP_URL` is the read-only endpoint.** Both caps, not either: the list is
+  the narrow bound and the path is the one that still holds if the list is edited
   carelessly.
+
+Both are named for the provider rather than for the protocol, because the protocol's
+own surface is core's and a bare `MCP_TOOLS` here would not say whose policy it is.
 
 `pull_request_review_write` is the absence worth knowing about. It is the only tool
 that resolves a review thread, and the same name submits a review with `APPROVE`, so

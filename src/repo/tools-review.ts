@@ -2,11 +2,11 @@ import { action, type Action } from "@cloudflare/think";
 import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
+import { sha256Hex } from "@dynamicagents/core";
 import {
   actionTask,
   GITHUB_ACTION_TIMEOUT_MS,
-  GITHUB_PAGE_SIZE,
-  sha256
+  GITHUB_PAGE_SIZE
 } from "./context.js";
 import type { RepoContext } from "./context.js";
 
@@ -287,7 +287,7 @@ export function reviewActions(ctx: RepoContext): Record<string, Action> {
       // to two threads — "Fixed." — would be one key.
       idempotencyKey: async ({ input, ctx: turn }) =>
         `${actionTask(turn)}:${input.dir}#${input.number}:${input.threadId}:` +
-        `${await sha256(input.body ?? "")}:${input.resolve ?? true}`,
+        `${await sha256Hex(input.body ?? "")}:${input.resolve ?? true}`,
       execute: async ({ dir, number, threadId, body, resolve }) => {
         const target = await githubRepo(dir);
         if ("refusal" in target) throw new Error(target.refusal);

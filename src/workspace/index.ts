@@ -57,7 +57,7 @@ export {
 // `exists`, which a `stat`-only probe never asks for.
 export { pathExists } from "./read.js";
 
-export { cancelledNote, truncateOutput } from "./format.js";
+export { cancelledNote } from "./format.js";
 
 export {
   openWorkspace,

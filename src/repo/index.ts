@@ -17,14 +17,16 @@ import { worktreesTools } from "./tools-worktrees.js";
  */
 export { parseRepo } from "./url.js";
 
-export { truncateOutput } from "./context.js";
-
 /**
  * The hosted MCP server this plugin reads GitHub through, and the allowlist it
  * is held to. Exported so a deployment can state in its own docs what the
  * token is able to reach, and so a spec can assert the list has not grown.
+ *
+ * Named for the provider rather than for the protocol: the protocol's own
+ * surface is `@dynamicagents/core/mcp`'s, and a bare `MCP_TOOLS` here would not
+ * say whose policy it is.
  */
-export { MCP_URL, MCP_TOOLS } from "./mcp.js";
+export { GITHUB_MCP_URL, GITHUB_MCP_TOOLS } from "./mcp.js";
 
 /**
  * `@dynamicagents/plugins/repo` — clone, commit, push, open a pull request.

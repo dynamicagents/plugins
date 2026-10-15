@@ -17,7 +17,7 @@ import {
 import { pathExists } from "./read.js";
 import { deploymentFault } from "./container-fault.js";
 import { INSTALLED_MARKER } from "./container-deps.js";
-import { truncateOutput } from "./format.js";
+import { truncateOutput } from "@dynamicagents/core";
 import type { WorkspaceWakeHandlers } from "./wake.js";
 
 /**
