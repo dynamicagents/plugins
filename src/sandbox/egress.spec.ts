@@ -140,20 +140,42 @@ describe("sandboxEgress — GitHub", () => {
   });
 
   it("reads the refs of a gzipped receive-pack body", async () => {
-    const gz = await new Response(
-      new Blob([
-        receivePack([
-          "refs/heads/claude-coordinator/x",
-          "refs/heads/claude-coordinator/y"
-        ])
+    const gz = new Blob([
+      receivePack([
+        "refs/heads/claude-coordinator/x",
+        "refs/heads/claude-coordinator/y"
       ])
-        .stream()
-        .pipeThrough(new CompressionStream("gzip"))
-    ).arrayBuffer();
+    ])
+      .stream()
+      .pipeThrough(new CompressionStream("gzip"));
     expect(await receivePackRefs(gz, "gzip")).toEqual([
       "refs/heads/claude-coordinator/x",
       "refs/heads/claude-coordinator/y"
     ]);
+  });
+
+  it("forwards the whole push, pack included, and refuses one that names no ref", async () => {
+    const { calls } = upstream();
+    const sent = receivePack(["refs/heads/claude-coordinator/ab12c"]);
+    const push = (body: ArrayBuffer) =>
+      sandboxEgress(
+        new Request(
+          `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/git-receive-pack`,
+          {
+            method: "POST",
+            headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
+            body
+          }
+        ),
+        [GIT],
+        ENV
+      );
+    expect((await push(sent)).status).toBe(200);
+    expect(new Uint8Array(await calls[0]!.arrayBuffer())).toEqual(
+      new Uint8Array(sent)
+    );
+    expect((await push(receivePack([]))).status).toBe(400);
+    expect(calls).toHaveLength(1);
   });
 
   it("names the missing token rather than sending the placeholder on", async () => {

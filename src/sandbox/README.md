@@ -121,12 +121,21 @@ await serveSandboxDaemon({
 The image provides:
 
 - the user `agent` (uid and gid `10001`, home `/home/agent`), owning `/workspace`;
-- `setpriv` (util-linux), `git`, and `update-ca-certificates`;
-- `/usr/local/bin/sandbox-shim`, from `cloudflare/sandbox`'s donor image, for `Files` and `DirectoryBackup`.
+- `setpriv` (util-linux), `timeout` (coreutils), `git`, and `update-ca-certificates`;
+- `/usr/local/bin/sandbox-shim`, from `cloudflare/sandbox`'s donor image, for `Files` and `DirectoryBackup`;
+- `/etc/da/skel`, root-owned, which every session's home starts as. It may be empty.
 
-The daemon runs the CLI as `agent`, with its session homes under that user's home. Under root's home
-the CLI cannot reach them: it runs and answers, but writes no session files, so a lost container
-could not resume it.
+The daemon runs as `agent`, and refuses to start as anything else:
+
+```dockerfile
+ENTRYPOINT ["setpriv", "--reuid=10001", "--regid=10001", "--init-groups", \
+  "--inh-caps=-all", "--bounding-set=-all", "node", "/opt/da/daemon.mjs"]
+```
+
+The CLI then runs as `agent` with no root behind it. A daemon running as root would have the harness
+chown each session home, and chown follows a symlink the agent left there to the file it names.
+Each session's home lives under `/home/agent/.harness/sessions`, which the agent owns. A session
+writes its resume files there, so a lost container can resume it.
 
 ## `wrangler.jsonc`
 

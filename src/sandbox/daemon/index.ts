@@ -23,7 +23,7 @@ import {
   type CliTurn,
   type DaemonServer
 } from "agents/harness/container/runtime";
-import { AGENT_GID, AGENT_HOME, AGENT_UID } from "../agent-exec.js";
+import { AGENT_HOME, AGENT_UID } from "../agent-exec.js";
 import { EGRESS_READY, EGRESS_WAIT_MS } from "../constants.js";
 import { readRunHeader, SANDBOX_ROOT, type RunHeader } from "../header.js";
 import { withControlSession } from "./composite.js";
@@ -69,6 +69,12 @@ const LAUNCH = [
   'exec "$@"'
 ].join("\n");
 
+/**
+ * What a session's home starts as: root-owned in the image, so a session starts
+ * from what the image says rather than from what an earlier one left.
+ */
+export const SESSION_SKELETON = "/etc/da/skel";
+
 /** The adapter a sandbox image serves. Exported for specs; an image calls {@link serveSandboxDaemon}. */
 export function sandboxAdapter(
   options: SandboxDaemonOptions,
@@ -76,13 +82,11 @@ export function sandboxAdapter(
 ): ContainerAdapter {
   const cli = cliAdapter({
     ...options.cli,
-    // Claude Code refuses to skip permission prompts as root, and the CLI's user
-    // must reach its own home: under the daemon's (root's, mode 700) it runs,
-    // answers, and writes no session files, so a lost container cannot resume
-    // it (observed).
-    user: { uid: AGENT_UID, gid: AGENT_GID },
+    // No `user`: the daemon is already the agent (see `serveSandboxDaemon`), so
+    // the adapter chowns nothing. Given one, it chowns each home as root, and
+    // chown follows a symlink the agent left there to whatever file it names.
     homes: `${AGENT_HOME}/.harness/sessions`,
-    skeleton: AGENT_HOME,
+    skeleton: SESSION_SKELETON,
     command(turn) {
       const { header, prompt } = readRunHeader(turn.prompt);
       const inner = options.cli.command({ ...turn, prompt, header });
@@ -103,10 +107,19 @@ export function sandboxAdapter(
   return withControlSession(cli);
 }
 
-/** Serve the daemon with the identity, secret and port the object started the container with. */
+/**
+ * Serve the daemon with the identity, secret and port the object started the
+ * container with — as the agent, never root: the image starts it through
+ * `setpriv` (see the README), and this refuses any other user.
+ */
 export function serveSandboxDaemon(
   options: SandboxDaemonOptions
 ): Promise<DaemonServer> {
+  const uid = process.getuid?.();
+  if (uid !== AGENT_UID)
+    throw new Error(
+      `the sandbox daemon runs as the agent (uid ${AGENT_UID}), and this is uid ${uid}: start it through setpriv`
+    );
   const env = options.env ?? process.env;
   const runtimeId = env[CONTAINER_ENV.runtimeId];
   if (!runtimeId)

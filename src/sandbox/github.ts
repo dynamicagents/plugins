@@ -134,39 +134,54 @@ export function branchAllowed(policy: GitPushPolicy, branch: string): boolean {
   );
 }
 
+/** A command list git would never send: thousands of refs fit well inside it. */
+const COMMANDS_MAX_BYTES = 1 << 20;
+
 /**
  * The refs a `git-receive-pack` request updates, from its pkt-line commands.
  *
  * Each command is `<old> <new> <ref>`, the first carrying `\0<capabilities>`,
- * and the list ends at a flush packet; the pack follows. git compresses the
- * request body when it is large, so a gzip body is inflated to read them.
+ * and the list ends at a flush packet; the pack follows. Only the list is read,
+ * so a caller hands this one branch of a `tee()` and forwards the other: the
+ * pack is never held in the Worker. git compresses the request body when it is
+ * large, so a gzip body is inflated as it is read.
  */
 export async function receivePackRefs(
-  body: ArrayBuffer,
+  body: ReadableStream<Uint8Array>,
   encoding: string | null
 ): Promise<string[]> {
-  const bytes =
+  const reader = (
     encoding?.toLowerCase() === "gzip"
-      ? new Uint8Array(
-          await new Response(
-            new Blob([body])
-              .stream()
-              .pipeThrough(new DecompressionStream("gzip"))
-          ).arrayBuffer()
-        )
-      : new Uint8Array(body);
+      ? body.pipeThrough(new DecompressionStream("gzip"))
+      : body
+  ).getReader();
   const text = new TextDecoder("latin1");
   const refs: string[] = [];
-  let at = 0;
-  while (at + 4 <= bytes.length) {
-    const length = Number.parseInt(text.decode(bytes.subarray(at, at + 4)), 16);
-    if (!Number.isFinite(length)) break;
-    if (length === 0) break;
-    const line = text.decode(bytes.subarray(at + 4, at + length));
-    at += length;
-    const command = line.split("\0", 1)[0]?.trim() ?? "";
-    const ref = command.split(" ")[2];
-    if (ref) refs.push(ref);
+  let buffer = new Uint8Array(0);
+  let read = 0;
+  try {
+    for (;;) {
+      while (buffer.length >= 4) {
+        const length = Number.parseInt(text.decode(buffer.subarray(0, 4)), 16);
+        // A flush ends the list; anything that is not a length is not one.
+        if (!Number.isFinite(length) || length < 4) return refs;
+        if (buffer.length < length) break;
+        const line = text.decode(buffer.subarray(4, length));
+        buffer = buffer.subarray(length);
+        const ref = line.split("\0", 1)[0]?.trim().split(" ")[2];
+        if (ref) refs.push(ref);
+      }
+      const chunk = await reader.read();
+      if (chunk.done) return refs;
+      read += chunk.value.byteLength;
+      if (read > COMMANDS_MAX_BYTES)
+        throw new Error("the push's command list never ended");
+      const next = new Uint8Array(buffer.length + chunk.value.byteLength);
+      next.set(buffer);
+      next.set(chunk.value, buffer.length);
+      buffer = next;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  return refs;
 }

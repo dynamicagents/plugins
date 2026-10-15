@@ -27,6 +27,7 @@ import {
   shellQuote
 } from "./agent-exec.js";
 import { deriveAdvisories, type WorkspaceAdvisory } from "./advisory.js";
+import { humanMs } from "./format.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
 import {
   CONTROL_SESSION,
@@ -35,8 +36,14 @@ import {
   RUN_DIR,
   SANDBOX_CONTRACT
 } from "./constants.js";
-import { isUnder, SANDBOX_ROOT } from "./header.js";
 import {
+  isUnder,
+  readRunHeader,
+  SANDBOX_ROOT,
+  withRunHeader
+} from "./header.js";
+import {
+  DEFAULT_INSTALL_PLAN,
   resolveInstallCommand,
   type InstallPlan,
   type InstallProbe,
@@ -61,6 +68,7 @@ const RUNTIME_READY_KEY = "sandbox:runtime-ready";
 const CHECKPOINT_KEY = "sandbox:checkpoint";
 const INSTALL_KEY = "sandbox:install";
 const INSTALL_ARMED_KEY = "sandbox:install-armed";
+const INSTALL_QUEUE_KEY = "sandbox:install-queue";
 const LAST_USED_KEY = "sandbox:last-used";
 
 const IDLE_STOP_MS = 5 * 60_000;
@@ -68,6 +76,13 @@ const IDLE_STOP_MS = 5 * 60_000;
 const HARNESS_IDLE_MS = 6 * 3_600_000 - 2 * 60_000;
 const EGRESS_WATCH_MS = 10_000;
 const INSTALL_POLL_MS = 15_000;
+/** Past its deadline by this much with no exit written, an install was killed before it could write one. */
+const INSTALL_GRACE_MS = 60_000;
+/**
+ * One marker per checkout whose files are on this disk, on the root filesystem
+ * a snapshot keeps. A directory proves nothing: `/workspace` is in every image.
+ */
+const CHECKOUT_MARKS = "/var/lib/da/checkouts";
 /** The harness sends SIGKILL this long after SIGINT, then syncs once more. */
 const CLI_KILL_MS = 5_000;
 const CLI_SYNC_MS = 5_000;
@@ -164,7 +179,10 @@ export abstract class SandboxObjectBase<
   readonly #egressWatch;
   readonly #installPoll;
   #runtimePreparing: Promise<void> | undefined;
+  /** Commands, file calls and submissions under way: each holds the container up. */
   #running = 0;
+  /** A stop under way. Work that would start the container waits it out. */
+  #stopping: Promise<unknown> | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -263,6 +281,7 @@ export abstract class SandboxObjectBase<
    * register, and any checkout an image change left behind.
    */
   async ensureRunning(): Promise<{ runtimeId: string }> {
+    await this.#admit();
     await this.#touch();
     if (!this.#container.running) {
       const woke = await this.#harness
@@ -353,6 +372,46 @@ export abstract class SandboxObjectBase<
     return this.#run(asAgent(argv), { ...options, env: agentEnv(options.env) });
   }
 
+  /** `work`, counted as running, so no stop starts under it. */
+  async #hold<T>(work: () => Promise<T>): Promise<T> {
+    this.#running += 1;
+    try {
+      return await work();
+    } finally {
+      this.#running -= 1;
+    }
+  }
+
+  /** Wait out a stop in progress. */
+  async #admit(): Promise<void> {
+    while (this.#stopping) await this.#stopping.catch(() => undefined);
+  }
+
+  /**
+   * `stop`, with no other stop beside it and new work held until it is done.
+   * The check-then-set has no `await` between, so two cannot both pass.
+   */
+  async #exclusive<T>(stop: () => Promise<T>): Promise<T> {
+    while (this.#stopping) await this.#stopping.catch(() => undefined);
+    const run = stop();
+    this.#stopping = run;
+    try {
+      return await run;
+    } finally {
+      if (this.#stopping === run) this.#stopping = undefined;
+    }
+  }
+
+  /** Why the container may not stop now, if it may not. */
+  async #busy(): Promise<string | undefined> {
+    if ((await this.#harness.pending()).length > 0)
+      return "a run is still open";
+    if (this.#running > 0) return "a command is still running";
+    const install = await this.ctx.storage.get<InstallState>(INSTALL_KEY);
+    if (install?.state === "running") return "an install is still running";
+    return undefined;
+  }
+
   async #rootExec(argv: readonly string[]): Promise<ExecResult> {
     return this.#run(argv, {});
   }
@@ -365,8 +424,7 @@ export abstract class SandboxObjectBase<
       timeoutMs?: number;
     }
   ): Promise<ExecResult> {
-    this.#running += 1;
-    try {
+    return this.#hold(async () => {
       const process = await this.#container.exec([...argv], {
         ...(options.cwd ? { cwd: options.cwd } : {}),
         ...(options.env ? { env: { ...options.env } } : {}),
@@ -383,9 +441,7 @@ export abstract class SandboxObjectBase<
         stdout: decode(output.stdout),
         stderr: decode(output.stderr)
       };
-    } finally {
-      this.#running -= 1;
-    }
+    });
   }
 
   // --- files -----------------------------------------------------------------
@@ -406,23 +462,27 @@ export abstract class SandboxObjectBase<
   async readFile(path: string): Promise<Uint8Array | null> {
     this.#confine(path);
     await this.ensureRunning();
-    try {
-      const response = await this.#files().readFile(path, {
-        user: `${AGENT_UID}:${AGENT_GID}`
-      });
-      return new Uint8Array(await response.arrayBuffer());
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
+    return this.#hold(async () => {
+      try {
+        const response = await this.#files().readFile(path, {
+          user: `${AGENT_UID}:${AGENT_GID}`
+        });
+        return new Uint8Array(await response.arrayBuffer());
+      } catch (err) {
+        if (isNotFound(err)) return null;
+        throw err;
+      }
+    });
   }
 
   async writeFile(path: string, content: Uint8Array | string): Promise<void> {
     this.#confine(path);
     await this.ensureRunning();
-    await this.#files().writeFile(path, content, {
-      user: `${AGENT_UID}:${AGENT_GID}`
-    });
+    await this.#hold(() =>
+      this.#files().writeFile(path, content, {
+        user: `${AGENT_UID}:${AGENT_GID}`
+      })
+    );
   }
 
   async stat(
@@ -430,48 +490,56 @@ export abstract class SandboxObjectBase<
   ): Promise<{ type: string; size: number; modifiedAt: number } | null> {
     this.#confine(path);
     await this.ensureRunning();
-    try {
-      const stat = await this.#files().stat(path, {
-        user: `${AGENT_UID}:${AGENT_GID}`
-      });
-      return {
-        type: stat.type,
-        size: Number(stat.size),
-        modifiedAt: stat.modifiedAt.getTime()
-      };
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
+    return this.#hold(async () => {
+      try {
+        const stat = await this.#files().stat(path, {
+          user: `${AGENT_UID}:${AGENT_GID}`
+        });
+        return {
+          type: stat.type,
+          size: Number(stat.size),
+          modifiedAt: stat.modifiedAt.getTime()
+        };
+      } catch (err) {
+        if (isNotFound(err)) return null;
+        throw err;
+      }
+    });
   }
 
   async readDir(path: string): Promise<{ name: string; type: string }[]> {
     this.#confine(path);
     await this.ensureRunning();
-    return (
-      await this.#files().readDirectory(path, {
-        user: `${AGENT_UID}:${AGENT_GID}`
-      })
-    ).map((entry) => ({ name: entry.name, type: entry.type }));
+    return this.#hold(async () =>
+      (
+        await this.#files().readDirectory(path, {
+          user: `${AGENT_UID}:${AGENT_GID}`
+        })
+      ).map((entry) => ({ name: entry.name, type: entry.type }))
+    );
   }
 
   async mkdir(path: string): Promise<void> {
     this.#confine(path);
     await this.ensureRunning();
-    await this.#files().mkdir(path, {
-      recursive: true,
-      user: `${AGENT_UID}:${AGENT_GID}`
-    });
+    await this.#hold(() =>
+      this.#files().mkdir(path, {
+        recursive: true,
+        user: `${AGENT_UID}:${AGENT_GID}`
+      })
+    );
   }
 
   async rm(path: string, options: { recursive?: boolean } = {}): Promise<void> {
     this.#confine(path);
     await this.ensureRunning();
-    await this.#files().remove(path, {
-      force: true,
-      ...(options.recursive ? { recursive: true } : {}),
-      user: `${AGENT_UID}:${AGENT_GID}`
-    });
+    await this.#hold(() =>
+      this.#files().remove(path, {
+        force: true,
+        ...(options.recursive ? { recursive: true } : {}),
+        user: `${AGENT_UID}:${AGENT_GID}`
+      })
+    );
   }
 
   // --- runs ------------------------------------------------------------------
@@ -529,14 +597,28 @@ export abstract class SandboxObjectBase<
    * Durably submit one turn of a run. `operationId` is the caller's, so a
    * retried submit is the same operation; a settled one comes back as it ended,
    * which is why a caller resubmitting after a lost container uses a new one.
+   *
+   * Every turn runs in the run's `cwd`: a turn with no run header gets one, and
+   * a header naming another directory is refused.
    */
   async submit(
     runId: string,
     text: string,
     operationId: string
   ): Promise<{ operationId: string; accepted: boolean }> {
+    const row = this.#runRow(runId);
+    if (!row) throw new Error(`no run ${runId} in this sandbox`);
+    const { header, prompt } = readRunHeader(text);
+    if (header && header.cwd !== row.cwd) {
+      throw new Error(
+        `run ${runId} works in ${row.cwd}, so a turn of it cannot run in ${header.cwd}`
+      );
+    }
+    const turn = header ? text : withRunHeader({ cwd: row.cwd }, prompt);
     await this.ensureRunning();
-    const receipt = await this.#session(runId).submit(text, { operationId });
+    const receipt = await this.#hold(() =>
+      this.#harness.session(row.session_id).submit(turn, { operationId })
+    );
     await this.#egressWatch.set(new Date(Date.now() + EGRESS_WATCH_MS));
     return { operationId: receipt.operationId, accepted: receipt.accepted };
   }
@@ -607,7 +689,8 @@ export abstract class SandboxObjectBase<
     const probe = await this.#rootExec([
       "sh",
       "-c",
-      "for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null | grep -q -- '--output-format stream-json' && exit 0; done; exit 1"
+      // `[n]` so the pattern does not match this probe's own command line.
+      "for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null | grep -q -- '--output-format stream-jso[n]' && exit 0; done; exit 1"
     ]);
     return probe.exitCode === 0;
   }
@@ -674,13 +757,16 @@ export abstract class SandboxObjectBase<
     });
   }
 
-  /** Every recorded checkout to R2, replacing its last backup. */
+  /**
+   * Every checkout on this disk to R2, replacing its last backup. Only a marked
+   * one: an unmarked directory is the image's, and backing it up would replace
+   * the checkout's last backup with nothing.
+   */
   async #backupAll(): Promise<void> {
     const backups = this.#backups();
     if (!backups) return;
     for (const row of this.#checkouts()) {
-      const present = await this.#rootExec(["test", "-d", row.dir]);
-      if (present.exitCode !== 0) continue;
+      if (!(await this.#marked(row.dir))) continue;
       const record = await backups.backup({
         dir: row.dir,
         exclude: ["**/node_modules"]
@@ -700,16 +786,16 @@ export abstract class SandboxObjectBase<
 
   /**
    * Bring back any recorded checkout a start lost — an image change drops the
-   * snapshot — and reinstall what came back without its `node_modules`.
+   * snapshot, markers with it — and reinstall what came back without its
+   * `node_modules`.
    */
   async #restoreMissing(): Promise<void> {
     const backups = this.#backups();
     if (!backups) return;
     for (const row of this.#checkouts()) {
-      if (!row.backup) continue;
-      const present = await this.#rootExec(["test", "-d", row.dir]);
-      if (present.exitCode === 0) continue;
+      if (!row.backup || (await this.#marked(row.dir))) continue;
       await backups.restore(JSON.parse(row.backup) as DirectoryBackupRecord);
+      await this.#mark(row.dir);
       console.info(`[${this.#cfg.label}] restored a checkout from its backup`, {
         id: this.ctx.id.toString(),
         dir: row.dir
@@ -723,22 +809,37 @@ export abstract class SandboxObjectBase<
     }
   }
 
+  #mark(dir: string): Promise<ExecResult> {
+    return this.#rootExec([
+      "sh",
+      "-c",
+      `mkdir -p ${CHECKOUT_MARKS} && printf %s ${shellQuote(dir)} > ${shellQuote(markOf(dir))}`
+    ]);
+  }
+
+  async #marked(dir: string): Promise<boolean> {
+    return (await this.#rootExec(["test", "-f", markOf(dir)])).exitCode === 0;
+  }
+
   /**
    * Back up and stop the container. Its disk is the next start, as a snapshot.
    *
-   * Refused while a run is open: stopping the harness re-wakes every open
-   * session, which starts the container again.
+   * Refused while anything is working — an open run, a command, an install:
+   * stopping the harness re-wakes every open session, which starts the
+   * container again. Work that arrives meanwhile waits for the stop, then
+   * starts a new container.
    */
   async release(): Promise<{ released: boolean; reason?: string }> {
-    if ((await this.#harness.pending()).length > 0) {
-      return { released: false, reason: "a run is still open" };
-    }
-    if (this.#container.running) {
-      await this.#backupAll();
-      await this.#harness.stop();
-    }
-    await this.#idle.clear();
-    return { released: true };
+    return this.#exclusive(async () => {
+      const busy = await this.#busy();
+      if (busy) return { released: false, reason: busy };
+      if (this.#container.running) {
+        await this.#backupAll();
+        await this.#harness.stop();
+      }
+      await this.#idle.clear();
+      return { released: true };
+    });
   }
 
   async #touch(): Promise<void> {
@@ -751,18 +852,12 @@ export abstract class SandboxObjectBase<
 
   /** Stop a container nobody is using. Anything still working moves the deadline instead. */
   async #onIdle(): Promise<void> {
-    const busy =
-      (await this.#harness.pending()).length > 0 ||
-      this.#running > 0 ||
-      (await this.ctx.storage.get<InstallState>(INSTALL_KEY))?.state ===
-        "running";
-    if (busy) {
+    const released = await this.release();
+    if (!released.released) {
       await this.#idle.set(
         new Date(Date.now() + (this.#cfg.idleStopMs ?? IDLE_STOP_MS))
       );
-      return;
     }
-    await this.release();
   }
 
   // --- checkouts and the install -------------------------------------------------
@@ -779,10 +874,11 @@ export abstract class SandboxObjectBase<
       record.repo ?? null,
       Date.now()
     );
+    // Noted once it exists, so the mark is what says this disk holds it.
     const present =
       this.#container.running &&
-      (await this.#rootExec(["test", "-d", `${record.dir}/.git`])).exitCode ===
-        0;
+      (await this.#rootExec(["test", "-d", record.dir])).exitCode === 0;
+    if (present) await this.#mark(record.dir);
     return { dir: record.dir, present };
   }
 
@@ -821,20 +917,30 @@ export abstract class SandboxObjectBase<
    * file, which the alarm reads: a container process outlives the request that
    * started it, and the file outlives the object that is waiting for it.
    */
-  async startInstall(target: {
-    dir: string;
-    repo?: string;
-  }): Promise<InstallState> {
+  async startInstall(target: InstallTarget): Promise<InstallState> {
     this.#confine(target.dir);
     await this.ensureRunning();
     return this.#beginInstall(target);
   }
 
-  /** The install, in a container already prepared. */
-  async #beginInstall(target: {
-    dir: string;
-    repo?: string;
-  }): Promise<InstallState> {
+  /**
+   * The install, in a container already prepared. One at a time: package
+   * managers in one tree race, and the checkpoint after the last must not
+   * catch another still writing. A second checkout waits its turn.
+   */
+  async #beginInstall(target: InstallTarget): Promise<InstallState> {
+    const current = await this.ctx.storage.get<InstallState>(INSTALL_KEY);
+    if (current?.state === "running") {
+      const armed = await this.ctx.storage.get<ArmedInstall>(INSTALL_ARMED_KEY);
+      const queue =
+        (await this.ctx.storage.get<InstallTarget[]>(INSTALL_QUEUE_KEY)) ?? [];
+      if (
+        armed?.dir !== target.dir &&
+        !queue.some((queued) => queued.dir === target.dir)
+      )
+        await this.ctx.storage.put(INSTALL_QUEUE_KEY, [...queue, target]);
+      return current;
+    }
     const probe = this.#probe();
     const resolution = await resolveInstallCommand(
       probe,
@@ -848,12 +954,19 @@ export abstract class SandboxObjectBase<
         reason: resolution.reason
       };
       await this.ctx.storage.put(INSTALL_KEY, skipped);
+      await this.#nextInstall(false);
       return skipped;
     }
+    const timeoutMs =
+      this.#cfg.installPlan.timeoutMs ?? DEFAULT_INSTALL_PLAN.timeoutMs!;
+    const job = `${Date.now().toString(36)}`;
+    const { exit, log } = installFiles(job);
+    // `timeout` ends a hung install; the deadline below settles one whose shell
+    // was killed before it could write its exit.
     const script =
-      `rm -f ${RUN_DIR}/install.exit && cd ${shellQuote(target.dir)} && ` +
-      `{ ${resolution.command}; } > ${RUN_DIR}/install.log 2>&1; ` +
-      `echo $? > ${RUN_DIR}/install.exit`;
+      `cd ${shellQuote(target.dir)} && ` +
+      `{ timeout --kill-after=10 ${Math.ceil(timeoutMs / 1000)} sh -c ${shellQuote(resolution.command)}; } > ${log} 2>&1; ` +
+      `echo $? > ${exit}`;
     await this.#container.exec(asAgent(["sh", "-c", script]), {
       env: agentEnv(),
       stdout: "ignore",
@@ -865,55 +978,89 @@ export abstract class SandboxObjectBase<
       startedAt: Date.now()
     };
     await this.ctx.storage.put(INSTALL_KEY, running);
-    await this.ctx.storage.put(INSTALL_ARMED_KEY, { dir: target.dir });
+    await this.ctx.storage.put(INSTALL_ARMED_KEY, {
+      ...target,
+      job,
+      limitMs: timeoutMs
+    } satisfies ArmedInstall);
     await this.#installPoll.set(new Date(Date.now() + INSTALL_POLL_MS));
     return running;
+  }
+
+  /** Start the next queued install, or — the queue empty after a good one — checkpoint. */
+  async #nextInstall(succeeded: boolean): Promise<void> {
+    const [next, ...rest] =
+      (await this.ctx.storage.get<InstallTarget[]>(INSTALL_QUEUE_KEY)) ?? [];
+    if (next) {
+      await this.ctx.storage.put(INSTALL_QUEUE_KEY, rest);
+      await this.#beginInstall(next);
+      return;
+    }
+    // What a later start begins from, node_modules included.
+    if (succeeded) await this.checkpoint();
   }
 
   async #onInstallPoll(): Promise<void> {
     const state = await this.ctx.storage.get<InstallState>(INSTALL_KEY);
     if (state?.state !== "running") return;
-    if (!this.#container.running) {
+    const armed = await this.ctx.storage.get<ArmedInstall>(INSTALL_ARMED_KEY);
+    const fail = async (error: string, tail?: string) => {
       await this.ctx.storage.put(INSTALL_KEY, {
         state: "failed",
         command: state.command,
-        error: "the container stopped while it installed",
-        finishedAt: Date.now()
+        error,
+        finishedAt: Date.now(),
+        ...(tail ? { tail } : {})
       } satisfies InstallState);
+      // The container is gone, and the queue with it: a new one restores and
+      // installs again from its own start.
+      if (!this.#container.running) {
+        await this.ctx.storage.delete(INSTALL_QUEUE_KEY);
+        return;
+      }
+      await this.#nextInstall(false);
+    };
+    if (!this.#container.running || !armed) {
+      await fail("the container stopped while it installed");
       return;
     }
+    const { exit: exitFile, log } = installFiles(armed.job);
     const done = await this.#rootExec([
       "sh",
       "-c",
-      `cat ${RUN_DIR}/install.exit 2>/dev/null; echo; tail -c 2000 ${RUN_DIR}/install.log 2>/dev/null`
+      `cat ${exitFile} 2>/dev/null; echo; tail -c 2000 ${log} 2>/dev/null`
     ]);
     const [exit = "", ...tail] = done.stdout.split("\n");
     if (exit.trim() === "") {
+      if (Date.now() > state.startedAt + armed.limitMs + INSTALL_GRACE_MS) {
+        await fail(
+          "the install was killed before it could report how it ended",
+          tail.join("\n").trim()
+        );
+        return;
+      }
       await this.#installPoll.set(new Date(Date.now() + INSTALL_POLL_MS));
       return;
     }
     const exitCode = Number(exit.trim());
     const finishedAt = Date.now();
-    const next: InstallState =
-      exitCode === 0
-        ? {
-            state: "done",
-            command: state.command,
-            exitCode,
-            finishedAt,
-            ms: finishedAt - state.startedAt
-          }
-        : {
-            state: "failed",
-            command: state.command,
-            exitCode,
-            error: `exited ${exitCode}`,
-            finishedAt,
-            tail: tail.join("\n").trim()
-          };
-    await this.ctx.storage.put(INSTALL_KEY, next);
-    // What a later start begins from, node_modules included.
-    if (next.state === "done") await this.checkpoint();
+    if (exitCode !== 0) {
+      await fail(
+        exitCode === 124
+          ? `ran past its limit of ${humanMs(armed.limitMs)}`
+          : `exited ${exitCode}`,
+        tail.join("\n").trim()
+      );
+      return;
+    }
+    await this.ctx.storage.put(INSTALL_KEY, {
+      state: "done",
+      command: state.command,
+      exitCode,
+      finishedAt,
+      ms: finishedAt - state.startedAt
+    } satisfies InstallState);
+    await this.#nextInstall(true);
   }
 
   async advisories(): Promise<readonly WorkspaceAdvisory[]> {
@@ -950,12 +1097,18 @@ export abstract class SandboxObjectBase<
   async reclaimIfIdle(
     maxIdleMs: number
   ): Promise<{ reclaimed: boolean; idleMs: number }> {
+    return this.#exclusive(() => this.#reclaim(maxIdleMs));
+  }
+
+  async #reclaim(
+    maxIdleMs: number
+  ): Promise<{ reclaimed: boolean; idleMs: number }> {
     const lastUsed = (await this.ctx.storage.get<number>(LAST_USED_KEY)) ?? 0;
     const idleMs = Date.now() - lastUsed;
     if (lastUsed === 0 || idleMs < maxIdleMs)
       return { reclaimed: false, idleMs };
-    if ((await this.#harness.pending()).length > 0)
-      return { reclaimed: false, idleMs };
+    // Last use is when work began, so what is still working is asked directly.
+    if (await this.#busy()) return { reclaimed: false, idleMs };
     if (this.#container.running) await this.#container.destroy("reclaimed");
     const backups = this.#backups();
     for (const row of this.#checkouts()) {
@@ -1002,6 +1155,28 @@ export abstract class SandboxObjectBase<
         return this.#rootExec(op.argv);
     }
   }
+}
+
+interface InstallTarget {
+  dir: string;
+  repo?: string;
+}
+
+/** The running install: its checkout, the job its files are named for, and its limit. */
+interface ArmedInstall extends InstallTarget {
+  job: string;
+  limitMs: number;
+}
+
+function installFiles(job: string): { exit: string; log: string } {
+  return {
+    exit: `${RUN_DIR}/install-${job}.exit`,
+    log: `${RUN_DIR}/install-${job}.log`
+  };
+}
+
+function markOf(dir: string): string {
+  return `${CHECKOUT_MARKS}/${encodeURIComponent(dir)}`;
 }
 
 function isNotFound(err: unknown): boolean {

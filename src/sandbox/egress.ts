@@ -145,7 +145,7 @@ async function githubEgress(call: EgressCall): Promise<Response> {
 
   const policy = readPolicy(call.control[ROUTE_PUSH]);
   const git = gitTarget(call.target.pathname);
-  let body: ArrayBuffer | undefined;
+  let body: ReadableStream | undefined;
   if (policy && git) {
     if (!policy.repos.some((repo) => repo.toLowerCase() === git.repo)) {
       return githubError(
@@ -154,22 +154,30 @@ async function githubEgress(call: EgressCall): Promise<Response> {
       );
     }
     if (git.service === "receive-pack" && call.request.method === "POST") {
-      body = await call.request.arrayBuffer();
+      const [inspected, forwarded] = (
+        call.request.body ?? new Blob().stream()
+      ).tee();
       const refs = await receivePackRefs(
-        body,
+        inspected,
         call.request.headers.get("content-encoding")
-      );
+      ).catch(() => undefined);
+      if (!refs || refs.length === 0) {
+        await forwarded.cancel().catch(() => undefined);
+        return githubError("this push names no ref this egress can read", 400);
+      }
       const refused = refs.filter(
         (ref) =>
           !ref.startsWith("refs/heads/") ||
           !branchAllowed(policy, ref.slice("refs/heads/".length))
       );
       if (refused.length > 0) {
+        await forwarded.cancel().catch(() => undefined);
         return githubError(
           `this sandbox may not push ${refused.join(", ")}; it may push ${policy.branches.join(", ")}`,
           403
         );
       }
+      body = forwarded;
     }
   }
   return forward(

@@ -25,7 +25,7 @@ export interface ExecCall {
 
 export type ExecScript = (
   call: ExecCall
-) => { exitCode?: number; stdout?: string } | undefined;
+) => { exitCode?: number; stdout?: string; until?: Promise<void> } | undefined;
 
 export class FakeContainer {
   readonly images = { app: "test-image" };
@@ -98,9 +98,14 @@ export class FakeContainer {
     const exitCode = answer.exitCode ?? 0;
     const bytes = new TextEncoder().encode(answer.stdout ?? "");
     const stdout = bytes.buffer.slice(0, bytes.byteLength) as ArrayBuffer;
+    const ended = (answer.until ?? Promise.resolve()).then(() => exitCode);
     return {
-      exitCode: Promise.resolve(exitCode),
-      output: async () => ({ exitCode, stdout, stderr: new ArrayBuffer(0) }),
+      exitCode: ended,
+      output: async () => ({
+        exitCode: await ended,
+        stdout,
+        stderr: new ArrayBuffer(0)
+      }),
       kill: () => {}
     };
   }

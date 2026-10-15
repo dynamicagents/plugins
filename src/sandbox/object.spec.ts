@@ -72,6 +72,26 @@ describe("the harness behaviour a sandbox is built on", () => {
     expect(polled.messages[0]?.digest).toMatch(/^[0-9a-f]{24}$/);
   });
 
+  it("runs every turn of a run in its directory, and refuses one aimed elsewhere", async () => {
+    const sandbox = freshSandbox("cwd");
+    await sandbox.createRun("run-1", { cwd: "/workspace/repo" });
+    await sandbox.submit("run-1", "no header", "op-1");
+    await eventually(
+      () => pollRun(sandbox, "run-1", "op-1"),
+      (poll) => poll.result !== undefined
+    );
+    expect(await sandbox.headerOf("op-1")).toEqual({ cwd: "/workspace/repo" });
+    await runInDurableObject(sandbox, async (instance) => {
+      await expect(
+        instance.submit(
+          "run-1",
+          `@@da ${JSON.stringify({ cwd: "/workspace/other" })}\nmoved`,
+          "op-2"
+        )
+      ).rejects.toThrow(/cannot run in \/workspace\/other/);
+    });
+  });
+
   it("dedupes an operation id, so a lost run is resubmitted under a new one", async () => {
     const sandbox = freshSandbox("dedupe");
     await sandbox.createRun("run-1", { cwd: "/workspace/repo" });
@@ -184,7 +204,7 @@ describe("the harness behaviour a sandbox is built on", () => {
     async () => {
       const sandbox = freshSandbox("release");
       // No CLI is left once the run is aborted: the probe for one finds nothing.
-      await sandbox.answer("--output-format stream-json", "", 1);
+      await sandbox.answer("--output-format stream-jso[n]", "", 1);
       await sandbox.createRun("run-1", { cwd: "/workspace/repo" });
       await sandbox.submit("run-1", "slow 60000 busy", "op-1");
       await eventually(
@@ -197,6 +217,54 @@ describe("the harness behaviour a sandbox is built on", () => {
       expect((await sandbox.fake()).running).toBe(false);
     }
   );
+
+  it("will not release under a command, and holds new work until a release is done", async () => {
+    const sandbox = freshSandbox("held");
+    await sandbox.ensureRunning();
+    await sandbox.holdExec("sleep 600");
+    const running = sandbox.exec(["sleep", "600"]);
+    await eventually(
+      () => sandbox.fake(),
+      (fake) => joined(fake.execs).some((cmd) => cmd.includes("sleep 600"))
+    );
+    expect(await sandbox.release()).toEqual({
+      released: false,
+      reason: "a command is still running"
+    });
+    await sandbox.freeExec();
+    expect((await running).exitCode).toBe(0);
+    expect(await sandbox.release()).toEqual({ released: true });
+    expect((await sandbox.fake()).running).toBe(false);
+  });
+});
+
+describe("checkouts and installs", () => {
+  it("marks a checkout once it is on the disk, so an image's own directory is never taken for it", async () => {
+    const sandbox = freshSandbox("mark");
+    await sandbox.ensureRunning();
+    expect(
+      await sandbox.noteCheckout({ dir: "/workspace/repo", kind: "repo" })
+    ).toEqual({ dir: "/workspace/repo", present: true });
+    expect(
+      joined((await sandbox.fake()).execs).some((cmd) =>
+        cmd.includes("/var/lib/da/checkouts/%2Fworkspace%2Frepo")
+      )
+    ).toBe(true);
+  });
+
+  it("installs one checkout at a time, under the plan's limit", async () => {
+    const sandbox = freshSandbox("installs");
+    await sandbox.answer("cat ", "{}");
+    const first = await sandbox.startInstall({ dir: "/workspace/a" });
+    expect(first.state).toBe("running");
+    const second = await sandbox.startInstall({ dir: "/workspace/b" });
+    expect(second).toEqual(first);
+    const installs = joined((await sandbox.fake()).execs).filter((cmd) =>
+      cmd.includes("timeout --kill-after=10 1200 ")
+    );
+    expect(installs).toHaveLength(1);
+    expect(installs[0]).toContain("/workspace/a");
+  });
 });
 
 describe("HTTPS egress", () => {

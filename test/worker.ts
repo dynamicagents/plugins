@@ -1,5 +1,8 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { echoAdapter } from "agents/harness/container/daemon";
+import {
+  echoAdapter,
+  type ContainerAdapter
+} from "agents/harness/container/daemon";
 import type { EgressRoute } from "agents/harness/container";
 import {
   DEFAULT_INSTALL_PLAN,
@@ -9,7 +12,9 @@ import {
 import {
   SandboxObjectBase,
   githubRoute,
+  readRunHeader,
   sandboxEgress,
+  type RunHeader,
   type SandboxObjectConfig
 } from "../src/sandbox/index.js";
 import { withControlSession } from "../src/sandbox/daemon/composite.js";
@@ -59,6 +64,36 @@ export class TestWorkspaceDO extends WorkspaceObjectBase {
   }
 }
 
+/** Each operation's run header, as the daemon took it off its prompt. */
+const headers = new Map<string, RunHeader | null>();
+
+/** `adapter` as the image's daemon serves a CLI: the run header off the prompt first. */
+function headerless(adapter: ContainerAdapter): ContainerAdapter {
+  return {
+    ...adapter,
+    async open(context) {
+      const session = await adapter.open(context);
+      return {
+        ...session,
+        run(turn) {
+          const text =
+            typeof turn.input === "string"
+              ? turn.input
+              : turn.input
+                  .map((part) => (part.type === "text" ? part.text : ""))
+                  .join("");
+          const { header, prompt } = readRunHeader(text);
+          headers.set(turn.operationId, header ?? null);
+          return session.run({ ...turn, input: prompt });
+        }
+      };
+    }
+  };
+}
+
+/** Released by {@link TestSandboxDO.freeExec}. */
+let held: (() => void) | undefined;
+
 /**
  * A sandbox over a fake container: the real harness, the real daemon core with
  * the echo adapter behind the control session, and `exec` answered by a script
@@ -66,7 +101,10 @@ export class TestWorkspaceDO extends WorkspaceObjectBase {
  */
 export class TestSandboxDO extends SandboxObjectBase {
   protected override containerFor(ctx: DurableObjectState): Container {
-    return containerFor(ctx.id, withControlSession(echoAdapter)).asContainer();
+    return containerFor(
+      ctx.id,
+      withControlSession(headerless(echoAdapter))
+    ).asContainer();
   }
 
   protected sandboxConfig(): SandboxObjectConfig {
@@ -113,6 +151,24 @@ export class TestSandboxDO extends SandboxObjectBase {
       call.cmd.join(" ").includes(match)
         ? { stdout, exitCode }
         : previous(call);
+  }
+
+  /** Hold `exec` calls whose joined command includes `match` until {@link freeExec}. */
+  holdExec(match: string): void {
+    const fake = fakeOf(this.ctx.id);
+    const previous = fake.script;
+    const until = new Promise<void>((resolve) => (held = resolve));
+    fake.script = (call) =>
+      call.cmd.join(" ").includes(match) ? { until } : previous(call);
+  }
+
+  freeExec(): void {
+    held?.();
+  }
+
+  /** The run header the daemon took off `operationId`'s prompt. */
+  headerOf(operationId: string): RunHeader | null {
+    return headers.get(operationId) ?? null;
   }
 
   crash(): Promise<void> {
