@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
-import type { CredentialState, CredentialStore } from "./credentials.js";
+import {
+  credentialPool,
+  sharedPool,
+  type CredentialState,
+  type CredentialStore
+} from "./credentials.js";
 import { GITHUB_TOKEN_PLACEHOLDER } from "./github.js";
 import capture from "../../test/fixtures/claude-code-probe-capture.json";
 
@@ -620,7 +625,8 @@ describe("credential rotation", () => {
 
   /**
    * A revoked credential is a different claim from a spent one — it never
-   * recovers — so it is taken out for good rather than until a reset.
+   * recovers on a timer — so it is taken out until the next session rather than
+   * until a reset.
    *
    * The status is rewritten to 429 on the way out, and that is deliberate: a
    * client does not retry a 401, so passing one through would fail the run on a
@@ -662,6 +668,66 @@ describe("credential rotation", () => {
   });
 
   /**
+   * A session's admission reopens the pool over the store this gateway reads,
+   * and that has to reach a gateway whose own mirror still holds the marks.
+   */
+  it("asks Anthropic again once a session is admitted", async () => {
+    let accepting = false;
+    const sent = stubPerCredential(() =>
+      accepting
+        ? new Response("ok", { status: 200 })
+        : new Response("{}", EXHAUSTED)
+    );
+    const store = memoryStore();
+    const egress = rotating({ store });
+
+    await egress.fetch(modelCall()); // spends REAL
+    await egress.fetch(modelCall()); // spends SECOND
+    expect((await egress.fetch(modelCall())).status).toBe(429);
+    expect(sent).toHaveLength(2);
+
+    // The plan was upgraded; the stored resets have not passed.
+    accepting = true;
+    await credentialPool({ credentials: () => [REAL, SECOND], store }).reopen();
+    const served = await egress.fetch(modelCall());
+
+    expect(served.status).toBe(200);
+    expect(sent[2]!.headers.get("authorization")).toBe(`Bearer ${REAL}`);
+  });
+
+  /**
+   * With every write failing, the marks live only in a pool's mirror. Admission
+   * holds the same store, so it has to be the same pool, or it would find
+   * nothing to clear and the gateway would keep refusing locally.
+   */
+  it("shares its pool with admission when storage cannot be written", async () => {
+    let accepting = false;
+    const sent = stubPerCredential(() =>
+      accepting
+        ? new Response("ok", { status: 200 })
+        : new Response("{}", EXHAUSTED)
+    );
+    const store: CredentialStore = {
+      read: async () => [],
+      write: async () => {
+        throw new Error("storage unavailable");
+      }
+    };
+    const egress = rotating({ store });
+
+    await egress.fetch(modelCall()); // spends REAL
+    await egress.fetch(modelCall()); // spends SECOND
+    expect((await egress.fetch(modelCall())).status).toBe(429);
+    expect(sent).toHaveLength(2);
+
+    accepting = true;
+    await sharedPool({ credentials: () => [REAL, SECOND], store }).reopen();
+
+    expect((await egress.fetch(modelCall())).status).toBe(200);
+    expect(sent[2]!.headers.get("authorization")).toBe(`Bearer ${REAL}`);
+  });
+
+  /**
    * A rejected pool does not recover on a timer, so it is a 500 rather than a
    * rate limit — the operator has to act, and a 429 would hide that behind a
    * retry loop.
@@ -681,8 +747,8 @@ describe("credential rotation", () => {
   /**
    * A 403 is a permission error for what was *asked for*, not a verdict on the
    * credential. Retiring on it would turn a configuration mistake — a model the
-   * subscription cannot reach — into a permanent pool-wide outage, because every
-   * credential 403s in turn and `dead` is the one state nothing clears.
+   * subscription cannot reach — into a pool-wide outage, because every
+   * credential 403s in turn and each session ends asking for an operator.
    *
    * The gateway still logs it whole, which is how a real one gets characterised.
    */

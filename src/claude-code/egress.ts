@@ -1,6 +1,6 @@
 import {
-  credentialPool,
   readRefusal,
+  sharedPool,
   type CredentialStore,
   type Lead
 } from "./credentials.js";
@@ -242,7 +242,8 @@ export function claudeCodeEgress(config: EgressConfig): Fetcher {
     ? `claude-code-egress:${config.label}`
     : "claude-code-egress";
   const now = config.now ?? Date.now;
-  const pool = credentialPool({
+  // Shared with the session's admission over the same store — see `sharedPool`.
+  const pool = sharedPool({
     credentials: config.credentials,
     store: config.store,
     ...(config.now ? { now: config.now } : {})
@@ -468,12 +469,9 @@ export function claudeCodeEgress(config: EgressConfig): Fetcher {
     /**
      * Capture the whole thing, every time.
      *
-     * **No genuine subscription-exhaustion `429` has been observed through this
-     * path** — a raw-API refusal is a different response — so the rules in
-     * `readRefusal` are inferences from the documented API rate limits. This log
-     * is the instrument that replaces
-     * them with a fact, and it costs nothing: these statuses are rare, and the
-     * body of one is a few hundred bytes.
+     * This log is how the shape `readRefusal` reads was learned, and how a
+     * refusal of any other shape will be. It costs nothing: these statuses are
+     * rare, and the body of one is a few hundred bytes.
      */
     const body = await response
       .clone()

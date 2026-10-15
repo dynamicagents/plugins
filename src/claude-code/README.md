@@ -157,27 +157,32 @@ Three behaviours are worth knowing before you rely on it:
   ordinary slow-down and forwarded untouched. Rotating on a speed bump would
   retire a working credential for whatever window the header named, and with a
   small pool two of those would empty it.
-- **A `401`/`403` retires an entry for good**, rather than until a reset — a
-  revoked credential does not heal on a timer. The response is rewritten to a
-  `429` on the way out, because a client does not retry a `401` and would
-  otherwise fail the run on a credential the gateway has already stopped using.
+- **A `401` retires an entry until the next session**, rather than until a
+  reset — a revoked credential does not heal on a timer. A `403` retires
+  nothing; `readRefusal` says why. The `401` is rewritten to a `429` on the way
+  out, because a client does not retry a `401` and would otherwise fail the run
+  on a credential the gateway has already stopped using.
 - **When every entry is spent**, the real wait goes through: a `429` naming the
   earliest reset, so the run ends cleanly having said when to come back. When
   every entry is _rejected_ it is a `500` instead, because that one needs an
   operator and a `429` would hide it behind a retry loop.
+
+**A mark lasts one session.** Call `session.admit(store)` from the workspace
+object before a session starts, with the store object `egress` was given. It forgets every mark, so that session's first
+model call asks Anthropic again. A plan upgrade, extra usage switched on, or an
+early reset makes a stored `resetAt` wrong, and trusting it would refuse work
+Anthropic would serve, for hours. Asking again costs one free `429` per
+credential that is still spent. The rest is in `credentials.ts`.
 
 State lives wherever the host's {@link CredentialStore} puts it. Keeping it in
 the workspace Durable Object's own storage is the intended shape: each workspace
 learns a rotation independently, which costs one wasted `429` per workspace per
 rotation and saves a Durable Object class, a binding and a migration.
 
-> **The detection rules are inferences, not observations.** No genuine
-> subscription-exhaustion `429` has been captured through this path — the
-> ones seen during development were the _raw-API_ refusal, which is a different
-> response — so `readRefusal` reads `retry-after`, then
-> `anthropic-ratelimit-unified-reset`, then falls back to a long default. The
-> gateway logs every `401`/`403`/`429` whole, headers and body, precisely so the
-> first real one can replace the inference with a fact.
+A spent bucket arrives as a `429` with `anthropic-ratelimit-unified-status:
+rejected`, the reset in `anthropic-ratelimit-unified-reset` (unix seconds) and
+the same wait in `retry-after`. The gateway logs every `401`/`403`/`429` whole,
+headers and body, so a refusal of any other shape arrives named.
 
 ## What the host must provide
 
@@ -400,7 +405,7 @@ export class ClaudeCoordinatorWriterChild extends SubAgent<Env> {
       // a transcript in that container — see "A session has a handle" below.
       onSession: (record) => stub.noteSession(record),
       // Once per run, before the session starts. A throw fails the run with its
-      // message — how a host refuses a run its credentials cannot pay for.
+      // message.
       brief: async (task) => this.#brief(task, stub),
       // One more turn for a session that left work uncommitted, or none.
       followUp: async (session) => this.#uncommittedPrompt(session),

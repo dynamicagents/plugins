@@ -99,20 +99,16 @@ export interface ClaudeCodeUsage {
  * What the client knows about the subscription bucket it is drawing on.
  *
  * The one thing on this stream that is about the *deployment* rather than the
- * run. This plugin's entry point describes the 5-hour and weekly limits as
- * routed around rather than predicted, because the gateway only learns a bucket
- * is empty when Anthropic refuses a request — this is the client saying so in
- * advance, on every session.
+ * run. It is read from the headers of Anthropic's own responses, so it says
+ * nothing the egress gateway has not already seen — it is what lets the parent
+ * hear it.
  *
  * `resetsAt` is **seconds**, not milliseconds, which is the one field here it is
  * possible to get silently wrong: a value handed to `Date` unconverted lands in
- * January 1970, and a credential marked spent until then reads as usable.
+ * January 1970.
  */
 export interface RateLimitInfo {
-  /**
-   * {@link RATE_LIMIT_OK} on a healthy bucket. Any other value is
-   * **unclassified** — no consumer should read one as exhaustion.
-   */
+  /** One of {@link RATE_LIMIT_STATUSES}, or a value nobody has named yet. */
   status: string;
   /** Unix **seconds** at which this bucket refills. */
   resetsAt?: number;
@@ -630,17 +626,23 @@ function isRealDate(ms: number): boolean {
   return Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime());
 }
 
-/**
- * The status a healthy bucket reports, and the only one ever observed.
- *
- * **Every other value is unclassified, not a refusal.** Nothing here knows what
- * a non-`allowed` status means, and the one place that decides whether a
- * credential is spent — `readRateLimitEvent` in this package's `credentials.ts`
- * — recognises none of them, deliberately: retiring a working credential on a
- * guess is the expensive half of that trade. What an unrecognised status earns
- * is a note and a log, so somebody can name it.
- */
+/** The status a healthy bucket reports. */
 export const RATE_LIMIT_OK = "allowed";
+
+/**
+ * Every status the client has reported: {@link RATE_LIMIT_OK},
+ * `allowed_warning` once the bucket is nearly spent, and `rejected` once
+ * Anthropic has refused a request.
+ *
+ * **None of them retires a credential.** `rejected` follows a refusal the
+ * egress gateway has already read off the response itself — see `readRefusal`
+ * in `./credentials.ts` — so acting on it again would add nothing.
+ */
+export const RATE_LIMIT_STATUSES: ReadonlySet<string> = new Set([
+  RATE_LIMIT_OK,
+  "allowed_warning",
+  "rejected"
+]);
 
 /** Read a `result` line. Total by construction — a missing field reads as zero. */
 function readResult(event: Record<string, unknown>): ClaudeCodeResult {
@@ -777,10 +779,9 @@ function describe(event: ClaudeCodeEvent): Omit<NoteData, "key"> | undefined {
        * session — one note per `rate_limit_event` would be the noisiest thing on
        * the stream and would say "allowed" each time.
        *
-       * The test is inverted deliberately: an unrecognised status produces a
-       * note rather than silence. The statuses are a vendor's and only
-       * {@link RATE_LIMIT_OK} has been seen, so a new one meaning "nearly out"
-       * should surface as prose somebody reads, not be assumed benign.
+       * The test is inverted deliberately: anything but {@link RATE_LIMIT_OK}
+       * is a note — a bucket nearly spent or refused, and a status nobody has
+       * named yet, which should surface as prose rather than be assumed benign.
        */
       return event.info.status === RATE_LIMIT_OK
         ? undefined

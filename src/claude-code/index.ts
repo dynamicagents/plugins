@@ -77,11 +77,7 @@ export { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
 export { VERIFIED_CLAUDE_CODE_VERSION } from "./verified.js";
 export type { EgressConfig } from "./egress.js";
 export { GITHUB_HOSTS, GITHUB_TOKEN_PLACEHOLDER } from "./github.js";
-export {
-  credentialPool,
-  readRefusal,
-  readRateLimitEvent
-} from "./credentials.js";
+export { credentialPool, readRefusal } from "./credentials.js";
 export type {
   CredentialPool,
   CredentialPoolConfig,

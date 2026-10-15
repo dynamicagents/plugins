@@ -10,7 +10,7 @@ import { GITHUB_ENV_KEYS, githubEnv } from "./github.js";
 import {
   parseStream,
   toProgress,
-  RATE_LIMIT_OK,
+  RATE_LIMIT_STATUSES,
   type ClaudeCodeResult,
   type RateLimitInfo
 } from "./events.js";
@@ -961,18 +961,14 @@ export async function drainRun(
          * The client repeats itself for as long as a session runs, so a log per
          * event would be the noisiest thing this package writes and every copy
          * after the first would say the same thing. A change is the whole signal:
-         * the first reading names the bucket and when it refills, and the only
-         * other one that can happen is the bucket saying no — which is the line
-         * nobody has captured yet, and the one the pool needs before it can be
-         * trusted to act on a status rather than on a refused request.
+         * the first reading names the bucket and when it refills, and a later
+         * one says it is nearly spent or refused.
          */
         if (changedReading(rateLimit, event.info)) {
           const at = { execId: cursor.execId, ...event.info };
-          // An unrecognised status is **not** reported as a refusal. Nothing
-          // here knows what one means, and a log that calls it exhaustion is
-          // how a healthy credential gets retired by the next person to read
-          // it. See `RATE_LIMIT_OK`.
-          if (event.info.status === RATE_LIMIT_OK)
+          // A known status is information, a refusal included: the gateway
+          // logs that one itself. Only a status nobody has named is a warning.
+          if (RATE_LIMIT_STATUSES.has(event.info.status))
             console.info("[claude-code] subscription bucket", at);
           else
             console.warn("[claude-code] unrecognised subscription status", at);
