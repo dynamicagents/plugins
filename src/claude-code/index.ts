@@ -51,6 +51,13 @@
  * installed at a pinned version, and a workspace Durable Object whose egress
  * policy is `{ mode: "http-gateway" }` and which supplies a
  * {@link CredentialStore}. See the README.
+ *
+ * ## On a sandbox
+ *
+ * Over `/sandbox` instead, the model is {@link claudeCodeHarnessModel}, the
+ * credential pool lives in the sandbox object ({@link credentialHost}) and is
+ * leased by the egress handler {@link anthropicEgress}, and the image's daemon
+ * runs `@dynamicagents/plugins/claude-code/daemon`'s CLI.
  */
 
 export { claudeCodeModel } from "./model.js";
@@ -61,6 +68,26 @@ export type {
   SessionRecord,
   SessionWorkspace
 } from "./model.js";
+export {
+  claudeCodeHarnessModel,
+  CONTAINER_LOST_PROMPT,
+  DEFAULT_HARNESS_TIMEOUT_MS
+} from "./harness-model.js";
+export type {
+  ClaudeCodeHarnessModelOptions,
+  SandboxRuns
+} from "./harness-model.js";
+export {
+  ANTHROPIC_ROUTE_KIND,
+  anthropicEgress,
+  anthropicRoute,
+  credentialHost
+} from "./harness-egress.js";
+export type {
+  AnthropicEgressOptions,
+  CredentialLease
+} from "./harness-egress.js";
+export { ANTHROPIC_PLACEHOLDER_HOST } from "./harness-wire.js";
 export { claudeCodeSession } from "./session.js";
 export type {
   ClaudeCodeSession,

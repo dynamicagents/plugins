@@ -24,12 +24,18 @@ export const { freshStub: freshHttpsSandbox } =
 export async function pollRun(
   sandbox: unknown,
   runId: string,
-  operationId: string
+  operationId: string,
+  from = 0
 ): Promise<PollResult> {
   const stub = sandbox as {
-    poll(runId: string, operationId: string, waitMs: number): Promise<unknown>;
+    poll(
+      runId: string,
+      operationId: string,
+      waitMs: number,
+      from: number
+    ): Promise<unknown>;
   };
-  return (await stub.poll(runId, operationId, 2_000)) as PollResult;
+  return (await stub.poll(runId, operationId, 2_000, from)) as PollResult;
 }
 
 /** Poll until `check` holds, for what the harness settles from its own alarm. */

@@ -70,6 +70,11 @@ describe("the harness behaviour a sandbox is built on", () => {
     });
     expect(polled.messages.map((m) => m.message.role)).toEqual(["assistant"]);
     expect(polled.messages[0]?.digest).toMatch(/^[0-9a-f]{24}$/);
+    // Paged: what a poll already sent is not sent again.
+    expect(polled.next).toBe(1);
+    expect(
+      (await pollRun(sandbox, "run-1", "op-1", polled.next)).messages
+    ).toEqual([]);
   });
 
   it("runs every turn of a run in its directory, and refuses one aimed elsewhere", async () => {
@@ -168,6 +173,45 @@ describe("the harness behaviour a sandbox is built on", () => {
     expect(
       polled.messages.every((m) => m.message.operationId === "op-write")
     ).toBe(true);
+  });
+
+  it("continues a run's conversation as another run, in the same directory only", async () => {
+    const sandbox = freshSandbox("continue");
+    await sandbox.createRun("first", { cwd: "/workspace/repo" });
+    await sandbox.submit("first", "began", "op-first");
+    await eventually(
+      () => pollRun(sandbox, "first", "op-first"),
+      (poll) => poll.result !== undefined
+    );
+    const next = await sandbox.createRun("second", {
+      cwd: "/workspace/repo",
+      continues: "first"
+    });
+    expect(next.created).toBe(true);
+    await sandbox.submit("second", "carried on", "op-second");
+    const polled = await eventually(
+      () => pollRun(sandbox, "second", "op-second"),
+      (poll) => poll.result !== undefined
+    );
+    expect(polled.result).toMatchObject({
+      status: "done",
+      text: "echo: carried on (turn 2)"
+    });
+    await runInDurableObject(sandbox, async (instance) => {
+      await expect(
+        instance.createRun("third", {
+          cwd: "/workspace/other",
+          continues: "first"
+        })
+      ).rejects.toThrow(/cannot work in \/workspace\/other/);
+      await expect(
+        instance.createRun("fourth", {
+          cwd: "/workspace/repo",
+          continues: "first",
+          forkOf: "first"
+        })
+      ).rejects.toThrow(/not both/);
+    });
   });
 
   it("starts the next container from a checkpoint it wrote, and another sandbox from that checkpoint", async () => {

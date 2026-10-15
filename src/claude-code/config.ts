@@ -65,7 +65,7 @@ export interface ClaudeCodeConfig {
    * A thunk so a rotated secret is picked up without rebuilding the plugin list.
    * **These values never enter the container** — one is read on the Worker side
    * by the egress gateway and swapped into the outbound request. The container
-   * gets {@link file://./run.ts CREDENTIAL_PLACEHOLDER}.
+   * gets {@link file://./placeholder.ts CREDENTIAL_PLACEHOLDER}.
    *
    * `claude setup-token` OAuth credentials. There is deliberately no API-key
    * path: the subscription credential is the one that reaches frontier models

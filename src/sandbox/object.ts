@@ -141,6 +141,8 @@ export interface PollResult {
   /** Set once the operation settled. */
   result?: ContainerOperationResult;
   messages: PolledMessage[];
+  /** The `from` that skips every message sent so far. */
+  next: number;
 }
 
 export interface SnapshotSeed {
@@ -582,23 +584,36 @@ export abstract class SandboxObjectBase<
    * The harness session a run lives in, made on first ask.
    *
    * The harness refuses a session id it did not mint, so a run's own id maps to
-   * one here. A fork continues another run's conversation as a new branch of it,
-   * which only works inside one object: the forked run's files are this one's.
+   * one here. A run may instead carry on another run's conversation: `continues`
+   * shares its session, and `forkOf` branches a new one from it. Either only
+   * works inside one object, since the conversation's files are this one's, and
+   * only in the same `cwd`, since the CLI files a conversation by directory.
    */
   async createRun(
     runId: string,
-    options: { cwd: string; forkOf?: string }
+    options: { cwd: string; forkOf?: string; continues?: string }
   ): Promise<{ sessionId: string; created: boolean }> {
     this.#confine(options.cwd);
     await this.#touch();
     const existing = this.#runRow(runId);
     if (existing) return { sessionId: existing.session_id, created: false };
+    if (options.forkOf !== undefined && options.continues !== undefined)
+      throw new Error(
+        "a run either continues another run or forks it, not both"
+      );
+    const of = options.forkOf ?? options.continues;
     let sessionId: string;
-    if (options.forkOf !== undefined) {
-      const from = this.#runRow(options.forkOf);
-      if (!from)
-        throw new Error(`no run ${options.forkOf} in this sandbox to fork`);
-      sessionId = (await this.#harness.sessions.fork(from.session_id)).id;
+    if (of !== undefined) {
+      const from = this.#runRow(of);
+      if (!from) throw new Error(`no run ${of} in this sandbox to carry on`);
+      if (from.cwd !== options.cwd)
+        throw new Error(
+          `run ${of} worked in ${from.cwd}, so a run carrying it on cannot work in ${options.cwd}`
+        );
+      sessionId =
+        options.forkOf !== undefined
+          ? (await this.#harness.sessions.fork(from.session_id)).id
+          : from.session_id;
     } else {
       sessionId = (await this.#harness.sessions.create()).id;
     }
@@ -664,11 +679,17 @@ export abstract class SandboxObjectBase<
    * nothing it streamed live. Those of this operation only, so a forked run does
    * not report its parent's history, each with a digest, because a message is
    * replaced in place as its tool calls finish.
+   *
+   * `from` skips that many of them, so a long run is not sent whole on every
+   * poll; pass the last poll's `next`. A message replaced behind `from` is not
+   * sent again, so a caller passes it only for an adapter that never replaces
+   * one.
    */
   async poll(
     runId: string,
     operationId: string,
-    waitMs = POLL_WAIT_MS
+    waitMs = POLL_WAIT_MS,
+    from = 0
   ): Promise<PollResult> {
     await this.#touch();
     const session = this.#session(runId);
@@ -683,10 +704,12 @@ export abstract class SandboxObjectBase<
     }
     if (!result && this.#container.running)
       await this.#prepareRuntime().catch(() => undefined);
+    const own = (await session.messages()).filter(
+      (message) =>
+        message.operationId === operationId && message.role === "assistant"
+    );
     const messages: PolledMessage[] = [];
-    for (const message of await session.messages()) {
-      if (message.operationId !== operationId || message.role !== "assistant")
-        continue;
+    for (const message of own.slice(from)) {
       messages.push({
         id: message.id,
         digest: await digest(message.parts),
@@ -696,7 +719,8 @@ export abstract class SandboxObjectBase<
     return {
       contract: SANDBOX_CONTRACT,
       ...(result ? { result } : {}),
-      messages
+      messages,
+      next: Math.max(from, own.length)
     };
   }
 
