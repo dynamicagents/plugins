@@ -69,6 +69,15 @@ const STDERR_KEPT = 2_000;
 export function claudeCodeDaemonCli(
   options: ClaudeCodeDaemonOptions
 ): SandboxDaemonOptions["cli"] {
+  // Moved, the conversations land outside `.claude/projects`, which is all the
+  // harness mirrors, and a lost container could not resume one.
+  if (options.env && "CLAUDE_CONFIG_DIR" in options.env) {
+    throw new Error(
+      "claude-code: CLAUDE_CONFIG_DIR cannot be set through `env`: each session " +
+        "keeps its conversations under its own home's .claude/projects, which " +
+        "is what the harness keeps for a lost container to resume from"
+    );
+  }
   return {
     id: options.id,
     // Where the CLI keeps its conversations, under the session's home: the

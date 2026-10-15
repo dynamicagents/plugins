@@ -108,6 +108,12 @@ describe("the launch", () => {
     expect(env).not.toHaveProperty("IS_SANDBOX");
     expect(env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
   });
+
+  it("refuses to move the conversations out of what the harness keeps", () => {
+    expect(() => cli({ env: { CLAUDE_CONFIG_DIR: "/tmp/elsewhere" } })).toThrow(
+      /CLAUDE_CONFIG_DIR/
+    );
+  });
 });
 
 describe("the parse", () => {

@@ -276,7 +276,8 @@ export abstract class SandboxObjectBase<
       run_id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
       cwd TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      stopped_at INTEGER
     )`);
     sql.exec(`CREATE TABLE IF NOT EXISTS sandbox_checkouts (
       dir TEXT PRIMARY KEY,
@@ -627,13 +628,22 @@ export abstract class SandboxObjectBase<
     return { sessionId, created: true };
   }
 
-  #runRow(runId: string): { session_id: string; cwd: string } | undefined {
+  #runRow(
+    runId: string
+  ):
+    { session_id: string; cwd: string; stopped_at: number | null } | undefined {
     return this.ctx.storage.sql
-      .exec<{ session_id: string; cwd: string }>(
-        "SELECT session_id, cwd FROM sandbox_runs WHERE run_id = ?",
+      .exec<{ session_id: string; cwd: string; stopped_at: number | null }>(
+        "SELECT session_id, cwd, stopped_at FROM sandbox_runs WHERE run_id = ?",
         runId
       )
       .toArray()[0];
+  }
+
+  /** Refuse a turn of a run that was stopped: it takes no more. */
+  #refuseStopped(runId: string): void {
+    if (this.#runRow(runId)?.stopped_at != null)
+      throw new Error(`run ${runId} was stopped, so it takes no more turns`);
   }
 
   #session(runId: string) {
@@ -649,6 +659,10 @@ export abstract class SandboxObjectBase<
    *
    * Every turn runs in the run's `cwd`: a turn with no run header gets one, and
    * a header naming another directory is refused.
+   *
+   * A stopped run takes no turn, checked before and after the turn is queued:
+   * a submission still starting the container when its run is stopped would
+   * otherwise start a CLI after the stop, with nobody left polling it.
    */
   async submit(
     runId: string,
@@ -664,10 +678,17 @@ export abstract class SandboxObjectBase<
       );
     }
     const turn = header ? text : withRunHeader({ cwd: row.cwd }, prompt);
+    this.#refuseStopped(runId);
     await this.ensureRunning();
+    this.#refuseStopped(runId);
+    const session = this.#harness.session(row.session_id);
     const receipt = await this.#hold(() =>
-      this.#harness.session(row.session_id).submit(turn, { operationId })
+      session.submit(turn, { operationId })
     );
+    if (this.#runRow(runId)?.stopped_at != null) {
+      await session.abort(receipt.operationId);
+      throw new Error(`run ${runId} was stopped, so it takes no more turns`);
+    }
     await this.#egressWatch.set(new Date(Date.now() + EGRESS_WATCH_MS));
     return { operationId: receipt.operationId, accepted: receipt.accepted };
   }
@@ -731,10 +752,20 @@ export abstract class SandboxObjectBase<
    * SIGINT, a SIGKILL a few seconds later, then one last sync of its session
    * files. Committing or stopping before that loses what it wrote last, or
    * races git's index lock. So this waits for no CLI to be left, and one sync.
+   *
+   * A stopped run takes no more turns. Its conversation goes on, if it does, in
+   * a run that `continues` it.
    */
   async stopRun(runId: string): Promise<{ stopped: boolean }> {
     await this.#touch();
-    const stopped = await this.#session(runId).abort();
+    const session = this.#session(runId);
+    // Marked first, so a submission of it still on its way in refuses itself.
+    this.ctx.storage.sql.exec(
+      "UPDATE sandbox_runs SET stopped_at = ? WHERE run_id = ? AND stopped_at IS NULL",
+      Date.now(),
+      runId
+    );
+    const stopped = await session.abort();
     if (this.#container.running) {
       const until = Date.now() + CLI_KILL_MS + 10_000;
       while (Date.now() < until && (await this.#cliAlive())) await sleep(500);

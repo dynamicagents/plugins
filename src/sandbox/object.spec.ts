@@ -175,6 +175,45 @@ describe("the harness behaviour a sandbox is built on", () => {
     ).toBe(true);
   });
 
+  it(
+    "starts nothing for a submission that arrives after its run was stopped",
+    { timeout: 20_000 },
+    async () => {
+      const sandbox = freshSandbox("late");
+      await sandbox.answer("--output-format stream-jso[n]", "", 1);
+      await sandbox.createRun("run-1", { cwd: "/workspace/repo" });
+      // Held where a submission waits on a new container: its egress marker.
+      await sandbox.holdExec(EGRESS_READY);
+      await runInDurableObject(sandbox, async (instance, state) => {
+        const late = instance.submit("run-1", "too late", "op-1").then(
+          () => "accepted",
+          (err: unknown) => String(err)
+        );
+        await eventually(
+          async () => instance.fake(),
+          (fake) => joined(fake.execs).some((cmd) => cmd.includes(EGRESS_READY))
+        );
+        // The stop lands while the submission is still starting the container.
+        const stopping = instance.stopRun("run-1");
+        await eventually(
+          async () =>
+            state.storage.sql
+              .exec<{ stopped_at: number | null }>(
+                "SELECT stopped_at FROM sandbox_runs WHERE run_id = 'run-1'"
+              )
+              .one().stopped_at,
+          (stoppedAt) => stoppedAt !== null
+        );
+        instance.freeExec();
+        await stopping;
+        expect(await late).toMatch(/was stopped/);
+        await expect(instance.submit("run-1", "again", "op-2")).rejects.toThrow(
+          /was stopped/
+        );
+      });
+    }
+  );
+
   it("continues a run's conversation as another run, in the same directory only", async () => {
     const sandbox = freshSandbox("continue");
     await sandbox.createRun("first", { cwd: "/workspace/repo" });

@@ -341,6 +341,64 @@ describe("claudeCodeHarnessModel", () => {
     expect(reports[0]?.followUp?.exitCode).toBe(0);
   });
 
+  it("keeps a plan's schema on its follow-up, and counts the follow-up against the session's limit", async () => {
+    const box = sandbox((op) => ({ messages: [session(op)], result: done() }));
+    const { model, map } = harness(box, {
+      permissionMode: "plan",
+      schema: "plan",
+      followUp: async () => "tighten step 2"
+    });
+    await textOf(model);
+    expect(readRunHeader(box.submits[1]!.text).header).toEqual({
+      cwd: "/workspace/repo",
+      mode: "plan",
+      schema: "plan"
+    });
+    const started = (step: string) =>
+      (map.get(`claude-code:${RUN}:turn:${step}`) as { startedAt: number })
+        .startedAt;
+    expect(started("follow-up")).toBe(started("session"));
+  });
+
+  it("polls a note again that failed to file, rather than moving past it", async () => {
+    const box = sandbox((op) => ({
+      messages: [session(op), note(op, 0, "one"), note(op, 1, "two")],
+      result: done()
+    }));
+    let failures = 1;
+    const filed: string[] = [];
+    const { model, reports } = harness(box, {
+      note: async (key) => {
+        if (key.endsWith("claude:0") && failures-- > 0)
+          throw new Error("the parent is busy");
+        filed.push(key);
+      }
+    });
+    await textOf(model);
+    expect(filed).toEqual([
+      `${RUN}:session:a0:claude:0`,
+      `${RUN}:session:a0:claude:1`
+    ]);
+    expect(box.polls.map((p) => p.from)).toEqual([0, 1]);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("stops a run aborted while its submission is still on the way", async () => {
+    const box = sandbox(() => ({ messages: [] }));
+    const abort = new AbortController();
+    const submit = box.runs.submit.bind(box.runs);
+    box.runs.submit = async (...args) => {
+      abort.abort(new Error("cancelled by the parent"));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return submit(...args);
+    };
+    const { model } = harness(box);
+    await expect(textOf(model, abort.signal)).rejects.toThrow(
+      /cancelled by the parent/
+    );
+    expect(box.stops()).toBe(1);
+  });
+
   it("asks only for messages it has not filed, and rides out a dropped call", async () => {
     let polled = 0;
     const box = sandbox((op) => ({
