@@ -48,7 +48,10 @@ is deliberately not something a host can widen.
 Opening a pull request and commenting stay on REST, and answering a review thread
 stays on GraphQL — `isResolved` aside, resolving a thread has no REST endpoint, and
 the one MCP tool that offers it also submits reviews with `APPROVE`, which is a grant
-this plugin declines. The GraphQL hazard worth knowing before editing `githubGraphql`:
+this plugin declines. Those writes are per-install, not a route the read-only route
+leaves open: an agent that must not write names none of them in `tools: [...]` above,
+so the whole of what it can reach is the two read tools in the allowlist. The GraphQL
+hazard worth knowing before editing `githubGraphql`:
 **a failed query answers `200`**, with the errors in the body, so a caller that reads
 `data` straight through reports a permission failure as success.
 

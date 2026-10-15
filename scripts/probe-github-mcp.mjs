@@ -10,6 +10,13 @@
  * the server's own Go output types rather than observed, because the endpoint
  * answers `401` to every request without a credential. This closes that gap.
  *
+ * **There is no shortcut with an anonymous request.** The server checks the
+ * `Authorization` header before it routes, so a path it does not recognise
+ * answers `401` byte for byte the way the right one does — an unauthenticated
+ * call proves the host is reachable and nothing whatever about the endpoint,
+ * the `/readonly` modifier or the allowlist. Only a credentialled run settles
+ * any of it, which is what this script is for.
+ *
  * It needs a GitHub token in `GITHUB_TOKEN` and a pull request to read, as
  * `OWNER/REPO#NUMBER` in `GITHUB_MCP_PROBE_PR`. The token is read from the
  * environment, sent only to the endpoint `mcp.ts` names, and never printed —
