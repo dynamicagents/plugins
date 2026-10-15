@@ -141,7 +141,7 @@ export interface ComputerConfig extends WorkspaceClientConfig {
  */
 export function buildComputerTools(
   workspace: () => Promise<ComputerClient>,
-  config: ComputerToolsConfig,
+  config: ComputerConfig | ComputerToolsConfig,
   advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
   fsWorkspace: () => Promise<ComputerClient> = workspace,
   lockScope?: () => string
@@ -205,7 +205,9 @@ const SANDBOX_CONTEXT = [
  * never resolve different ones. `config` answers everything else: the shell,
  * the limits, the environment.
  */
-export function computer(config: ComputerToolsConfig): AgentPlugin {
+export function computer(
+  config: ComputerConfig | ComputerToolsConfig
+): AgentPlugin {
   return computerPlugin(config, "workspace", CONTEXT);
 }
 

@@ -124,7 +124,8 @@ sandboxComputer(config)
 What changes is where everything happens. Every call reaches the container, and a file read wakes
 a stopped one. `grep` and `find` are `ripgrep` there, as the agent: hidden and ignored files are
 read, and `.git` and `node_modules` are pruned, as the workspace's walk does. A command runs under
-`timeout` at its limit, so a stop kills it where it runs. The model is told the checkout is the
+`timeout` at its limit, and a cancel marks it before signalling it, so one still starting the
+container never runs. The model is told the checkout is the
 container's disk, and nothing about a mount. `computer` refuses a sandbox's workspace and
 `sandboxComputer` a workspace's, so the agent's two halves cannot disagree.
 

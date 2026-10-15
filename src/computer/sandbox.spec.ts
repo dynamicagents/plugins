@@ -116,7 +116,7 @@ describe("sandboxClient", () => {
     expect(await lastExec("--files")).toContain("/workspace/repo **/*.ts");
   });
 
-  it("runs a command under its own time limit, as the agent, and kills it by its marker", async () => {
+  it("launches a command under its own time limit, as the agent, behind its cancel mark", async () => {
     const { client, lastExec } = await host("exec");
     using handle = await client.runtime.exec("npm test", {
       cwd: "/workspace/repo",
@@ -128,12 +128,49 @@ describe("sandboxClient", () => {
       status: "completed"
     });
     const sent = await lastExec("npm test");
+    expect(sent).toMatch(/^setpriv .* sh -c /);
+    expect(sent).toContain('[ -e "/run/da/cancelled/$0" ] && exit 130');
     expect(sent).toMatch(
-      /^setpriv .* timeout --kill-after=5 90 sh -c npm test da-exec-/
+      /exec timeout --kill-after=5 "\$2" sh -c "\$1" "\$0" da-exec-[0-9a-f-]+ npm test 90$/
     );
-    const marker = /da-exec-[0-9a-f-]+/.exec(sent)?.[0];
+  });
+
+  it("marks a command cancelled before it signals it, so one still starting never runs", async () => {
+    const sandbox = freshSandbox("cancel-cold");
+    const client = sandboxClient(sandbox as unknown as SandboxComputerHost);
+    const sent = async (match: string) =>
+      (await sandbox.fake()).execs
+        .map((cmd) => cmd.join(" "))
+        .filter((cmd) => cmd.includes(match));
+    // Cold: the launch is still starting the container when it is cancelled.
+    const handle = await client.runtime.exec("rm -rf build", {
+      cwd: "/workspace/repo",
+      encoding: "utf8",
+      timeoutMs: 90_000
+    });
     await handle.kill();
-    expect(await lastExec("pkill")).toContain(`pkill -TERM -f ${marker}`);
+    expect(await handle.result()).toMatchObject({ status: "cancelled" });
+    const [launch] = await sent("rm -rf build");
+    const id = /da-exec-([0-9a-f-]+)/.exec(launch ?? "")?.[1];
+    const [cancel] = await sent("da-cancel");
+    expect(cancel).toContain(`da-cancel da-exec- ${id}`);
+    expect(cancel).toMatch(
+      /: > "\/run\/da\/cancelled\/\$m"\npkill -TERM -f "\$m"/
+    );
+  });
+
+  it("says a command that ignored TERM and was killed at its limit was cancelled", async () => {
+    const { sandbox, client } = await host("exec-kill");
+    await sandbox.answer("sleep 600", "", 137);
+    using handle = await client.runtime.exec("sleep 600", {
+      cwd: "/workspace",
+      encoding: "utf8",
+      timeoutMs: 1
+    });
+    expect(await handle.result()).toMatchObject({
+      exitCode: 137,
+      status: "cancelled"
+    });
   });
 });
 
@@ -148,6 +185,19 @@ describe("sandboxComputer()", () => {
     binding: {} as ComputerConfig["binding"],
     workspaceName: () => "w"
   };
+
+  it("still takes a workspace's whole config", () => {
+    // A type-level check as much as a runtime one: the literal is what
+    // excess-property checking would refuse against the tools' own shape.
+    expect(
+      Object.keys(
+        computer({
+          binding: workspaceConfig.binding,
+          workspaceName: () => "w"
+        }).tools!(onWorkspace(computerWorkspace(workspaceConfig)))
+      ).sort()
+    ).toEqual(["bash", "edit", "grep"]);
+  });
 
   it("runs on a sandbox's workspace and refuses a workspace's, and the other way round", () => {
     expect(

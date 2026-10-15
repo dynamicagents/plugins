@@ -8,6 +8,7 @@ import type {
   GrepMatch,
   GrepOptions
 } from "./client.js";
+import { RUN_DIR } from "../sandbox/constants.js";
 import { routedWorkspace } from "./proxy.js";
 
 /**
@@ -57,6 +58,37 @@ export interface SandboxComputerConfig {
 
 /** After `timeout`'s TERM, how long before its KILL. */
 const KILL_AFTER_S = 5;
+/** `timeout`'s exits for a command it ended: TERM taken, or KILL after it was not. */
+const TIMED_OUT = new Set([124, 137]);
+
+/**
+ * A command's processes carry a marker, for `kill` to find them by — through
+ * the launch and after it, since `exec` keeps it in every command line.
+ * `timeout` ends the command where it runs at its limit, which a Worker-side
+ * signal cannot.
+ */
+const MARKER = "da-exec-";
+const CANCELLED = `${RUN_DIR}/cancelled`;
+
+/**
+ * The launch and `kill` are a handshake, because a command can still be on its
+ * way in — starting the container — when it is cancelled: `kill` marks the
+ * command cancelled before it signals, and the launch checks the mark before
+ * it starts. Either the command never starts, or it is running when `kill`
+ * signals it.
+ */
+const LAUNCH = [
+  `[ -e "${CANCELLED}/$0" ] && exit 130`,
+  `exec timeout --kill-after=${KILL_AFTER_S} "$2" sh -c "$1" "$0"`
+].join("\n");
+
+/** The marker arrives in two halves, so this script's own command line is not one `pkill` matches. */
+const CANCEL = [
+  'm="$1$2"',
+  `mkdir -p ${CANCELLED} && : > "${CANCELLED}/$m"`,
+  'pkill -TERM -f "$m"',
+  "exit 0"
+].join("\n");
 /** What one `find` or `grep` returns at most, with no `limit` of its own. */
 const MAX_FOUND = 10_000;
 
@@ -135,20 +167,19 @@ export function sandboxClient(host: SandboxComputerHost): ComputerClient {
     fs,
     runtime: {
       async exec(command, options) {
-        // `timeout` ends the command where it runs, which a Worker-side signal
-        // cannot; the marker names its processes for `kill`.
-        const marker = `da-exec-${crypto.randomUUID()}`;
+        const id = crypto.randomUUID();
+        const marker = `${MARKER}${id}`;
         const startedAt = Date.now();
+        let killed = false;
         const running = host.exec(
           [
-            "timeout",
-            `--kill-after=${KILL_AFTER_S}`,
-            // At least a second: `timeout 0` is no limit at all.
-            String(Math.max(1, Math.ceil(options.timeoutMs / 1000))),
             "sh",
             "-c",
+            LAUNCH,
+            marker,
             command,
-            marker
+            // At least a second: `timeout 0` is no limit at all.
+            String(Math.max(1, Math.ceil(options.timeoutMs / 1000)))
           ],
           {
             cwd: options.cwd,
@@ -161,15 +192,19 @@ export function sandboxClient(host: SandboxComputerHost): ComputerClient {
           async result() {
             const result = await running;
             const timedOut =
-              result.exitCode === 124 &&
+              TIMED_OUT.has(result.exitCode) &&
               Date.now() - startedAt >= options.timeoutMs;
             return {
               ...result,
-              status: timedOut ? ("cancelled" as const) : ("completed" as const)
+              status:
+                killed || timedOut
+                  ? ("cancelled" as const)
+                  : ("completed" as const)
             };
           },
           async kill() {
-            await host.exec(["pkill", "-TERM", "-f", marker]);
+            killed = true;
+            await host.exec(["sh", "-c", CANCEL, "da-cancel", MARKER, id]);
           },
           [Symbol.dispose]() {}
         };

@@ -132,7 +132,8 @@ for (const file of walk(path.join(root, "dist"))) {
  * that holds only the tools.
  */
 const BUILDS_ON = {
-  "./computer": ["./workspace"],
+  // Over a sandbox, its markers' directory.
+  "./computer": ["./workspace", "./sandbox"],
   // The image's entrypoint shares the object's constants and run header.
   "./sandbox/daemon": ["./sandbox"],
   // On a sandbox: its run header, its egress routes and its RPCs' shapes.
