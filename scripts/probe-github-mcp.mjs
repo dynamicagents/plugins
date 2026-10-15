@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Does GitHub's hosted MCP server behave the way `src/repo/mcp.ts` assumes?
+ * Does GitHub's hosted MCP server behave the way `src/repo-github/mcp.ts` assumes?
  *
  *   npm run probe:github-mcp              check, and report
  *   npm run probe:github-mcp -- --record  and rewrite the recorded fixture
@@ -170,7 +170,7 @@ const call = (session, name, args, opts = {}) =>
     { ...opts, session }
   );
 
-/** The text block, which is the contract — see `toolText` in `src/repo/mcp.ts`. */
+/** The text block, which is the contract — see the content-block reader in `@dynamicagents/core/mcp`. */
 const parsed_ = ({ envelope }) => {
   const text = (envelope?.result?.content ?? [])
     .filter((b) => b.type === "text")
@@ -437,7 +437,7 @@ if (record) {
         _: [
           "One answer per MCP method this plugin calls, in the shape GitHub's",
           "hosted server marshals into a tool result's text block.",
-          "`src/repo/index.spec.ts` runs each reader against these.",
+          "`src/repo-github/index.spec.ts` runs each reader against these.",
           "",
           "RECORDED by `npm run probe:github-mcp -- --record` from a live pull",
           "request. Re-record rather than editing by hand; a spec asserting a",

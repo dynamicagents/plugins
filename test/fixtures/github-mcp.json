@@ -1,7 +1,7 @@
 {
   "_": [
     "One answer per MCP method this plugin calls, in the shape GitHub's hosted",
-    "server marshals into a tool result's text block. `src/repo/index.spec.ts`",
+    "server marshals into a tool result's text block. `src/repo-github/index.spec.ts`",
     "runs each reader against these, so a render is checked against the payload",
     "the server actually sends rather than against a shape a spec invented.",
     "",

@@ -29,7 +29,8 @@ export { parseRepo } from "./url.js";
 export { GITHUB_MCP_URL, GITHUB_MCP_TOOLS } from "./mcp.js";
 
 /**
- * `@dynamicagents/plugins/repo` — clone, commit, push, open a pull request.
+ * `@dynamicagents/plugins/repo-github` — clone, commit, push, open a pull
+ * request, on GitHub.
  *
  * Layered over a container rather than owning one: it needs a shell with `git`
  * on it, and `@dynamicagents/plugins/workspace` provides exactly that through
@@ -463,7 +464,11 @@ export function repo(config: RepoConfig): AgentPlugin {
   ].join("\n");
 
   return definePlugin({
-    name: "repo",
+    // The installed capability's identity, and so the label core namespaces
+    // this plugin's context block under. The provider is in it for the same
+    // reason it is in the subpath: an agent installs one forge plugin, and
+    // which one is a thing the model may as well be able to read.
+    name: "repo-github",
 
     // `runtime` goes through to `exec` untouched and is read per command, so a
     // sub-agent's git commands run in the same container its parent cloned

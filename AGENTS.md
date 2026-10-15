@@ -83,10 +83,10 @@ rather than against the manifest.
 
 ## The GitHub MCP route
 
-`/repo` reads GitHub through its **hosted MCP server**, from the Worker, with the
+`/repo-github` reads GitHub through its **hosted MCP server**, from the Worker, with the
 deployment's token as `Authorization: Bearer`. The transport is not here:
 `@dynamicagents/core/mcp` holds it, over the official `@modelcontextprotocol/client`,
-and core is where the protocol decisions are explained. `src/repo/mcp.ts` is the
+and core is where the protocol decisions are explained. `src/repo-github/mcp.ts` is the
 policy that is GitHub's, and two things in it are policy rather than configuration:
 
 - **`GITHUB_MCP_TOOLS` is an allowlist**, sent as `X-MCP-Tools`. Adding a name to it

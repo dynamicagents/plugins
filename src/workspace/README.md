@@ -145,7 +145,7 @@ The bundle cost is nothing — `sideEffects` is false, so an agent that only cal
 written into the container's system git config, so a repository the container made for
 itself — a submodule, a `git init` — is attributed rather than nameless.
 
-**`@dynamicagents/plugins/repo` takes its identity separately**, as `RepoConfig.author`,
+**`@dynamicagents/plugins/repo-github` takes its identity separately**, as `RepoConfig.author`,
 and falls back to a generic one when a consumer leaves it unset. Nothing here can reach
 that config and nothing checks the two agree, so a deployment answers both from one
 place: one exported helper that reads the binding, called by the workspace object and
