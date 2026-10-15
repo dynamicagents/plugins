@@ -82,7 +82,7 @@ function listed(checks: Check[]): string {
 }
 
 export function checkTools(ctx: RepoContext): ToolSet {
-  const { bounded, github, githubRepo } = ctx;
+  const { bounded, mcp, githubRepo } = ctx;
 
   return {
     repo_pr_checks: tool({
@@ -96,27 +96,27 @@ export function checkTools(ctx: RepoContext): ToolSet {
         const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
+        const where = {
+          owner: decodeURIComponent(owner),
+          repo: decodeURIComponent(repo),
+          pullNumber: number,
+          perPage: GITHUB_PAGE_SIZE
+        };
 
-        const pr = await github(
-          "repo_pr_checks",
-          `/repos/${owner}/${repo}/pulls/${number}`
-        );
-        if (!pr.ok) return bounded(pr.message);
-        const sha = (pr.data as { head?: { sha?: string } }).head?.sha;
-        if (!sha) return `#${number} is not a pull request in ${owner}/${repo}`;
-        const short = sha.slice(0, 7);
-
-        const runs = await github(
-          "repo_pr_checks",
-          `/repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=${GITHUB_PAGE_SIZE}`
-        );
+        // Both of GitHub's CI APIs, and neither needs the head commit looked up
+        // first: each method resolves it from the pull request itself, and the
+        // combined status reports the sha it answered for.
+        const runs = await mcp("repo_pr_checks", "pull_request_read", {
+          ...where,
+          method: "get_check_runs"
+        });
         if (!runs.ok) return bounded(runs.message);
         // The combined status holds the latest per context, so one page is
         // every context there is.
-        const statuses = await github(
-          "repo_pr_checks",
-          `/repos/${owner}/${repo}/commits/${sha}/status?per_page=${GITHUB_PAGE_SIZE}`
-        );
+        const statuses = await mcp("repo_pr_checks", "pull_request_read", {
+          ...where,
+          method: "get_status"
+        });
         if (!statuses.ok) return bounded(statuses.message);
 
         const runData = runs.data as {
@@ -125,8 +125,13 @@ export function checkTools(ctx: RepoContext): ToolSet {
         };
         const statusData = statuses.data as {
           total_count?: number;
+          sha?: string;
           statuses?: CommitStatus[];
         };
+        const sha = statusData.sha;
+        if (!sha) return `#${number} is not a pull request in ${owner}/${repo}`;
+        const short = sha.slice(0, 7);
+
         const checks = readChecks(
           runData.check_runs ?? [],
           statusData.statuses ?? []

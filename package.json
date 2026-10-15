@@ -70,6 +70,7 @@
     "verify:references": "node scripts/verify-references.mjs",
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
     "probe:claude-code": "npm run build && node scripts/probe-claude-code.mjs",
+    "probe:github-mcp": "node scripts/probe-github-mcp.mjs",
     "prepack": "npm run build && npm run verify:exports",
     "prepublishOnly": "npm run check && npm test",
     "prepare": "husky || true && npm run build"

@@ -1,0 +1,147 @@
+{
+  "_": [
+    "One answer per MCP method this plugin calls, in the shape GitHub's hosted",
+    "server marshals into a tool result's text block. `src/repo/index.spec.ts`",
+    "runs each reader against these, so a render is checked against the payload",
+    "the server actually sends rather than against a shape a spec invented.",
+    "",
+    "DERIVED, NOT YET RECORDED. These were written from the server's own output",
+    "types — MinimalPullRequest, MinimalPRFile, MinimalPullRequestReview,",
+    "MinimalReviewThread, MinimalCheckRun, MinimalCombinedStatus, MinimalIssue,",
+    "MinimalIssueComment in pkg/github/minimal_types.go — because the endpoint",
+    "refuses every request without a credential, and this repository has none.",
+    "`npm run probe:github-mcp -- --record` replaces this file with what the",
+    "live server answered; until somebody has run it, treat a field here as",
+    "read from source rather than observed.",
+    "",
+    "Keyed `<tool>:<method>`. Values are the parsed result, not the envelope:",
+    "the transport's own framing is asserted separately."
+  ],
+
+  "issue_read:get": {
+    "number": 42,
+    "title": "Flag is ignored",
+    "state": "open",
+    "body": "The --json flag does nothing.",
+    "html_url": "https://github.com/o/r/issues/42",
+    "user": { "login": "reporter" },
+    "assignees": [],
+    "comments": 1
+  },
+
+  "issue_read:get_comments": [
+    {
+      "id": 1,
+      "body": "needs a test",
+      "html_url": "https://github.com/o/r/issues/42#issuecomment-1",
+      "user": { "login": "reviewer" },
+      "created_at": "2026-09-17T09:00:00Z"
+    }
+  ],
+
+  "pull_request_read:get": {
+    "number": 7,
+    "title": "Add flag",
+    "state": "open",
+    "draft": false,
+    "merged": false,
+    "mergeable_state": "clean",
+    "html_url": "https://github.com/o/r/pull/7",
+    "user": { "login": "da-coder" },
+    "requested_reviewers": ["Copilot"],
+    "head": { "ref": "coder/x", "sha": "1f0cd15e0f7c8b" },
+    "base": { "ref": "main", "sha": "0a0a0a0a0a0a0a" },
+    "additions": 3,
+    "deletions": 1,
+    "changed_files": 1
+  },
+
+  "pull_request_read:get_files": [
+    {
+      "filename": "src/a.ts",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1,
+      "changes": 4
+    }
+  ],
+
+  "pull_request_read:get_reviews": [
+    {
+      "id": 100,
+      "state": "COMMENTED",
+      "body": "one point below",
+      "html_url": "https://github.com/o/r/pull/7#pullrequestreview-100",
+      "user": { "login": "copilot-pull-request-reviewer[bot]" },
+      "commit_id": "1f0cd15e0f7c8b",
+      "submitted_at": "2026-09-17T10:00:00Z"
+    }
+  ],
+
+  "pull_request_read:get_review_comments": {
+    "review_threads": [
+      {
+        "id": "PRRT_kwDOabc123",
+        "is_resolved": false,
+        "is_outdated": false,
+        "is_collapsed": false,
+        "total_count": 1,
+        "comments": [
+          {
+            "body": "validate this",
+            "path": "src/config.ts",
+            "line": 109,
+            "original_line": 109,
+            "author": "copilot-pull-request-reviewer",
+            "created_at": "2026-09-17T10:00:00Z",
+            "html_url": "https://github.com/o/r/pull/7#discussion_r1"
+          }
+        ]
+      }
+    ],
+    "total_count": 1,
+    "page_info": {
+      "has_next_page": false,
+      "has_previous_page": false,
+      "start_cursor": "Y3Vyc29yOnYyOpHOAA",
+      "end_cursor": "Y3Vyc29yOnYyOpHOAB"
+    }
+  },
+
+  "pull_request_read:get_check_runs": {
+    "total_count": 2,
+    "check_runs": [
+      {
+        "id": 1,
+        "name": "Test",
+        "status": "completed",
+        "conclusion": "failure",
+        "html_url": "https://github.com/o/r/runs/1",
+        "details_url": "https://github.com/o/r/runs/1",
+        "started_at": "2026-09-17T10:00:00Z",
+        "completed_at": "2026-09-17T10:04:00Z"
+      },
+      {
+        "id": 2,
+        "name": "Lint",
+        "status": "in_progress",
+        "html_url": "https://github.com/o/r/runs/2"
+      }
+    ]
+  },
+
+  "pull_request_read:get_status": {
+    "state": "pending",
+    "sha": "1f0cd15e0f7c8b",
+    "total_count": 1,
+    "statuses": [
+      {
+        "state": "success",
+        "context": "legacy/ci",
+        "description": "build passed",
+        "target_url": "https://ci.example.com/1",
+        "created_at": "2026-09-17T10:02:00Z"
+      }
+    ]
+  }
+}

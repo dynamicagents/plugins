@@ -1,4 +1,5 @@
 import type { ActionContext } from "@cloudflare/think";
+import { mcpClient, type McpAnswer } from "./mcp.js";
 import { DEFAULT_ALLOWED_HOSTS, parseRepo, repoLocation } from "./url.js";
 import type {
   RepoCheckout,
@@ -13,7 +14,12 @@ import type {
  */
 
 const DEFAULT_WORKDIR = "/workspace";
-const DEFAULT_API_BASE = "https://api.github.com";
+/**
+ * GitHub's API. Not a host's to configure: the hosted MCP server these tools
+ * read through is github.com's alone, so an Enterprise base here would point
+ * half of this plugin at an install the other half cannot reach.
+ */
+const API_BASE = "https://api.github.com";
 const DEFAULT_AUTHOR = {
   name: "da-coder",
   email: "coder@dynamicagents.invalid"
@@ -40,20 +46,10 @@ const GITHUB_TIMEOUT_MS = 30_000;
 export const GITHUB_PAGE_SIZE = 100;
 
 /**
- * Where GraphQL lives, given where REST does.
- *
- * On github.com they share an origin and `/graphql` hangs off it. On GitHub
- * Enterprise — which {@link RepoConfig.apiBase} exists for — REST is under
- * `/api/v3` and GraphQL is its **sibling** at `/api/graphql`, not a path beneath
- * it. Appending blindly yields `/api/v3/graphql`, which is a 404 on every
- * Enterprise install and no failure at all on the public API, so the mistake
- * survives every test written against github.com.
+ * Where GraphQL lives. A constant, because github.com is the only host these
+ * tools talk to — see `./mcp.ts` for why Enterprise is not supported.
  */
-export function graphqlEndpoint(apiBase: string): string {
-  const trimmed = apiBase.replace(/\/+$/, "");
-  const enterprise = trimmed.replace(/\/api\/v3$/, "/api/graphql");
-  return enterprise === trimmed ? `${trimmed}/graphql` : enterprise;
-}
+const GRAPHQL_URL = `${API_BASE}/graphql`;
 
 /**
  * Middle-out truncation, so both the head of a diff and its tail survive.
@@ -234,6 +230,22 @@ export interface RepoContext {
     remote?: { host: string; url: string };
     unreachable?: string;
   }>;
+  /**
+   * One call to GitHub's hosted MCP server — every read this plugin makes.
+   *
+   * `tool` is this plugin's own name, for the failure log; `name` is the MCP
+   * tool, which must be one of `./mcp.ts`'s allowlist.
+   */
+  mcp: (
+    tool: string,
+    name: string,
+    args: Record<string, unknown>
+  ) => Promise<McpAnswer>;
+  /**
+   * One REST call, for what is left on it: opening a pull request and
+   * commenting. Both are writes, and both are `coding`'s rather than
+   * claude-coordinator's.
+   */
   github: (
     tool: string,
     path: string,
@@ -297,8 +309,6 @@ export function repoContext(
   runtime: () => unknown = () => undefined
 ): RepoContext {
   const workdir = config.workdir ?? DEFAULT_WORKDIR;
-  const apiBase = config.apiBase ?? DEFAULT_API_BASE;
-  const graphqlUrl = graphqlEndpoint(apiBase);
   const author = config.author ?? DEFAULT_AUTHOR;
   const allowedHosts = config.allowedHosts ?? DEFAULT_ALLOWED_HOSTS;
   const maxChars = config.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
@@ -545,14 +555,9 @@ export function repoContext(
     tool: string,
     path: string,
     init?: { method: string; body: unknown }
-  ) => githubAt(tool, `${apiBase}${path}`, init);
+  ) => githubAt(tool, `${API_BASE}${path}`, init);
 
-  /**
-   * The same call, against a URL rather than a path under {@link apiBase}.
-   *
-   * GraphQL needs it: on Enterprise the REST base carries `/api/v3` and GraphQL
-   * does not live under it — see {@link graphqlEndpoint}.
-   */
+  /** The same call, against a URL rather than a path under {@link API_BASE}. */
   const githubAt = async (
     tool: string,
     url: string,
@@ -602,17 +607,16 @@ export function repoContext(
    * nothing there" and is acted on accordingly. That is the whole reason this
    * wrapper exists rather than each caller posting to `/graphql` itself.
    *
-   * What needs it is what REST cannot express: resolving a review thread has no
-   * REST equivalent at all, the threads themselves are not on the issue timeline
-   * `repo_issue_view` reads, and a review *request* naming an app is invisible to
-   * REST — see {@link file://./tools-review.ts REVIEW_REQUESTS_QUERY}.
+   * What still needs it is answering a review thread: replying to one and
+   * resolving it have no REST equivalent at all. Reading them does not — that
+   * goes through `./mcp.ts` with everything else this plugin reads.
    */
   const githubGraphql = async (
     tool: string,
     query: string,
     variables: Record<string, unknown>
   ): Promise<{ ok: true; data: unknown } | { ok: false; message: string }> => {
-    const answered = await githubAt(tool, graphqlUrl, {
+    const answered = await githubAt(tool, GRAPHQL_URL, {
       method: "POST",
       body: { query, variables }
     });
@@ -628,7 +632,7 @@ export function repoContext(
       logFailure(tool, { stderr: detail });
       return {
         ok: false,
-        message: `${graphqlUrl} refused the query: ${detail.slice(0, 500)}`
+        message: `${GRAPHQL_URL} refused the query: ${detail.slice(0, 500)}`
       };
     }
     return { ok: true, data: body.data };
@@ -724,6 +728,10 @@ export function repoContext(
     fetchOrigin,
     pushBranch,
     origin,
+    // Keyed on the config, so one plugin instance keeps one MCP session
+    // however many times its tools are rebuilt — the reason the git queue
+    // above is keyed the same way.
+    mcp: mcpClient(config, credential, logFailure),
     github,
     githubGraphql,
     githubRepo

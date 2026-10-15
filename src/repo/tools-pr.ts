@@ -10,9 +10,20 @@ import {
 } from "./context.js";
 import type { RepoContext } from "./context.js";
 
-/** GitHub's REST surface: pull requests, issues and their comments. */
+/**
+ * Pull requests and issues: opening one over REST, reading one over the hosted
+ * MCP server. The split is not arbitrary — see `./mcp.ts` for which operations
+ * the allowlist admits and why the write stayed where it was.
+ */
+
+/** One comment on an issue or a pull request's timeline. */
+interface TimelineComment {
+  user?: { login?: string };
+  body?: string;
+}
+
 export function prTools(ctx: RepoContext): ToolSet {
-  const { bounded, github, githubRepo } = ctx;
+  const { bounded, github, mcp, githubRepo } = ctx;
 
   return {
     repo_open_pr: tool({
@@ -93,32 +104,43 @@ export function prTools(ctx: RepoContext): ToolSet {
         const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
+        const where = {
+          owner: decodeURIComponent(owner),
+          repo: decodeURIComponent(repo)
+        };
 
-        // The issues endpoint, deliberately, even for a pull request: GitHub
-        // models every PR as an issue, and this is the one that carries the
-        // discussion. `repo_pr_view` is for the parts that are only a PR's.
-        const issue = await github(
-          "repo_issue_view",
-          `/repos/${owner}/${repo}/issues/${number}`
-        );
+        // `issue_read` deliberately, even for a pull request: GitHub models
+        // every PR as an issue, and that is the view carrying the discussion.
+        // `repo_pr_view` is for the parts that are only a PR's.
+        const issue = await mcp("repo_issue_view", "issue_read", {
+          ...where,
+          issue_number: number,
+          method: "get"
+        });
         if (!issue.ok) return bounded(issue.message);
         const data = issue.data as {
           title?: string;
           state?: string;
           user?: { login?: string };
           body?: string;
-          pull_request?: unknown;
+          html_url?: string;
         };
+        // No `pull_request` key on this read, so the kind comes from the URL
+        // GitHub builds for it: a pull request's is `/pull/<n>` where an
+        // issue's is `/issues/<n>`.
+        const isPull = /\/pull\/\d+/.test(data.html_url ?? "");
 
-        const comments = await github(
-          "repo_issue_view",
-          `/repos/${owner}/${repo}/issues/${number}/comments?per_page=${GITHUB_PAGE_SIZE}`
-        );
+        const comments = await mcp("repo_issue_view", "issue_read", {
+          ...where,
+          issue_number: number,
+          method: "get_comments",
+          perPage: GITHUB_PAGE_SIZE
+        });
         // A failure here is not a failure of the tool: the issue itself was
         // read, and half an answer beats none.
         const thread = (
           comments.ok && Array.isArray(comments.data) ? comments.data : []
-        ) as { user?: { login?: string }; body?: string }[];
+        ) as TimelineComment[];
         // A full page means there is very likely another. Said out loud, because
         // this thread is what the model reasons from: comments arrive oldest
         // first, so the ones it cannot see are the most recent — the review
@@ -128,7 +150,7 @@ export function prTools(ctx: RepoContext): ToolSet {
         return bounded(
           [
             `#${number} ${data.title ?? "(no title)"} [${data.state ?? "?"}]` +
-              (data.pull_request ? " (pull request)" : ""),
+              (isPull ? " (pull request)" : ""),
             `opened by ${data.user?.login ?? "unknown"}`,
             "",
             data.body?.trim() || "(no description)",
@@ -150,7 +172,7 @@ export function prTools(ctx: RepoContext): ToolSet {
 
     repo_pr_view: tool({
       description:
-        "Read a pull request's state and the files it touches — whether it is mergeable, its review state, and which paths changed. Use this to check on a pull request you opened, or to see what an existing one does before duplicating it.",
+        "Read a pull request's state, the reviews that have landed on it, and the files it touches — whether it is mergeable, who has reviewed and with what verdict, and which paths changed. Use this to check on a pull request you opened, to see whether a review has arrived before reading its threads, or to see what an existing one does before duplicating it.",
       inputSchema: z.object({
         dir: z.string().describe("The checkout directory"),
         number: z.number().int().positive().describe("Pull request number")
@@ -159,47 +181,91 @@ export function prTools(ctx: RepoContext): ToolSet {
         const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
+        const where = {
+          owner: decodeURIComponent(owner),
+          repo: decodeURIComponent(repo),
+          pullNumber: number
+        };
 
-        const pr = await github(
-          "repo_pr_view",
-          `/repos/${owner}/${repo}/pulls/${number}`
-        );
+        const pr = await mcp("repo_pr_view", "pull_request_read", {
+          ...where,
+          method: "get"
+        });
         if (!pr.ok) return bounded(pr.message);
         const data = pr.data as {
           title?: string;
           state?: string;
           draft?: boolean;
           merged?: boolean;
-          mergeable?: boolean | null;
+          mergeable_state?: string;
           head?: { ref?: string };
           base?: { ref?: string };
           html_url?: string;
         };
 
-        const files = await github(
-          "repo_pr_view",
-          `/repos/${owner}/${repo}/pulls/${number}/files?per_page=${GITHUB_PAGE_SIZE}`
-        );
+        const files = await mcp("repo_pr_view", "pull_request_read", {
+          ...where,
+          method: "get_files",
+          perPage: GITHUB_PAGE_SIZE
+        });
         const changed = (
           files.ok && Array.isArray(files.data) ? files.data : []
         ) as { filename?: string; additions?: number; deletions?: number }[];
         const moreFiles = changed.length >= GITHUB_PAGE_SIZE;
+
+        // The reviews, because "has one landed yet" is the question an agent
+        // watching a pull request between sessions actually has, and an empty
+        // list of threads does not answer it: a review can finish having left
+        // no comments.
+        const reviews = await mcp("repo_pr_view", "pull_request_read", {
+          ...where,
+          method: "get_reviews",
+          perPage: GITHUB_PAGE_SIZE
+        });
+        const landed = (
+          reviews.ok && Array.isArray(reviews.data) ? reviews.data : []
+        ) as {
+          user?: { login?: string };
+          state?: string;
+          submitted_at?: string;
+        }[];
+        // A draft its author has not sent, visible only to whoever holds the
+        // token that wrote it. Reporting one as a review names a verdict
+        // nobody has read.
+        const submitted = landed.filter(
+          (r) => (r.state ?? "").toUpperCase() !== "PENDING"
+        );
 
         return bounded(
           [
             `#${number} ${data.title ?? "(no title)"}`,
             `${data.merged ? "merged" : (data.state ?? "?")}` +
               (data.draft ? " (draft)" : "") +
-              // `mergeable` is computed asynchronously by GitHub and is `null`
-              // until it has been, which is common on a pull request opened
-              // seconds ago — exactly when this tool is most likely to be called.
-              (data.mergeable === null
+              // GitHub computes mergeability asynchronously and reports
+              // `unknown` until it has, which is common on a pull request
+              // opened seconds ago — exactly when this tool is most likely to
+              // be called.
+              (data.mergeable_state === undefined ||
+              data.mergeable_state === "unknown"
                 ? ", mergeability not yet computed"
-                : data.mergeable === false
-                  ? ", NOT mergeable"
-                  : ""),
+                : data.mergeable_state === "clean"
+                  ? ""
+                  : `, mergeable_state ${data.mergeable_state}`),
             `${data.head?.ref ?? "?"} → ${data.base?.ref ?? "?"}`,
             data.html_url ?? "",
+            "",
+            !reviews.ok
+              ? "Reviews: (could not be read)"
+              : submitted.length === 0
+                ? "Reviews: none has landed yet."
+                : [
+                    "Reviews:",
+                    ...submitted.map(
+                      (r) =>
+                        `  ${r.user?.login ?? "unknown"} — ${(r.state ?? "?").toLowerCase()}` +
+                        `${r.submitted_at ? ` at ${r.submitted_at}` : ""}`
+                    )
+                  ].join("\n"),
             "",
             changed.length
               ? changed

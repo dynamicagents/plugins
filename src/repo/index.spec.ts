@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import type { Action, ActionContext } from "@cloudflare/think";
 import type { Tool, ToolSet } from "ai";
 import {
-  graphqlEndpoint,
+  MCP_TOOLS,
+  MCP_URL,
   repo,
   REPO_TOOL_NAMES,
   type RepoConfig,
@@ -11,6 +12,7 @@ import {
   type RepoGitResult
 } from "./index.js";
 import { testPluginContext } from "../../test/helpers.js";
+import recorded from "../../test/fixtures/github-mcp.json" with { type: "json" };
 
 /**
  * The repo plugin's two jobs, both of which are security properties rather than
@@ -194,6 +196,130 @@ const run = (set: ToolSet, name: string, input: unknown) =>
     input,
     {}
   );
+
+/**
+ * One answer the stub gives, or a function of the call's arguments when the
+ * answer depends on them — a cursor, above all.
+ */
+type McpReply =
+  | ((args: Record<string, unknown>) => unknown)
+  | Record<string, unknown>
+  | unknown[];
+
+/** One `tools/call` the plugin made, with the headers that carried it. */
+type McpCalled = {
+  name: string;
+  args: Record<string, unknown>;
+  headers: Headers;
+  url: string;
+};
+
+/**
+ * GitHub's hosted MCP server, answering by `<tool>:<method>`.
+ *
+ * Enough of streamable HTTP to hold the plugin to the protocol rather than to
+ * a convenient shape: `initialize` is required before any call and hands back a
+ * session id the later requests must carry, and an unknown tool comes back as a
+ * JSON-RPC **error** rather than a result — which is what an `X-MCP-Tools`
+ * refusal looks like from the client's side, and the one failure a reader must
+ * not render as "nothing there".
+ *
+ * `sse` answers in the other encoding the server may choose. A client that can
+ * only read JSON passes every test here and then returns nothing in
+ * production, so one case drives the server down that branch deliberately.
+ */
+function mcpStub(
+  answers: Record<string, McpReply>,
+  opts: { sse?: boolean; sessionId?: string | null; failCall?: number } = {}
+) {
+  const mcpCalls: McpCalled[] = [];
+  let calls = 0;
+  const frame = (payload: unknown, extra: Record<string, string> = {}) =>
+    new Response(
+      opts.sse
+        ? `event: message\ndata: ${JSON.stringify(payload)}\n\n`
+        : JSON.stringify(payload),
+      {
+        status: 200,
+        headers: {
+          "content-type": opts.sse ? "text/event-stream" : "application/json",
+          ...extra
+        }
+      }
+    );
+
+  const spy = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const headers = new Headers(init?.headers);
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          id?: number;
+          method?: string;
+          params?: { name?: string; arguments?: Record<string, unknown> };
+        };
+        if (body.method === "initialize") {
+          const sessionId =
+            opts.sessionId === undefined ? "session-1" : opts.sessionId;
+          return frame(
+            {
+              jsonrpc: "2.0",
+              id: body.id,
+              result: { protocolVersion: "2025-06-18", capabilities: {} }
+            },
+            sessionId ? { "mcp-session-id": sessionId } : {}
+          );
+        }
+        if (body.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        const name = body.params?.name ?? "";
+        const args = body.params?.arguments ?? {};
+        mcpCalls.push({ name, args, headers, url });
+        calls += 1;
+        // A session the server has forgotten, once, so the retry can be seen.
+        if (opts.failCall === calls)
+          return new Response("gone", { status: 404 });
+        const key = `${name}:${String(args.method ?? "")}`;
+        if (key in answers) {
+          const answer = answers[key];
+          return frame({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  // A function when the answer depends on the arguments — a
+                  // cursor, above all, which is the only way to write a paged
+                  // read as the plugin actually walks it.
+                  text: JSON.stringify(
+                    typeof answer === "function"
+                      ? (answer as (a: Record<string, unknown>) => unknown)(
+                          args
+                        )
+                      : answer
+                  )
+                }
+              ]
+            }
+          });
+        }
+        // What a tool outside `X-MCP-Tools` answers: the server never registered
+        // it, so the call fails rather than returning empty.
+        return frame({
+          jsonrpc: "2.0",
+          id: body.id,
+          error: { code: -32602, message: `tool ${name} not found` }
+        });
+      }
+    ) as ReturnType<typeof vi.spyOn>;
+  return { spy, mcpCalls };
+}
+
+/** The recorded answers, as `mcpStub` takes them. */
+const FIXTURE = recorded as unknown as Record<string, McpReply>;
 
 describe("token containment", () => {
   /**
@@ -772,89 +898,6 @@ describe("talking to GitHub", () => {
         });
       });
 
-  it("reads an issue and its thread, from the checkout's own repository", async () => {
-    const spy = api({
-      "/issues/42/comments": [
-        { user: { login: "reviewer" }, body: "needs a test" }
-      ],
-      "/issues/42": {
-        title: "Flag is ignored",
-        state: "open",
-        user: { login: "reporter" },
-        body: "The --json flag does nothing."
-      }
-    });
-    try {
-      const { exec, calls } = recorder();
-      const result = await run(tools(exec), "repo_issue_view", {
-        dir: "/w/r",
-        number: 42
-      });
-
-      expect(result).toContain("Flag is ignored");
-      expect(result).toContain("The --json flag does nothing.");
-      expect(result).toContain("reviewer");
-      expect(result).toContain("needs a test");
-      // The repository came from `remote get-url origin`, not from the model.
-      expect(calls.some((c) => c.command.includes("remote get-url"))).toBe(
-        true
-      );
-      expect(spy.mock.calls.every(([u]) => String(u).includes("/o/r/"))).toBe(
-        true
-      );
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it("still answers when only the comments fail to load", async () => {
-    const spy = api({
-      "/issues/42": { title: "Flag is ignored", state: "open", body: "x" }
-    });
-    try {
-      const result = await run(tools(recorder().exec), "repo_issue_view", {
-        dir: "/w/r",
-        number: 42
-      });
-
-      // Half an answer beats none: the issue was read, and the model is told
-      // which half is missing rather than being handed a bare failure.
-      expect(result).toContain("Flag is ignored");
-      expect(result).toContain("comments could not be read");
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it("reports a pull request whose mergeability GitHub has not computed yet", async () => {
-    const spy = api({
-      "/pulls/7/files": [{ filename: "src/a.ts", additions: 3, deletions: 1 }],
-      "/pulls/7": {
-        title: "Add flag",
-        state: "open",
-        mergeable: null,
-        head: { ref: "coder/x" },
-        base: { ref: "main" }
-      }
-    });
-    try {
-      const result = await run(tools(recorder().exec), "repo_pr_view", {
-        dir: "/w/r",
-        number: 7
-      });
-
-      // `null` is the ordinary answer seconds after opening a pull request,
-      // which is exactly when this gets called. Reported as unknown rather than
-      // collapsed into "not mergeable", which would read as a conflict.
-      expect(result).toContain("mergeability not yet computed");
-      expect(result).not.toContain("NOT mergeable");
-      expect(result).toContain("src/a.ts");
-      expect(result).toContain("coder/x → main");
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
   it("warns that a comment may exist when the API never answers", async () => {
     const spy = vi
       .spyOn(globalThis, "fetch")
@@ -997,83 +1040,207 @@ describe("talking to GitHub", () => {
     }
   });
 
-  /**
-   * A full page is very likely not the whole thread, and the model has to be told.
-   *
-   * Comments arrive oldest first, so the ones missing from page one are the most
-   * recent — the review feedback on a pull request busy enough to have overflowed,
-   * which is exactly what the agent was sent to act on. Silence here reads as "this
-   * is the discussion".
-   */
-  it("asks for a full page and says when the thread is longer", async () => {
-    const spy = api({
-      "/issues/42": { title: "T", state: "open", body: "b" },
-      "/issues/42/comments": Array.from({ length: 100 }, (_, i) => ({
-        user: { login: `u${i}` },
-        body: `c${i}`
-      }))
-    });
+  it("refuses to comment for a checkout with no allowed origin", async () => {
+    const spy = api({});
     try {
-      const { exec } = recorder();
-      const result = await run(tools(exec), "repo_issue_view", {
+      const { exec } = recorder({
+        "remote get-url origin": { stdout: "https://evil.example.com/o/r" }
+      });
+      const result = await run(tools(exec), "repo_pr_comment", {
         dir: "/w/r",
-        number: 42
+        number: 7,
+        body: "x"
       });
 
-      const asked = spy.mock.calls.map((c) => String(c[0]));
-      expect(asked.some((u) => u.includes("/comments?per_page=100"))).toBe(
-        true
+      expect(result).toMatch(/no origin on an allowed host/i);
+      // And nothing was asked of the API, so the token was never sent anywhere.
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+/**
+ * Reading GitHub through its hosted MCP server.
+ *
+ * Two properties are under test and only one of them is a feature. The
+ * transport has to speak enough of streamable HTTP that a real server answers
+ * it — `initialize` first, the session carried, either encoding read — and the
+ * credential has to stay bounded: the token goes out as `Authorization` to one
+ * host, under an allowlist the model cannot widen and a path that refuses
+ * writes.
+ */
+describe("reading GitHub over MCP", () => {
+  const readers = (answers: Record<string, McpReply> = FIXTURE) =>
+    mcpStub(answers);
+
+  it("initializes once, then carries the session on every later call", async () => {
+    const { spy, mcpCalls } = readers();
+    try {
+      const set = tools(recorder().exec);
+      await run(set, "repo_pr_view", { dir: "/w/r", number: 7 });
+      await run(set, "repo_pr_checks", { dir: "/w/r", number: 7 });
+
+      const bodies = (spy.mock.calls as [unknown, RequestInit?][]).map(
+        (call: [unknown, RequestInit?]) =>
+          (JSON.parse(String(call[1]?.body ?? "{}")) as { method?: string })
+            .method
       );
-      expect(result).toMatch(/showing the first 100 comments/i);
-      expect(result).toMatch(/newest are not among them/i);
+      // One handshake for the plugin instance, not one per read: the session
+      // is keyed on the config, and the tools are rebuilt every turn.
+      expect(
+        bodies.filter((name: string | undefined) => name === "initialize")
+      ).toHaveLength(1);
+      expect(bodies[0]).toBe("initialize");
+      expect(mcpCalls.length).toBeGreaterThan(1);
+      for (const call of mcpCalls) {
+        expect(call.headers.get("mcp-session-id")).toBe("session-1");
+        expect(call.headers.get("mcp-protocol-version")).toBe("2025-06-18");
+      }
     } finally {
       spy.mockRestore();
     }
   });
 
-  it("says nothing about pagination when the thread fits", async () => {
-    const spy = api({
-      "/issues/42": { title: "T", state: "open", body: "b" },
-      "/issues/42/comments": [{ user: { login: "u" }, body: "c" }]
-    });
+  /**
+   * The allowlist is the bound on what this token can be used for, so it rides
+   * on the request rather than being something a host configures. A read that
+   * silently went out without it would reach every tool the server offers.
+   */
+  it("sends the token and the allowlist, to the read-only endpoint", async () => {
+    const { spy, mcpCalls } = readers();
     try {
-      const { exec } = recorder();
-      const result = await run(tools(exec), "repo_issue_view", {
-        dir: "/w/r",
-        number: 42
-      });
-      expect(result).not.toMatch(/showing the first/i);
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it("reports a pull request whose file list was cut", async () => {
-    const spy = api({
-      "/pulls/7": { title: "T", state: "open", head: {}, base: {} },
-      "/pulls/7/files": Array.from({ length: 100 }, (_, i) => ({
-        filename: `src/f${i}.ts`,
-        additions: 1,
-        deletions: 0
-      }))
-    });
-    try {
-      const { exec } = recorder();
-      const result = await run(tools(exec), "repo_pr_view", {
+      await run(tools(recorder().exec), "repo_pr_view", {
         dir: "/w/r",
         number: 7
       });
 
-      const asked = spy.mock.calls.map((c) => String(c[0]));
-      expect(asked.some((u) => u.includes("/files?per_page=100"))).toBe(true);
-      expect(result).toMatch(/showing the first 100 files/i);
+      const call = mcpCalls[0]!;
+      expect(call.url).toBe(MCP_URL);
+      expect(MCP_URL).toMatch(/\/readonly$/);
+      expect(call.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+      expect(call.headers.get("x-mcp-tools")).toBe(
+        "pull_request_read,issue_read"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  /**
+   * The list, asserted as a list rather than as prose.
+   *
+   * Everything excluded here is excluded for a reason that is not obvious from
+   * the name: `pull_request_review_write` resolves a review thread *and*
+   * submits a review, `APPROVE` included, so taking thread resolution would
+   * mean taking self-approval. A name arriving in this array is a policy
+   * change, and this is where it has to be argued for.
+   */
+  it("allows two read tools and nothing that writes", () => {
+    expect([...MCP_TOOLS]).toEqual(["pull_request_read", "issue_read"]);
+    for (const forbidden of [
+      "merge_pull_request",
+      "add_issue_comment",
+      "add_reply_to_pull_request_comment",
+      "add_comment_to_pending_review",
+      "pull_request_review_write",
+      "create_pull_request",
+      "update_pull_request",
+      "issue_write",
+      "request_copilot_review"
+    ]) {
+      expect(MCP_TOOLS as readonly string[]).not.toContain(forbidden);
+    }
+  });
+
+  /**
+   * What a tool outside the allowlist answers, and why it cannot be quiet.
+   *
+   * The server never registered it, so the call comes back as a JSON-RPC error
+   * rather than an empty result. Rendered as "nothing there" it would read to a
+   * polling agent as a clean pull request.
+   */
+  it("reports a refused tool as a failure rather than as an empty answer", async () => {
+    const { spy } = readers({});
+    try {
+      const result = await run(tools(recorder().exec), "repo_pr_view", {
+        dir: "/w/r",
+        number: 7
+      });
+      expect(result).toMatch(/refused pull_request_read/);
+      expect(result).toMatch(/not found/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("reads an answer the server streamed instead of returning as JSON", async () => {
+    const { spy } = mcpStub(FIXTURE, { sse: true });
+    try {
+      const result = await run(tools(recorder().exec), "repo_pr_view", {
+        dir: "/w/r",
+        number: 7
+      });
+      expect(result).toContain("Add flag");
+      expect(result).toContain("src/a.ts");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("works against a server that keeps no session", async () => {
+    const { spy, mcpCalls } = mcpStub(FIXTURE, { sessionId: null });
+    try {
+      const result = await run(tools(recorder().exec), "repo_pr_view", {
+        dir: "/w/r",
+        number: 7
+      });
+      expect(result).toContain("Add flag");
+      expect(mcpCalls[0]!.headers.get("mcp-session-id")).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  /**
+   * A session the server forgot. Reads are repeatable, so this renegotiates and
+   * asks again rather than handing the model a failure it can do nothing with.
+   */
+  it("renegotiates once when the session has expired", async () => {
+    const { spy, mcpCalls } = mcpStub(FIXTURE, { failCall: 1 });
+    try {
+      const result = await run(tools(recorder().exec), "repo_pr_view", {
+        dir: "/w/r",
+        number: 7
+      });
+      expect(result).toContain("Add flag");
+      expect(mcpCalls.filter((c) => c.args.method === "get")).toHaveLength(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("names the repository from the checkout's origin, never from the model", async () => {
+    const { spy, mcpCalls } = readers();
+    try {
+      const { exec, calls } = recorder();
+      await run(tools(exec), "repo_issue_view", { dir: "/w/r", number: 42 });
+
+      expect(calls.some((c) => c.command.includes("remote get-url"))).toBe(
+        true
+      );
+      for (const call of mcpCalls) {
+        expect(call.args.owner).toBe("o");
+        expect(call.args.repo).toBe("r");
+      }
     } finally {
       spy.mockRestore();
     }
   });
 
   it("refuses to read anything for a checkout with no allowed origin", async () => {
-    const spy = api({});
+    const { spy, mcpCalls } = readers();
     try {
       const { exec } = recorder({
         "remote get-url origin": { stdout: "https://evil.example.com/o/r" }
@@ -1084,11 +1251,268 @@ describe("talking to GitHub", () => {
       });
 
       expect(result).toMatch(/no origin on an allowed host/i);
-      // And nothing was asked of the API, so the token was never sent anywhere.
+      // Not one request, so the token never left the Worker.
+      expect(mcpCalls).toHaveLength(0);
       expect(spy).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }
+  });
+
+  describe("an issue", () => {
+    it("reads it with its thread", async () => {
+      const { spy } = readers();
+      try {
+        const result = await run(tools(recorder().exec), "repo_issue_view", {
+          dir: "/w/r",
+          number: 42
+        });
+
+        expect(result).toContain("Flag is ignored");
+        expect(result).toContain("The --json flag does nothing.");
+        expect(result).toContain("reviewer");
+        expect(result).toContain("needs a test");
+        expect(result).not.toContain("(pull request)");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    /**
+     * This read carries no `pull_request` key, so the kind is derived from the
+     * URL. Worth a test of its own: a pull request read as an issue and not
+     * marked as one is the same answer for two different things.
+     */
+    it("says when the number was a pull request", async () => {
+      const { spy } = readers({
+        ...FIXTURE,
+        "issue_read:get": {
+          ...(FIXTURE["issue_read:get"] as object),
+          html_url: "https://github.com/o/r/pull/42"
+        }
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_issue_view", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("(pull request)");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("still answers when only the comments fail to load", async () => {
+      const { spy } = readers({
+        "issue_read:get": FIXTURE["issue_read:get"]
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_issue_view", {
+          dir: "/w/r",
+          number: 42
+        });
+
+        // Half an answer beats none: the issue was read, and the model is told
+        // which half is missing rather than being handed a bare failure.
+        expect(result).toContain("Flag is ignored");
+        expect(result).toContain("comments could not be read");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    /**
+     * A full page is very likely not the whole thread, and the model has to be
+     * told. Comments arrive oldest first, so the ones missing from page one are
+     * the most recent — the review feedback on a pull request busy enough to
+     * have overflowed, which is exactly what the agent was sent to act on.
+     */
+    it("asks for a full page and says when the thread is longer", async () => {
+      const { spy, mcpCalls } = readers({
+        ...FIXTURE,
+        "issue_read:get_comments": Array.from({ length: 100 }, (_, i) => ({
+          user: { login: `u${i}` },
+          body: `c${i}`
+        }))
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_issue_view", {
+          dir: "/w/r",
+          number: 42
+        });
+
+        expect(
+          mcpCalls.find((c) => c.args.method === "get_comments")!.args.perPage
+        ).toBe(100);
+        expect(result).toMatch(/showing the first 100 comments/i);
+        expect(result).toMatch(/newest are not among them/i);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("says nothing about pagination when the thread fits", async () => {
+      const { spy } = readers();
+      try {
+        const result = await run(tools(recorder().exec), "repo_issue_view", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).not.toMatch(/showing the first/i);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  describe("a pull request", () => {
+    it("reads its state, its reviews and the files it touches", async () => {
+      const { spy } = readers();
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+
+        expect(result).toContain("Add flag");
+        expect(result).toContain("coder/x → main");
+        expect(result).toContain("src/a.ts");
+        expect(result).toContain("copilot-pull-request-reviewer[bot]");
+        expect(result).toContain("commented");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    /**
+     * `unknown` is the ordinary answer seconds after opening a pull request,
+     * which is exactly when this gets called. Reported as unknown rather than
+     * collapsed into "not mergeable", which would read as a conflict.
+     */
+    it("reports mergeability GitHub has not computed yet", async () => {
+      const { spy } = readers({
+        ...FIXTURE,
+        "pull_request_read:get": {
+          ...(FIXTURE["pull_request_read:get"] as object),
+          mergeable_state: "unknown"
+        }
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+        expect(result).toContain("mergeability not yet computed");
+        expect(result).not.toMatch(/mergeable_state unknown/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("names a mergeable state that is neither clean nor unknown", async () => {
+      const { spy } = readers({
+        ...FIXTURE,
+        "pull_request_read:get": {
+          ...(FIXTURE["pull_request_read:get"] as object),
+          mergeable_state: "dirty"
+        }
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+        expect(result).toContain("mergeable_state dirty");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    /**
+     * The question an agent waiting between sessions actually has. An empty
+     * list of threads does not answer it: a review can finish having left no
+     * comments, so "no threads" and "no review" have to be distinguishable.
+     */
+    it("says plainly when no review has landed", async () => {
+      const { spy } = readers({
+        ...FIXTURE,
+        "pull_request_read:get_reviews": []
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+        expect(result).toContain("none has landed yet");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    /**
+     * A draft review its author has not sent is visible to whoever holds the
+     * token that wrote it. Counting one as landed names a verdict nobody has
+     * read, which is the answer a waiting agent acts on by stopping.
+     */
+    it("does not count a review still pending as one that landed", async () => {
+      const { spy } = readers({
+        ...FIXTURE,
+        "pull_request_read:get_reviews": [
+          { user: { login: "da-coder" }, state: "PENDING" }
+        ]
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+        expect(result).toContain("none has landed yet");
+        expect(result).not.toContain("da-coder");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("says so when the reviews could not be read at all", async () => {
+      const { spy } = readers({
+        "pull_request_read:get": FIXTURE["pull_request_read:get"],
+        "pull_request_read:get_files": FIXTURE["pull_request_read:get_files"]
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+        // Never "none has landed yet", which is a fact this call did not learn.
+        expect(result).toContain("Reviews: (could not be read)");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("reports a file list that was cut", async () => {
+      const { spy, mcpCalls } = readers({
+        ...FIXTURE,
+        "pull_request_read:get_files": Array.from({ length: 100 }, (_, i) => ({
+          filename: `src/f${i}.ts`,
+          additions: 1,
+          deletions: 0
+        }))
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+
+        expect(
+          mcpCalls.find((c) => c.args.method === "get_files")!.args.perPage
+        ).toBe(100);
+        expect(result).toMatch(/showing the first 100 files/i);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });
 
@@ -1121,7 +1545,9 @@ describe("what the credential can reach", () => {
     expect(gitCalls).toHaveLength(0);
   });
 
-  it("allows a configured Enterprise host", async () => {
+  // Cloning is generic git and works against any host the deployment names.
+  // That is independent of the GitHub tools, which read github.com alone.
+  it("allows a configured host other than github.com", async () => {
     const { exec } = recorder();
     const { git, gitCalls } = gitRecorder();
     const result = await run(
@@ -1798,23 +2224,23 @@ describe("what a person approves before it runs", () => {
     }
   });
 });
-
 /**
  * Reading a review and answering it.
  *
- * Review threads are the one thing here that REST cannot serve — `isResolved` is
- * not exposed and resolving has no endpoint at all — so these three tools are
- * GraphQL while everything else in this file is REST. That brings its own hazard,
- * pinned below: a failed GraphQL query answers `200`.
+ * Reading goes through the hosted MCP server, which is where `is_resolved` and
+ * a thread's id come from — neither is on REST at all. **Answering one does
+ * not**, and that split is deliberate rather than incidental: the only MCP tool
+ * that resolves a thread also submits reviews, `APPROVE` among them, so this
+ * plugin keeps its own two mutations rather than take that grant. See
+ * `./mcp.ts`.
  */
 describe("a review, and answering it", () => {
   /**
-   * GitHub, answering REST by path suffix and GraphQL by what the query says.
+   * GitHub's GraphQL, for the mutations that are still this plugin's own.
    *
-   * GraphQL cannot be keyed on the path — every operation posts to `/graphql` —
-   * so `graphql` is handed the query text and returns the whole envelope,
-   * `errors` included, which is what lets the 200-with-errors case be written at
-   * all.
+   * It cannot be keyed on the path — every operation posts to `/graphql` — so
+   * `graphql` is handed the query text and returns the whole envelope, `errors`
+   * included, which is what lets the 200-with-errors case be written at all.
    */
   const githubStub = (opts: {
     rest?: Record<string, unknown>;
@@ -1844,267 +2270,40 @@ describe("a review, and answering it", () => {
         }
       );
 
-  const comment = (login: string, body: string) => ({
-    author: { login },
-    body
-  });
-
-  /** A thread whose conversation fits, so both selections are the same comments. */
-  const thread = (over: Record<string, unknown> = {}) => ({
-    id: "PRRT_1",
-    isResolved: false,
-    isOutdated: false,
+  /** One comment, as the MCP read returns it: the author is a bare login. */
+  const comment = (author: string, body: string, over = {}) => ({
+    author,
+    body,
     path: "src/config.ts",
     line: 109,
-    opening: { nodes: [comment("Copilot", "validate this")] },
-    latest: { totalCount: 1, nodes: [comment("Copilot", "validate this")] },
     ...over
   });
 
-  const threadsPage = (nodes: unknown[], next?: string) => ({
-    data: {
-      repository: {
-        pullRequest: {
-          reviewThreads: {
-            pageInfo: { hasNextPage: Boolean(next), endCursor: next ?? null },
-            nodes
-          }
-        }
-      }
-    }
+  /** A thread whose conversation came back whole, which is the usual case. */
+  const thread = (over: Record<string, unknown> = {}) => ({
+    id: "PRRT_1",
+    is_resolved: false,
+    is_outdated: false,
+    comments: [comment("copilot-pull-request-reviewer", "validate this")],
+    total_count: 1,
+    ...over
   });
 
-  describe("repo_pr_review_status", () => {
-    /**
-     * The review requests as GraphQL returns them, which is the only place a
-     * requested *app* appears — REST's `requested_reviewers` has `users` and
-     * `teams` and nowhere to put a Bot.
-     */
-    const reviewRequests = (...names: string[]) => ({
-      data: {
-        repository: {
-          pullRequest: {
-            reviewRequests: {
-              nodes: names.map((name) => ({
-                requestedReviewer: { login: name }
-              }))
-            }
-          }
-        }
-      }
-    });
+  /** One page of threads, as `get_review_comments` returns it. */
+  const page = (review_threads: unknown[], next?: string) => ({
+    review_threads,
+    total_count: review_threads.length,
+    page_info: { has_next_page: Boolean(next), end_cursor: next ?? null }
+  });
 
-    const status =
-      (opts: Parameters<typeof githubStub>[0]) => async (reviewer?: string) => {
-        const spy = githubStub(opts);
-        try {
-          return await run(tools(recorder().exec), "repo_pr_review_status", {
-            dir: "/w/r",
-            number: 42,
-            ...(reviewer ? { reviewer } : {})
-          });
-        } finally {
-          spy.mockRestore();
-        }
-      };
-
-    it("reports a review still running", async () => {
-      // Under the login the request carries: a Bot, which is why this cannot be
-      // asked of REST at all.
-      const result = await status({
-        graphql: () => reviewRequests("copilot-pull-request-reviewer")
-      })();
-      expect(result).toContain("has not finished");
-      expect(result).not.toContain("waiting will not change it");
-    });
-
-    it("reports a review that finished", async () => {
-      const result = await status({
-        graphql: () => reviewRequests(),
-        rest: {
-          "/pulls/42/reviews": [
-            {
-              // The spelling `pulls/{n}/reviews` returns — not the
-              // `copilot-pull-request-reviewer` of the request, nor the
-              // `Copilot` the caller asks about.
-              user: { login: "copilot-pull-request-reviewer[bot]" },
-              state: "COMMENTED",
-              submitted_at: "2026-09-17T10:00:00Z"
-            }
-          ]
-        }
-      })();
-      expect(result).toContain("reviewed");
-      expect(result).toContain("2026-09-17T10:00:00Z");
-      // A review can finish having left nothing, so "finished" is never the
-      // same answer as "had something to say".
-      expect(result).toContain("repo_pr_threads");
-    });
-
-    it("answers the same for every login one account arrives under", async () => {
-      // The whole defect this guards is an *inverted* answer, not a missed one:
-      // compared exactly, the request matches and the review never does, so the
-      // tool reports "none pending — waiting will not change it" at precisely
-      // the moment the review lands. That is where a polling caller stops.
-      for (const login of [
-        "Copilot",
-        "copilot-pull-request-reviewer",
-        "copilot-pull-request-reviewer[bot]"
-      ]) {
-        const result = await status({
-          graphql: () => reviewRequests(),
-          rest: {
-            "/pulls/42/reviews": [
-              {
-                user: { login },
-                state: "COMMENTED",
-                submitted_at: "2026-09-17T10:00:00Z"
-              }
-            ]
-          }
-        })();
-        expect(result, login).toContain("reviewed");
-        expect(result, login).not.toContain("waiting will not change it");
-      }
-    });
-
-    it("does not take another account that shares the first word", async () => {
-      // `copilot-swe-agent` opens pull requests rather than reviewing them, and
-      // `copilotfan` is a person. Neither is the review bot, so a `copilot-`
-      // prefix would answer a question about the reviewer with somebody else.
-      for (const login of ["copilot-swe-agent[bot]", "copilotfan"]) {
-        const result = await status({
-          graphql: () => reviewRequests(),
-          rest: {
-            "/pulls/42/reviews": [{ user: { login }, state: "COMMENTED" }]
-          }
-        })();
-        expect(result, login).toContain("waiting will not change it");
-      }
-    });
-
-    it("strips the `[bot]` suffix for an app that is not the reviewer", async () => {
-      // The normalisation is advertised for any app, and the Copilot fixtures
-      // cannot prove it: they would pass through the alternation above even if
-      // stripping stopped working for everybody else.
-      const result = await status({
-        graphql: () => reviewRequests(),
-        rest: {
-          "/pulls/42/reviews": [
-            {
-              user: { login: "dependabot[bot]" },
-              state: "COMMENTED",
-              submitted_at: "2026-09-17T10:00:00Z"
-            }
-          ]
-        }
-      })("dependabot");
-      expect(result).toContain("reviewed");
-      expect(result).not.toContain("waiting will not change it");
-    });
-
-    it("still finds a reviewer asked for by team", async () => {
-      // A team has no login, only a slug — the union's third arm, and the reason
-      // the request is read as login-or-slug rather than login alone.
-      const asked = status({
-        graphql: () => ({
-          data: {
-            repository: {
-              pullRequest: {
-                reviewRequests: {
-                  nodes: [{ requestedReviewer: { slug: "platform" } }]
-                }
-              }
-            }
-          }
-        }),
-        rest: { "/pulls/42/reviews": [] }
-      });
-      expect(await asked("platform")).toContain("has not finished");
-      // And the team is not everybody: the default reviewer is still waiting on
-      // nothing.
-      expect(await asked()).toContain("waiting will not change it");
-    });
-
-    it("lets a pending request outrank a review already on the pull request", async () => {
-      // The ordering that makes a *re-review* read correctly. GitHub clears the
-      // request when a review lands and writes a new one when another is asked
-      // for, so both present means the old review is not the answer.
-      const result = await status({
-        graphql: () => reviewRequests("copilot-pull-request-reviewer"),
-        rest: {
-          "/pulls/42/reviews": [
-            {
-              user: { login: "copilot-pull-request-reviewer[bot]" },
-              state: "COMMENTED"
-            }
-          ]
-        }
-      })();
-      expect(result).toContain("has not finished");
-    });
-
-    it("does not count a draft review as finished", async () => {
-      // A PENDING review is one its author has not sent, and it is visible to
-      // whoever holds the token that wrote it. Counted as finished, it reports a
-      // review nobody has read — which a poll loop acts on by stopping.
-      const result = await status({
-        graphql: () => reviewRequests(),
-        rest: {
-          "/pulls/42/reviews": [
-            {
-              user: { login: "copilot-pull-request-reviewer[bot]" },
-              state: "PENDING"
-            }
-          ]
-        }
-      })();
-      expect(result).not.toContain("reviewed");
-    });
-
-    it("says it does not know when the reviews it read were only the oldest", async () => {
-      // The endpoint pages oldest-first, so a match past the first page is
-      // *newer* than everything read — which is exactly the review being waited
-      // for. A truncated read cannot answer, and must not answer "waiting will
-      // not help": that is the one reply a caller ends its polling on.
-      const result = await status({
-        graphql: () => reviewRequests(),
-        rest: {
-          "/pulls/42/reviews": Array.from({ length: 100 }, () => ({
-            user: { login: "someone-else" },
-            state: "COMMENTED"
-          }))
-        }
-      })();
-      expect(result).toContain("unknown");
-      expect(result).not.toContain("waiting will not change it");
-    });
-
-    it("says waiting will not help when nobody was asked", async () => {
-      const result = await status({
-        graphql: () => reviewRequests(),
-        rest: { "/pulls/42/reviews": [] }
-      })();
-      // The one answer a poll loop must not read as "not yet".
-      expect(result).toContain("waiting will not change it");
-    });
-
-    it("does not read an unanswerable query as nobody having been asked", async () => {
-      // A GraphQL failure answers 200 with `errors`, so an unguarded read turns
-      // a permission problem into "nobody was ever asked" — the terminal reply.
-      const result = await status({
-        graphql: () => ({ errors: [{ message: "Resource not accessible" }] })
-      })();
-      expect(result).not.toContain("waiting will not change it");
-      expect(result).toContain("Resource not accessible");
-    });
+  /** That page, keyed as the only answer a thread read needs. */
+  const threadsPage = (review_threads: unknown[], next?: string) => ({
+    "pull_request_read:get_review_comments": page(review_threads, next)
   });
 
   describe("repo_pr_threads", () => {
     it("reads unresolved threads, with the id needed to answer one", async () => {
-      const spy = githubStub({
-        graphql: () => threadsPage([thread()])
-      });
+      const { spy } = mcpStub(threadsPage([thread()]));
       try {
         const result = await run(tools(recorder().exec), "repo_pr_threads", {
           dir: "/w/r",
@@ -2119,8 +2318,9 @@ describe("a review, and answering it", () => {
     });
 
     it("leaves resolved threads out unless asked for them", async () => {
-      const nodes = [thread(), thread({ id: "PRRT_2", isResolved: true })];
-      const spy = githubStub({ graphql: () => threadsPage(nodes) });
+      const { spy } = mcpStub(
+        threadsPage([thread(), thread({ id: "PRRT_2", is_resolved: true })])
+      );
       try {
         const set = tools(recorder().exec);
         const open = await run(set, "repo_pr_threads", {
@@ -2140,23 +2340,20 @@ describe("a review, and answering it", () => {
       }
     });
 
-    it("reports a refused query as a failure, not as an empty review", async () => {
-      // The hazard the GraphQL wrapper exists for. A failed query answers 200
-      // with the errors in the body, so a caller reading `data` straight through
-      // reports a permission failure as "no threads" — and an agent told a review
-      // is clean stops looking.
-      const spy = githubStub({
-        graphql: () => ({
-          data: null,
-          errors: [{ message: "Resource not accessible by integration" }]
-        })
-      });
+    /**
+     * A refusal must never render as a clean review. The reason outlived the
+     * move off GraphQL: a tool outside `X-MCP-Tools`, a token without access,
+     * or a pull request that is not there all come back as a failure, and an
+     * agent told a review is clean stops looking.
+     */
+    it("reports a refused read as a failure, not as an empty review", async () => {
+      const { spy } = mcpStub({});
       try {
         const result = await run(tools(recorder().exec), "repo_pr_threads", {
           dir: "/w/r",
           number: 42
         });
-        expect(result).toContain("Resource not accessible");
+        expect(result).toContain("refused pull_request_read");
         expect(result).not.toContain("no unresolved review threads");
       } finally {
         spy.mockRestore();
@@ -2167,10 +2364,9 @@ describe("a review, and answering it", () => {
       // The false-clean result paging exists to prevent, at the exit most likely
       // to skip the warning: a run that stopped early and found nothing open in
       // what it read. The unread pages are where the newest threads are.
-      const spy = githubStub({
-        graphql: () =>
-          threadsPage([thread({ isResolved: true })], "always-more")
-      });
+      const { spy } = mcpStub(
+        threadsPage([thread({ is_resolved: true })], "always-more")
+      );
       try {
         const result = await run(tools(recorder().exec), "repo_pr_threads", {
           dir: "/w/r",
@@ -2182,22 +2378,24 @@ describe("a review, and answering it", () => {
       }
     });
 
-    it("shows both ends of a thread that grew past the window", async () => {
+    it("shows both ends of a thread longer than the window", async () => {
       // The reviewer's point is at the top and a reply this plugin sent is at
       // the bottom, so neither end can be the one dropped — and what is missing
       // is named rather than silently absent.
-      const spy = githubStub({
-        graphql: () =>
-          threadsPage([
-            thread({
-              opening: { nodes: [comment("Copilot", "the original point")] },
-              latest: {
-                totalCount: 9,
-                nodes: [comment("agent", "fixed in abc123")]
-              }
-            })
-          ])
-      });
+      const { spy } = mcpStub(
+        threadsPage([
+          thread({
+            comments: [
+              comment("copilot-pull-request-reviewer", "the original point"),
+              ...Array.from({ length: 7 }, (_, i) =>
+                comment("agent", `middle ${i}`)
+              ),
+              comment("agent", "fixed in abc123")
+            ],
+            total_count: 9
+          })
+        ])
+      );
       try {
         const result = await run(tools(recorder().exec), "repo_pr_threads", {
           dir: "/w/r",
@@ -2205,18 +2403,90 @@ describe("a review, and answering it", () => {
         });
         expect(result).toContain("the original point");
         expect(result).toContain("fixed in abc123");
-        expect(result).toContain("7 earlier replies not shown");
+        expect(result).toContain("3 earlier replies not shown");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    /**
+     * The read asks for a hundred comments a thread and a thread can hold more.
+     * Said out loud, because the conversation this render drops is one the
+     * model would otherwise reason as absent.
+     */
+    it("says when the read itself did not reach every comment", async () => {
+      const { spy } = mcpStub(
+        threadsPage([
+          thread({
+            comments: [comment("copilot-pull-request-reviewer", "a point")],
+            total_count: 40
+          })
+        ])
+      );
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("39 comments were not read");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    /** A thread whose comments did not come back has no file to name. */
+    it("renders a thread with no comments rather than inventing a location", async () => {
+      const { spy } = mcpStub(
+        threadsPage([thread({ comments: [], total_count: 0 })])
+      );
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("(no file)");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("falls back to the original line when the current one is gone", async () => {
+      // An outdated comment carries no current coordinates, which is exactly
+      // the thread a reviser still has to find in the file.
+      const { spy } = mcpStub(
+        threadsPage([
+          thread({
+            is_outdated: true,
+            comments: [
+              comment("copilot-pull-request-reviewer", "stale point", {
+                line: null,
+                original_line: 42
+              })
+            ]
+          })
+        ])
+      );
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_threads", {
+          dir: "/w/r",
+          number: 42
+        });
+        expect(result).toContain("src/config.ts:42");
+        expect(result).toContain("[outdated]");
       } finally {
         spy.mockRestore();
       }
     });
 
     it("walks every page, because the newest threads are on the last one", async () => {
-      const spy = githubStub({
-        graphql: (_query, variables) =>
-          variables.after
-            ? threadsPage([thread({ id: "PRRT_LAST", path: "src/late.ts" })])
-            : threadsPage([thread()], "cursor-1")
+      // Answered by cursor, the way the plugin actually walks it: the first
+      // page says there is more, and the second carries the thread a
+      // single-page read would have reported as absent.
+      const { spy, mcpCalls } = mcpStub({
+        "pull_request_read:get_review_comments": (args) =>
+          args.after
+            ? page([thread({ id: "PRRT_LAST" })])
+            : page([thread()], "cursor-1")
       });
       try {
         const result = await run(tools(recorder().exec), "repo_pr_threads", {
@@ -2224,6 +2494,10 @@ describe("a review, and answering it", () => {
           number: 42
         });
         expect(result).toContain("PRRT_LAST");
+        expect(mcpCalls.map((c) => c.args.after)).toEqual([
+          undefined,
+          "cursor-1"
+        ]);
       } finally {
         spy.mockRestore();
       }
@@ -2533,30 +2807,6 @@ describe("a review, and answering it", () => {
 });
 
 /**
- * The two places a GitHub Enterprise host, rather than github.com, changes the
- * answer.
- *
- * Both are invisible on the public API, which is what every other spec here runs
- * against — so nothing but a case named after Enterprise catches either.
- */
-describe("GitHub Enterprise", () => {
-  it("puts GraphQL beside the REST base, not underneath it", () => {
-    // `/api/v3/graphql` is a 404 on every Enterprise install and a URL nothing
-    // here would ever request on github.com, so the mistake survives every test
-    // written against the public API.
-    expect(graphqlEndpoint("https://ghe.example.com/api/v3")).toBe(
-      "https://ghe.example.com/api/graphql"
-    );
-    expect(graphqlEndpoint("https://ghe.example.com/api/v3/")).toBe(
-      "https://ghe.example.com/api/graphql"
-    );
-    expect(graphqlEndpoint("https://api.github.com")).toBe(
-      "https://api.github.com/graphql"
-    );
-  });
-});
-
-/**
  * Reviewing a ref instead of the working tree.
  *
  * The case this exists for is work that arrived on a branch rather than in the
@@ -2848,19 +3098,14 @@ describe("a host that keeps worktrees", () => {
 describe("a pull request's checks", () => {
   const SHA = "abc1234def5678";
 
-  /** GitHub by REST path suffix; anything unlisted is a 404. */
-  const checks = async (rest: Record<string, unknown>) => {
-    const spy = vi
-      .spyOn(globalThis, "fetch")
-      .mockImplementation(async (input: RequestInfo | URL) => {
-        const path = new URL(String(input)).pathname;
-        const hit = Object.entries(rest).find(([suffix]) =>
-          path.endsWith(suffix)
-        )?.[1];
-        return new Response(JSON.stringify(hit ?? {}), {
-          status: hit === undefined ? 404 : 200
-        });
-      });
+  /**
+   * The two CI reads, keyed by method. The head commit is not looked up: each
+   * method resolves it from the pull request, and the combined status reports
+   * the sha it answered for — which is where the short sha in the render now
+   * comes from.
+   */
+  const checks = async (answers: Record<string, McpReply>) => {
+    const { spy } = mcpStub(answers);
     try {
       return await run(tools(recorder().exec), "repo_pr_checks", {
         dir: "/w/r",
@@ -2871,12 +3116,16 @@ describe("a pull request's checks", () => {
     }
   };
 
-  const pr = { "/pulls/42": { head: { sha: SHA } } };
+  const runs = (value: McpReply) => ({
+    "pull_request_read:get_check_runs": value
+  });
+  const statuses = (value: Record<string, unknown>) => ({
+    "pull_request_read:get_status": { sha: SHA, ...value }
+  });
 
   it("names what failed and what is still running, from both CI APIs", async () => {
     const result = await checks({
-      ...pr,
-      [`/commits/${SHA}/check-runs`]: {
+      ...runs({
         total_count: 3,
         check_runs: [
           { name: "lint", status: "completed", conclusion: "success" },
@@ -2888,10 +3137,10 @@ describe("a pull request's checks", () => {
           },
           { name: "build", status: "in_progress", conclusion: null }
         ]
-      },
-      [`/commits/${SHA}/status`]: {
+      }),
+      ...statuses({
         statuses: [{ context: "deploy/preview", state: "error" }]
-      }
+      })
     });
 
     expect(result).toContain(
@@ -2905,15 +3154,14 @@ describe("a pull request's checks", () => {
 
   it("says when every check has passed", async () => {
     const result = await checks({
-      ...pr,
-      [`/commits/${SHA}/check-runs`]: {
+      ...runs({
         total_count: 2,
         check_runs: [
           { name: "lint", status: "completed", conclusion: "success" },
           { name: "docs", status: "completed", conclusion: "skipped" }
         ]
-      },
-      [`/commits/${SHA}/status`]: { statuses: [] }
+      }),
+      ...statuses({ statuses: [] })
     });
 
     expect(result).toContain("0 failed, 0 still running, 2 passed.");
@@ -2922,12 +3170,11 @@ describe("a pull request's checks", () => {
 
   it("does not call a truncated read all passed", async () => {
     const result = await checks({
-      ...pr,
-      [`/commits/${SHA}/check-runs`]: {
+      ...runs({
         total_count: 250,
         check_runs: [{ name: "a", status: "completed", conclusion: "success" }]
-      },
-      [`/commits/${SHA}/status`]: { statuses: [] }
+      }),
+      ...statuses({ statuses: [] })
     });
 
     expect(result).toContain("Only the first 100 of 250 check runs were read.");
@@ -2936,12 +3183,11 @@ describe("a pull request's checks", () => {
 
   it("does not call a truncated read of commit statuses all passed", async () => {
     const result = await checks({
-      ...pr,
-      [`/commits/${SHA}/check-runs`]: { total_count: 0, check_runs: [] },
-      [`/commits/${SHA}/status`]: {
+      ...runs({ total_count: 0, check_runs: [] }),
+      ...statuses({
         total_count: 140,
         statuses: [{ context: "ci/a", state: "success" }]
-      }
+      })
     });
 
     expect(result).toContain(
@@ -2952,14 +3198,35 @@ describe("a pull request's checks", () => {
 
   it("says when nothing has reported yet", async () => {
     const result = await checks({
-      ...pr,
-      [`/commits/${SHA}/check-runs`]: { total_count: 0, check_runs: [] },
-      [`/commits/${SHA}/status`]: { statuses: [] }
+      ...runs({ total_count: 0, check_runs: [] }),
+      ...statuses({ statuses: [] })
     });
 
     expect(result).toContain(
       "No checks have reported on #42's latest commit (abc1234)."
     );
+  });
+
+  /**
+   * Without a sha there is no commit to report on, and the render would
+   * otherwise print `(undefined)` as though it had read one.
+   */
+  it("refuses a number the combined status could not resolve", async () => {
+    const result = await checks({
+      ...runs({ total_count: 0, check_runs: [] }),
+      "pull_request_read:get_status": { statuses: [] }
+    });
+
+    expect(result).toContain("is not a pull request in o/r");
+  });
+
+  it("reads the recorded shapes the server answers with", async () => {
+    const result = await checks(FIXTURE);
+    // Both APIs, from one recorded answer each: a failed check run, a pending
+    // one, and a passing legacy commit status.
+    expect(result).toContain("1 failed, 1 still running, 1 passed");
+    expect(result).toContain("- Test (failure)");
+    expect(result).toContain("Still running:\n- Lint");
   });
 });
 
@@ -3003,7 +3270,6 @@ describe("choosing the tools", () => {
     const chosen = [
       "repo_clone",
       "repo_pr_view",
-      "repo_pr_review_status",
       "repo_pr_threads",
       "repo_pr_checks",
       "repo_worktrees"
@@ -3045,12 +3311,7 @@ describe("an origin the host reads", () => {
    */
   it("resolves the GitHub tools' repository without the container", async () => {
     const { exec, calls } = recorder();
-    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(
-      async () =>
-        new Response(JSON.stringify({ title: "t", state: "open" }), {
-          status: 200
-        })
-    );
+    const { spy, mcpCalls } = mcpStub(FIXTURE);
     try {
       const result = await run(
         tools(exec, {
@@ -3062,8 +3323,12 @@ describe("an origin the host reads", () => {
         "repo_pr_view",
         { dir: "/w/r", number: 7 }
       );
-      expect(result).toContain("#7 t");
-      expect(String(spy.mock.calls[0]![0])).toContain("/repos/o/r/pulls/7");
+      expect(result).toContain("#7 Add flag");
+      expect(mcpCalls[0]!.args).toMatchObject({
+        owner: "o",
+        repo: "r",
+        pullNumber: 7
+      });
     } finally {
       spy.mockRestore();
     }

@@ -17,7 +17,14 @@ import { worktreesTools } from "./tools-worktrees.js";
  */
 export { parseRepo } from "./url.js";
 
-export { graphqlEndpoint, truncateOutput } from "./context.js";
+export { truncateOutput } from "./context.js";
+
+/**
+ * The hosted MCP server this plugin reads GitHub through, and the allowlist it
+ * is held to. Exported so a deployment can state in its own docs what the
+ * token is able to reach, and so a spec can assert the list has not grown.
+ */
+export { MCP_URL, MCP_TOOLS } from "./mcp.js";
 
 /**
  * `@dynamicagents/plugins/repo` — clone, commit, push, open a pull request.
@@ -198,16 +205,17 @@ export interface RepoConfig {
   token: () => string;
   /** Where clones land. Defaults to `/workspace`. */
   workdir?: string;
-  /** API origin, for GitHub Enterprise. Defaults to the public API. */
-  apiBase?: string;
   /** Committer identity. Defaults to a generic agent identity. */
   author?: { name: string; email: string };
   /**
    * Hosts a clone may target, lowercase and exact. Defaults to `github.com`.
    *
    * A fail-closed allowlist rather than a blocklist, because the failure it
-   * prevents is credential exfiltration and the input is model-chosen. Widen it
-   * for GitHub Enterprise (alongside `apiBase`); an empty array clones nothing.
+   * prevents is credential exfiltration and the input is model-chosen. An empty
+   * array clones nothing.
+   *
+   * This bounds *cloning*, which is generic git and works against any host. The
+   * GitHub tools are github.com's alone — see `./mcp.ts`.
    */
   allowedHosts?: string[];
   /**
@@ -308,7 +316,6 @@ export const REPO_TOOL_NAMES = [
   "repo_issue_view",
   "repo_pr_view",
   "repo_pr_comment",
-  "repo_pr_review_status",
   "repo_pr_threads",
   "repo_pr_thread_reply",
   "repo_pr_checks",
@@ -388,7 +395,7 @@ export function repo(config: RepoConfig): AgentPlugin {
     has("repo_issue_view") &&
       "`repo_issue_view` reads an issue or pull request with its comments",
     has("repo_pr_view") &&
-      "`repo_pr_view` shows a pull request's state and the files it touches",
+      "`repo_pr_view` shows a pull request's state, the reviews that have landed on it and the files it touches",
     has("repo_pr_comment") && "`repo_pr_comment` leaves a comment"
   ].filter((line): line is string => typeof line === "string");
   const worktrees = config.worktrees && [
@@ -424,8 +431,9 @@ export function repo(config: RepoConfig): AgentPlugin {
       "`repo_open_pr` opens the pull request and returns its URL.",
     views.length > 0 &&
       `${views.join(", ")}. ${views.length > 1 ? "Each acts" : "It acts"} on the repository you have checked out — read the issue a task refers to before guessing what it asks for.`,
-    has("repo_pr_review_status") &&
-      "`repo_pr_review_status` says whether a reviewer has finished. Ask it before reading a review: one that has not landed has left nothing, so an empty list of threads means nothing yet rather than nothing to do.",
+    has("repo_pr_threads") &&
+      has("repo_pr_view") &&
+      "Read `repo_pr_view` before reading a review: a review that has not landed has left nothing, so an empty list of threads means nothing yet rather than nothing to do.",
     has("repo_pr_threads") &&
       "`repo_pr_threads` reads the review threads — the comments left on particular lines, which are not on the " +
         (has("repo_issue_view")
