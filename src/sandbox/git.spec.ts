@@ -25,7 +25,7 @@ async function setup(name: string) {
 describe("sandboxRepoGit", () => {
   it("clones as the agent, under a limit, notes the checkout, and says where it landed", async () => {
     const { sandbox, git, sent } = await setup("clone");
-    await sandbox.answer("rev-parse --abbrev-ref HEAD", "main\n");
+    await sandbox.answer("symbolic-ref --short -q HEAD", "main\n");
     expect(
       await git.clone({
         url: URL,
@@ -71,20 +71,32 @@ describe("sandboxRepoGit", () => {
     ).toEqual({ ok: false, code: "exit-1", message: "git push exited 1" });
     const [push] = await sent("git push");
     expect(push).toContain(
-      `-- ${URL} refs/heads/coding/abc:refs/heads/coding/abc`
+      `push --no-follow-tags -- ${URL} refs/heads/coding/abc:refs/heads/coding/abc`
     );
     expect(push).not.toMatch(/--force|\+refs/);
   });
 
-  it("names a git that ran past its limit", async () => {
+  it("does not take a 124 or 137 well inside the limit for the limit's", async () => {
     const { sandbox, git } = await setup("slow");
+    const fetch = () =>
+      git.fetch({ url: URL, dir: "/workspace/plugins", allowedHosts: ALLOWED });
     await sandbox.answer("git fetch", "", 124);
-    expect(
-      await git.fetch({
-        url: URL,
-        dir: "/workspace/plugins",
-        allowedHosts: ALLOWED
-      })
-    ).toMatchObject({ ok: false, code: "ETIMEDOUT" });
+    expect(await fetch()).toMatchObject({ ok: false, code: "exit-124" });
+    await sandbox.answer("git fetch", "", 137);
+    expect(await fetch()).toMatchObject({ ok: false, code: "exit-137" });
+  });
+
+  it("reports the branch a clone of an empty repository is on, and HEAD for a detached one", async () => {
+    const { sandbox, git } = await setup("unborn");
+    const clone = () =>
+      git.clone({ url: URL, dir: "/workspace/empty", allowedHosts: ALLOWED });
+    // Unborn: `symbolic-ref` names it, where `rev-parse` would fail.
+    await sandbox.answer("symbolic-ref --short -q HEAD", "main\n");
+    await sandbox.answer("rev-parse --abbrev-ref HEAD", "", 128);
+    expect(await clone()).toEqual({ ok: true, detail: "main" });
+    // Detached: no symbolic ref, and `rev-parse` says HEAD.
+    await sandbox.answer("symbolic-ref --short -q HEAD", "", 1);
+    await sandbox.answer("rev-parse --abbrev-ref HEAD", "HEAD\n");
+    expect(await clone()).toEqual({ ok: true, detail: "HEAD" });
   });
 });

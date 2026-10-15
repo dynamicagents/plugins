@@ -36,6 +36,12 @@ export interface SandboxGitHost {
 const LIMIT_MS = { clone: 10 * 60_000, fetch: 5 * 60_000, push: 5 * 60_000 };
 /** After `timeout`'s TERM, how long before its KILL. */
 const KILL_AFTER_S = 5;
+/**
+ * `timeout`'s exits for a git it ended: TERM taken, or KILL after a hook
+ * ignored it. Read as the limit only once the limit has passed, since any
+ * SIGKILL is a 137.
+ */
+const TIMED_OUT = new Set([124, 137]);
 
 /** @param sandbox Called per operation, so each reaches the object through a new stub. */
 export function sandboxRepoGit(sandbox: () => SandboxGitHost): RepoGit {
@@ -47,6 +53,7 @@ export function sandboxRepoGit(sandbox: () => SandboxGitHost): RepoGit {
     | { ok: true; stdout: string; stderr: string }
     | Extract<RepoGitResult, { ok: false }>
   > => {
+    const startedAt = Date.now();
     const run = await sandbox().exec(
       [
         "timeout",
@@ -64,15 +71,16 @@ export function sandboxRepoGit(sandbox: () => SandboxGitHost): RepoGit {
     );
     if (run.exitCode === 0)
       return { ok: true, stdout: run.stdout, stderr: run.stderr };
+    const timedOut =
+      TIMED_OUT.has(run.exitCode) && Date.now() - startedAt >= limitMs;
     return {
       ok: false,
-      code: run.exitCode === 124 ? "ETIMEDOUT" : `exit-${run.exitCode}`,
-      message:
-        run.exitCode === 124
-          ? `git ${args[0]} ran past its limit of ${limitMs / 60_000} minutes`
-          : run.stderr.trim() ||
-            run.stdout.trim() ||
-            `git ${args[0]} exited ${run.exitCode}`
+      code: timedOut ? "ETIMEDOUT" : `exit-${run.exitCode}`,
+      message: timedOut
+        ? `git ${args[0]} ran past its limit of ${limitMs / 60_000} minutes`
+        : run.stderr.trim() ||
+          run.stdout.trim() ||
+          `git ${args[0]} exited ${run.exitCode}`
     };
   };
 
@@ -99,6 +107,14 @@ export function sandboxRepoGit(sandbox: () => SandboxGitHost): RepoGit {
         kind: "repo",
         ...(repo ? { repo } : {})
       });
+      // The branch's name, unborn too — an empty repository's — and `HEAD`
+      // for a checkout that landed detached, as one of a tag does.
+      const branch = await git(
+        req.dir,
+        ["symbolic-ref", "--short", "-q", "HEAD"],
+        30_000
+      );
+      if (branch.ok) return { ok: true, detail: branch.stdout.trim() };
       const head = await git(
         req.dir,
         ["rev-parse", "--abbrev-ref", "HEAD"],
@@ -128,11 +144,13 @@ export function sandboxRepoGit(sandbox: () => SandboxGitHost): RepoGit {
     async push(req) {
       const refused = refuse(req.url, req.allowedHosts);
       if (refused) return refused;
-      // Never forced, and only the one branch, to its own name.
+      // Never forced, and only the one branch, to its own name: no tag rides
+      // along, whatever `push.followTags` says.
       const pushed = await git(
         req.dir,
         [
           "push",
+          "--no-follow-tags",
           "--",
           req.url,
           `refs/heads/${req.branch}:refs/heads/${req.branch}`
