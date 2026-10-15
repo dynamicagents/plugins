@@ -140,13 +140,122 @@ describe("rejecting an entry", () => {
 });
 
 /**
+ * A mark lasts one session. A plan upgrade or an early reset makes a stored
+ * `resetAt` wrong, and a pool that trusted it would refuse work Anthropic would
+ * serve until the reset passed. Asking again costs a free `429`.
+ */
+describe("reopening the pool", () => {
+  it("makes a spent entry the lead again", async () => {
+    const { pool: p } = pool([A, B]);
+    await p.spend(await idOf(A), 9_999_999_999);
+    await p.spend(await idOf(B), 9_999_999_999);
+
+    expect(await p.reopen()).toMatchObject({ ok: true, index: 0, token: A });
+    expect(await p.lead()).toMatchObject({ ok: true, index: 0, token: A });
+  });
+
+  it("tries a rejected entry again too", async () => {
+    const { pool: p } = pool([A]);
+    await p.reject(await idOf(A));
+
+    expect(await p.reopen()).toMatchObject({ ok: true, index: 0, token: A });
+  });
+
+  it("lets a refusal after it mark the entry again", async () => {
+    const { pool: p } = pool([A, B]);
+    await p.spend(await idOf(A), 9_999_999_999);
+    await p.reopen();
+
+    expect(await p.spend(await idOf(A), 9_999_999_999)).toMatchObject({
+      ok: true,
+      index: 1,
+      token: B
+    });
+  });
+
+  it("clears a mark stored before epochs existed", async () => {
+    const store = memoryStore([{ id: await idOf(A), resetAt: 9_999_999_999 }]);
+    const p = credentialPool({
+      credentials: () => [A],
+      store,
+      now: () => 1_000_000
+    });
+
+    expect(await p.reopen()).toMatchObject({ ok: true, token: A });
+  });
+
+  /** It runs on every admitted session, and most find nothing marked. */
+  it("writes nothing when nothing is marked", async () => {
+    let writes = 0;
+    const p = credentialPool({
+      credentials: () => [A],
+      store: {
+        read: async () => [{ id: await idOf(A), resetAt: 500_000 }],
+        write: async () => {
+          writes++;
+        }
+      },
+      now: () => 1_000_000
+    });
+
+    await p.reopen();
+    expect(writes).toBe(0);
+  });
+
+  it("has no lead only when no credential is configured", async () => {
+    expect(await pool([]).pool.reopen()).toEqual({ ok: false });
+  });
+
+  /**
+   * The deployed shape: the gateway and the session's admission each build a
+   * pool over the one store, and the gateway's mirror still holds the marks the
+   * reopen cleared. The later epoch has to win over it.
+   */
+  it("reaches a pool that marked the entry, through the shared store", async () => {
+    const store = memoryStore();
+    const config = { credentials: () => [A, B], store, now: () => 1_000_000 };
+    const gateway = credentialPool(config);
+    await gateway.spend(await idOf(A), 9_999_999_999);
+    await gateway.spend(await idOf(B), 9_999_999_999);
+
+    await credentialPool(config).reopen();
+
+    expect(await gateway.lead()).toMatchObject({
+      ok: true,
+      index: 0,
+      token: A
+    });
+  });
+
+  it("survives a write that failed, in the pool that made it", async () => {
+    const stale: CredentialState[] = [
+      { id: await idOf(A), resetAt: 9_999_999_999 }
+    ];
+    const p = credentialPool({
+      credentials: () => [A],
+      store: {
+        read: async () => stale,
+        write: async () => {
+          throw new Error("storage unavailable");
+        }
+      },
+      now: () => 1_000_000
+    });
+
+    await p.reopen();
+    expect(await p.lead()).toMatchObject({ ok: true, token: A });
+  });
+});
+
+/**
  * State follows the **credential**, not the slot.
  *
  * Position-keyed state looks fine until an operator edits the secrets, and it is
  * then wrong at the worst possible moment: rotating a spent token is exactly
  * what an operator does when the pool has stalled, and the fresh credential
  * would inherit the old one's `resetAt` — or its `dead` flag, which nothing
- * clears. The tests below are that failure, from three directions.
+ * clears before the next session. The tests below are that failure, from three
+ * directions.
  */
 describe("state that no longer matches the credentials", () => {
   /** The one that matters most: recovery by rotating a secret must work. */
@@ -244,8 +353,8 @@ describe("state that no longer matches the credentials", () => {
  * already known to be empty, for as long as the outage lasts.
  *
  * The fix is a process-local mirror, merged with storage rather than chosen
- * over it. Both fields are monotonic, so the merge cannot lose information in
- * either direction.
+ * over it. The later epoch wins and both fields are monotonic within one, so the
+ * merge cannot lose information in either direction.
  */
 describe("when storage is unavailable", () => {
   const brokenRead = (): CredentialStore => ({
@@ -309,12 +418,8 @@ describe("when storage is unavailable", () => {
 });
 
 /**
- * **No genuine subscription-exhaustion 429 has been observed through this
- * path** — a raw-API refusal is a different response — so these rules are
- * inferences from the documented API rate limits, and the gateway logs every
- * refusal whole so the first real one can replace them with a fact. What the
- * tests below pin is the *shape* of the judgement, which is what should survive
- * learning the exact header.
+ * What the tests below pin is the *shape* of the judgement — the header forms
+ * it accepts and which way it errs — rather than one captured response.
  */
 describe("reading a refusal", () => {
   const NOW = 1_000_000;
@@ -347,6 +452,24 @@ describe("reading a refusal", () => {
     });
   });
 
+  /** A spent 5-hour bucket, as Anthropic sends one: headers trimmed to those read. */
+  it("reads Anthropic's subscription refusal as a spent bucket", () => {
+    const at = 1_792_054_520_144;
+    const response = new Response(null, {
+      status: 429,
+      headers: {
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-reset": "1792063800",
+        "retry-after": "9279"
+      }
+    });
+    expect(readRefusal(response, at)).toEqual({
+      kind: "exhausted",
+      resetAt: 1_792_063_800_000
+    });
+  });
+
   it("accepts a reset header as epoch seconds", () => {
     const response = new Response(null, {
       status: 429,
@@ -359,9 +482,9 @@ describe("reading a refusal", () => {
   });
 
   /**
-   * Anthropic documents the `anthropic-ratelimit-*-reset` family as RFC 3339 and
-   * the unified variant has been reported as an epoch. Both are parsed rather
-   * than guessed at — a parser that handles both cannot be wrong about which.
+   * Anthropic documents the `anthropic-ratelimit-*-reset` family as RFC 3339
+   * and sends the unified one as epoch seconds. Both are parsed, so neither
+   * changing form reads as "no reset".
    */
   it("accepts a reset header as an RFC 3339 timestamp", () => {
     const at = "2026-08-22T20:00:00Z";
@@ -412,9 +535,8 @@ describe("reading a refusal", () => {
    * accept, and `403 permission_error` for a credential that is fine but may not
    * have the thing being asked for. Retiring on the second turns a
    * *configuration* mistake — a model the subscription cannot reach — into a
-   * permanent, pool-wide failure: every credential 403s in turn, every one is
-   * marked `dead`, and `dead` is the one state nothing clears on its own. An
-   * operator would have to delete Durable Object storage to recover from it.
+   * pool-wide failure: every credential 403s in turn, every one is marked
+   * `dead`, and each session ends telling an operator to mint a new credential.
    *
    * So it is left unclassified, which forwards it untouched and logs it whole —
    * the same treatment every other unrecognised refusal gets.

@@ -225,20 +225,18 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
     },
 
     /**
-     * Is any credential usable right now, and if not, when?
+     * Admit a session: forget the pool's marks so its first model call asks
+     * Anthropic again — see "A mark lasts one session" in `./credentials.ts`.
      *
-     * The same question {@link egress} answers per request, asked ahead of time
-     * so a host can decline to start a session it cannot pay for. That is not a
-     * micro-optimisation: an invocation carries an 18.7-27k-token cached prefix
-     * before it does anything, so starting one and letting the gateway refuse
-     * its first model call costs a container start and that prefix to learn what
-     * this returns for free — and reports it as a failed run rather than as a
-     * rate limit with a time on it.
-     *
-     * Reads only. Nothing here marks anything spent.
+     * Called before the session's container work, by the object whose store
+     * the gateway reads. Not a gate on spend: a refused call bills nothing, so
+     * a session admitted onto a spent pool costs its startup and ends on the
+     * gateway's `429` naming the earliest reset — far less than refusing an
+     * account Anthropic would serve. The lead is not usable only when no
+     * credential is configured.
      */
-    credentials: (store: CredentialStore): Promise<Lead> =>
-      credentialPool({ credentials: config.credentials, store }).lead(),
+    admit: (store: CredentialStore): Promise<Lead> =>
+      credentialPool({ credentials: config.credentials, store }).reopen(),
 
     /**
      * The `Fetcher` the workspace object installs as its egress policy.

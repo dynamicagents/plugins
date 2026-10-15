@@ -18,6 +18,18 @@
  * weekly limit, because to this code they differ only in how far out the reset
  * is.
  *
+ * ## A mark lasts one session
+ *
+ * A spent or rejected mark is Anthropic's answer at the time, not a fact until
+ * `resetAt`: a plan upgrade, extra usage switched on, or a reset Anthropic
+ * grants early all make it wrong, and a deployment that trusts it refuses work
+ * Anthropic would take, for hours. Asking again is nearly free — a refusal bills
+ * nothing and comes back in milliseconds, and rotating through a pool of three
+ * spent credentials has taken about a second. So a host calls
+ * {@link CredentialPool.reopen} when it admits a session, and that session's
+ * first model call marks again whatever is still spent. Within the session the
+ * marks route as above.
+ *
  * ## Everything here is pure
  *
  * No storage, no `fetch`, no Durable Object — the host passes a
@@ -33,8 +45,9 @@
  * `resetAt` is a wall-clock ms deadline; `0` means usable now. `dead` is a
  * different claim from an exhausted bucket and is kept separate for that reason:
  * a spent credential recovers by itself at `resetAt`, a rejected one never does
- * and needs an operator. Collapsing them would either resurrect a revoked token
- * on a timer or retire a good one permanently.
+ * on a timer. Collapsing them would resurrect a revoked token at some distant
+ * `resetAt`. Both are cleared by {@link CredentialPool.reopen}, which is not a
+ * timer: a revoked token costs one `401` per session and is rotated away.
  */
 export interface CredentialState {
   /**
@@ -56,6 +69,11 @@ export interface CredentialState {
   id: string;
   resetAt: number;
   dead?: boolean;
+  /**
+   * Which {@link CredentialPool.reopen} this state belongs to; absent is `0`.
+   * A later epoch replaces an earlier one outright — see {@link merge}.
+   */
+  epoch?: number;
 }
 
 /**
@@ -120,6 +138,12 @@ export interface CredentialPool {
   spend(id: string, resetAt: number): Promise<Lead>;
   /** This credential is not valid — revoked, not spent. See {@link spend}. */
   reject(id: string): Promise<Lead>;
+  /**
+   * Forget every mark, so the next request asks Anthropic again — see "A mark
+   * lasts one session" above. Writes only when something was marked. The lead
+   * it returns is usable unless no credential is configured.
+   */
+  reopen(): Promise<Lead>;
 }
 
 export interface CredentialPoolConfig {
@@ -146,18 +170,26 @@ export interface CredentialPoolConfig {
 /**
  * Fold two views of one credential's state together.
  *
- * Safe to apply in any order and any number of times, because both fields are
- * **monotonic**: `resetAt` only moves later (a bucket does not un-empty early)
- * and `dead` only turns on. That is what lets storage and the in-memory mirror
- * below be merged rather than one of them being chosen — there is no ordering in
- * which the merge loses information.
+ * Safe to apply in any order and any number of times, which is what lets
+ * storage and the in-memory mirror below be merged rather than one of them
+ * being chosen. The later epoch wins outright — that is how a reopen clears a
+ * mark. Within an epoch both fields are **monotonic**: `resetAt` only moves
+ * later and `dead` only turns on, so two refusals racing cannot make a spent
+ * credential look usable early.
+ *
+ * An epoch rather than a timestamp, so a reopen and a refusal in the same
+ * millisecond cannot tie.
  */
 function merge(a: CredentialState, b: CredentialState): CredentialState {
+  const ea = a.epoch ?? 0;
+  const eb = b.epoch ?? 0;
+  if (ea !== eb) return ea > eb ? a : b;
   const dead = a.dead === true || b.dead === true;
   return {
     id: a.id,
     resetAt: Math.max(a.resetAt, b.resetAt),
-    ...(dead ? { dead: true } : {})
+    ...(dead ? { dead: true } : {}),
+    ...(ea ? { epoch: ea } : {})
   };
 }
 
@@ -296,6 +328,36 @@ export function credentialPool(config: CredentialPoolConfig): CredentialPool {
 
     reject(id: string): Promise<Lead> {
       return update(id, (state) => ({ ...state, dead: true }));
+    },
+
+    async reopen(): Promise<Lead> {
+      const { tokens, keys, states } = await load();
+      const at = now();
+      const reopened: number[] = [];
+      for (let i = 0; i < states.length; i++) {
+        const state = states[i];
+        if (!state || (!state.dead && state.resetAt <= at)) continue;
+        states[i] = {
+          id: state.id,
+          resetAt: 0,
+          epoch: (state.epoch ?? 0) + 1
+        };
+        reopened.push(i);
+      }
+      if (reopened.length) {
+        // The mirror first, for the same reason as in `update`.
+        mirror = states;
+        console.info("[claude-code] asking Anthropic again about credentials", {
+          slots: reopened
+        });
+        await config.store.write(states).catch((err: unknown) => {
+          console.error("[claude-code] could not persist the credential pool", {
+            reopened,
+            err: String(err)
+          });
+        });
+      }
+      return pick(tokens, keys, states);
     }
   };
 }
@@ -320,9 +382,9 @@ export type Refusal =
  * permission_error` for a credential that is fine but may not have the thing
  * being asked for. Reading the second as "this credential is bad" turns a
  * *configuration* mistake — a model the subscription cannot reach, say — into a
- * permanent, pool-wide outage: every credential 403s in turn, every one is
- * retired, and `dead` is the one state nothing clears on its own. An operator
- * would have to delete Durable Object storage to recover from a typo.
+ * pool-wide outage: every credential 403s in turn, every one is retired, and
+ * each session ends telling an operator to mint a new credential — the wrong
+ * instruction for a typo.
  *
  * A 403 is therefore left unclassified: forwarded to the client untouched, and
  * logged whole by the gateway. That is the same treatment every other
@@ -363,9 +425,8 @@ function retryAfterMs(value: string | null, at: number): number | undefined {
  * Parse a reset header, which may be unix seconds or an RFC 3339 timestamp.
  *
  * Anthropic documents the `anthropic-ratelimit-*-reset` family as RFC 3339, and
- * the unified variant has been reported as an epoch. Both are accepted rather
- * than guessed at, because this is exactly the field the box in the plan says is
- * unverified — and a parser that handles both cannot be wrong about which.
+ * sends the unified one as unix seconds. Both are accepted, so neither family
+ * changing form can read as "no reset".
  */
 function resetAtFrom(value: string | null): number | undefined {
   if (!value) return undefined;
@@ -380,55 +441,16 @@ function resetAtFrom(value: string | null): number | undefined {
 }
 
 /**
- * The `rate_limit_event` statuses that mean the bucket is empty.
- *
- * **Empty, and that is the finding rather than a placeholder.** The client
- * announces its bucket on every session and the only status ever observed is
- * {@link file://./events.ts RATE_LIMIT_OK} — so there is no known value here to
- * put in, and putting in a guess is the expensive half of the asymmetry
- * {@link readRefusal} is built around: reading a healthy bucket as exhausted
- * retires a working credential for hours, and with a pool of one that is an
- * outage. The same reasoning that leaves a 403 unclassified leaves this set
- * empty.
- *
- * What fills it is the log. `run.ts` reports every change of reading, and a
- * status that is not `allowed` is also surfaced as a progress note, so the first
- * real one arrives named — at which point it goes in here and the pool starts
- * rotating *before* Anthropic refuses a request rather than because it did.
- */
-const RATE_LIMIT_SPENT: ReadonlySet<string> = new Set<string>();
-
-/**
- * Read the client's own bucket reading as a verdict on the credential in use.
- *
- * `undefined` means "nothing to act on", which today is every reading — see
- * {@link RATE_LIMIT_SPENT}. Otherwise the epoch-milliseconds the bucket refills,
- * ready for {@link CredentialPool.spend}.
- *
- * Here rather than beside the parser because this is the same question
- * {@link readRefusal} answers about a response: is this credential still worth
- * using? The parser's job is to say what the line contained.
- */
-export function readRateLimitEvent(info: {
-  status: string;
-  resetsAt?: number;
-}): number | undefined {
-  if (!RATE_LIMIT_SPENT.has(info.status)) return undefined;
-  // Seconds on the wire. A value passed through unconverted lands in 1970, and a
-  // credential marked spent until then reads as usable — the failure would be
-  // this function doing nothing, silently.
-  return info.resetsAt === undefined ? undefined : info.resetsAt * 1000;
-}
-
-/**
  * Read a response as a verdict on the credential that produced it.
  *
+ * A spent subscription bucket arrives as a `429` with
+ * `anthropic-ratelimit-unified-status: rejected`, the reset in
+ * `anthropic-ratelimit-unified-reset` (unix seconds) and the same wait in
+ * `retry-after` (seconds); `-representative-claim` names the bucket.
+ *
  * Returns `undefined` for anything it does not recognise — which the caller
- * treats as "forward it unchanged, and log the whole thing". That branch is not
- * a fallback, it is the instrument: **no genuine subscription-exhaustion `429`
- * has ever been observed through this path**, so the rules below are inferences
- * from the documented API rate limits, and the first real one is what will
- * settle them.
+ * treats as "forward it unchanged, and log the whole thing", so a refusal of
+ * another shape arrives named.
  */
 export function readRefusal(
   response: Response,

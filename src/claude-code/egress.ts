@@ -468,12 +468,9 @@ export function claudeCodeEgress(config: EgressConfig): Fetcher {
     /**
      * Capture the whole thing, every time.
      *
-     * **No genuine subscription-exhaustion `429` has been observed through this
-     * path** — a raw-API refusal is a different response — so the rules in
-     * `readRefusal` are inferences from the documented API rate limits. This log
-     * is the instrument that replaces
-     * them with a fact, and it costs nothing: these statuses are rare, and the
-     * body of one is a few hundred bytes.
+     * This log is how the shape `readRefusal` reads was learned, and how a
+     * refusal of any other shape will be. It costs nothing: these statuses are
+     * rare, and the body of one is a few hundred bytes.
      */
     const body = await response
       .clone()
