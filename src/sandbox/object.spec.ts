@@ -1,0 +1,244 @@
+import { describe, expect, it } from "vitest";
+import { runInDurableObject } from "cloudflare:test";
+import { ROOT_SESSION } from "agents/harness/container";
+import { CONTROL_SESSION, EGRESS_READY } from "./constants.js";
+import {
+  eventually,
+  freshHttpsSandbox,
+  freshSandbox,
+  pollRun
+} from "../../test/sandbox/do.js";
+
+/**
+ * `SandboxObjectBase` over the real `ContainerHarness` and the real daemon
+ * core, behind a fake container. Every rule here is one the sandbox relies on
+ * the harness for and closes from outside it; a harness that changes any of
+ * them fails here rather than in a running session.
+ */
+
+const joined = (execs: readonly (readonly string[])[]) =>
+  execs.map((cmd) => cmd.join(" "));
+
+describe("the harness behaviour a sandbox is built on", () => {
+  it("names its control session as the harness names its root", () => {
+    expect(CONTROL_SESSION).toBe(ROOT_SESSION);
+  });
+
+  it("starts a stopped container with a control prompt, and prepares it once", async () => {
+    const sandbox = freshSandbox("wake");
+    const { runtimeId } = await sandbox.ensureRunning();
+    const fake = await sandbox.fake();
+    expect(fake.running).toBe(true);
+    expect(fake.starts).toBe(1);
+    expect(fake.lastStart.image).toBe("test-image");
+    // The lifecycle started, so the inactivity timeout is armed.
+    expect(fake.inactivityTimeoutMs).toBeGreaterThan(0);
+    const markers = joined(fake.execs).filter((cmd) =>
+      cmd.includes(EGRESS_READY)
+    );
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toContain(runtimeId);
+
+    await sandbox.ensureRunning();
+    expect((await sandbox.fake()).starts).toBe(1);
+    expect(
+      joined((await sandbox.fake()).execs).filter((cmd) =>
+        cmd.includes(EGRESS_READY)
+      )
+    ).toHaveLength(1);
+  });
+
+  it("runs a turn in a session the sandbox made, and reports only that operation's messages", async () => {
+    const sandbox = freshSandbox("turn");
+    const { sessionId } = await sandbox.createRun("run-1", {
+      cwd: "/workspace/repo"
+    });
+    expect(sessionId).not.toBe(ROOT_SESSION);
+    expect(
+      (await sandbox.createRun("run-1", { cwd: "/workspace/repo" })).created
+    ).toBe(false);
+
+    const receipt = await sandbox.submit("run-1", "hello", "op-1");
+    expect(receipt).toEqual({ operationId: "op-1", accepted: true });
+    const polled = await eventually(
+      () => pollRun(sandbox, "run-1", "op-1"),
+      (poll) => poll.result !== undefined
+    );
+    expect(polled.result).toMatchObject({
+      status: "done",
+      text: "echo: hello (turn 1)"
+    });
+    expect(polled.messages.map((m) => m.message.role)).toEqual(["assistant"]);
+    expect(polled.messages[0]?.digest).toMatch(/^[0-9a-f]{24}$/);
+  });
+
+  it("dedupes an operation id, so a lost run is resubmitted under a new one", async () => {
+    const sandbox = freshSandbox("dedupe");
+    await sandbox.createRun("run-1", { cwd: "/workspace/repo" });
+    await sandbox.submit("run-1", "once", "op-1");
+    await eventually(
+      () => pollRun(sandbox, "run-1", "op-1"),
+      (poll) => poll.result !== undefined
+    );
+    expect(await sandbox.submit("run-1", "once", "op-1")).toEqual({
+      operationId: "op-1",
+      accepted: false
+    });
+  });
+
+  it("settles a run whose container died as container_lost, and the session goes on", async () => {
+    const sandbox = freshSandbox("lost");
+    await sandbox.createRun("run-1", { cwd: "/workspace/repo" });
+    await sandbox.submit("run-1", "first", "op-1");
+    await eventually(
+      () => pollRun(sandbox, "run-1", "op-1"),
+      (poll) => poll.result !== undefined
+    );
+
+    await sandbox.submit("run-1", "slow 60000 never", "op-2");
+    await eventually(
+      () => sandbox.fake(),
+      (fake) => fake.running
+    );
+    await sandbox.crash();
+    const lost = await eventually(
+      () => pollRun(sandbox, "run-1", "op-2"),
+      (poll) => poll.result !== undefined
+    );
+    expect(lost.result).toMatchObject({
+      status: "unanswered",
+      reason: "container_lost"
+    });
+
+    await sandbox.submit("run-1", "second", "op-2:a1");
+    const resumed = await eventually(
+      () => pollRun(sandbox, "run-1", "op-2:a1"),
+      (poll) => poll.result !== undefined
+    );
+    // The echo adapter counts the turns its session persisted: the conversation survived.
+    expect(resumed.result).toMatchObject({
+      status: "done",
+      text: "echo: second (turn 2)"
+    });
+  });
+
+  it("forks a run's conversation and reports none of the parent's messages as the fork's", async () => {
+    const sandbox = freshSandbox("fork");
+    await sandbox.createRun("plan", { cwd: "/workspace/repo" });
+    await sandbox.submit("plan", "planned", "op-plan");
+    await eventually(
+      () => pollRun(sandbox, "plan", "op-plan"),
+      (poll) => poll.result !== undefined
+    );
+
+    const forked = await sandbox.createRun("write", {
+      cwd: "/workspace/repo",
+      forkOf: "plan"
+    });
+    expect(forked.created).toBe(true);
+    await sandbox.submit("write", "written", "op-write");
+    const polled = await eventually(
+      () => pollRun(sandbox, "write", "op-write"),
+      (poll) => poll.result !== undefined
+    );
+    expect(polled.result).toMatchObject({
+      status: "done",
+      text: "echo: written (turn 2)"
+    });
+    expect(
+      polled.messages.every((m) => m.message.operationId === "op-write")
+    ).toBe(true);
+  });
+
+  it("starts the next container from a checkpoint it wrote, and another sandbox from that checkpoint", async () => {
+    const parent = freshSandbox("checkpoint");
+    await parent.ensureRunning();
+    const seed = await parent.checkpoint();
+    expect(seed).toMatchObject({
+      key: "image:test-image",
+      snapshot: { id: "snapshot-1" }
+    });
+    expect(await parent.snapshotRecord()).toEqual(seed);
+
+    await parent.crash();
+    await parent.ensureRunning();
+    expect((await parent.fake()).lastStart.containerSnapshot).toEqual({
+      id: "snapshot-1"
+    });
+
+    const slot = freshSandbox("seeded");
+    expect(await slot.seedFrom(seed!)).toEqual({ seeded: true });
+    await slot.ensureRunning();
+    expect((await slot.fake()).lastStart.containerSnapshot).toEqual({
+      id: "snapshot-1"
+    });
+    expect(await slot.seedFrom(seed!)).toMatchObject({ seeded: false });
+    expect(
+      await slot.seedFrom({ key: "image:other", snapshot: { id: "x" } })
+    ).toMatchObject({ seeded: false });
+  });
+
+  it(
+    "will not release while a run is open, since stopping would start it again",
+    { timeout: 20_000 },
+    async () => {
+      const sandbox = freshSandbox("release");
+      // No CLI is left once the run is aborted: the probe for one finds nothing.
+      await sandbox.answer("--output-format stream-json", "", 1);
+      await sandbox.createRun("run-1", { cwd: "/workspace/repo" });
+      await sandbox.submit("run-1", "slow 60000 busy", "op-1");
+      await eventually(
+        () => sandbox.fake(),
+        (fake) => fake.running
+      );
+      expect(await sandbox.release()).toMatchObject({ released: false });
+      await sandbox.stopRun("run-1");
+      expect(await sandbox.release()).toEqual({ released: true });
+      expect((await sandbox.fake()).running).toBe(false);
+    }
+  );
+});
+
+describe("HTTPS egress", () => {
+  it("is registered per container and its CA trusted before the marker is written", async () => {
+    const sandbox = freshHttpsSandbox("https");
+    await sandbox.answer("update-ca-certificates", "TRUSTED");
+    const { runtimeId } = await sandbox.ensureRunning();
+    const fake = await sandbox.fake();
+    expect(fake.httpsHosts).toEqual(["api.github.com"]);
+    const execs = joined(fake.execs);
+    const trust = execs.findIndex((cmd) =>
+      cmd.includes("update-ca-certificates")
+    );
+    const marker = execs.findIndex((cmd) => cmd.includes(EGRESS_READY));
+    expect(trust).toBeGreaterThanOrEqual(0);
+    expect(marker).toBeGreaterThan(trust);
+    expect(execs[marker]).toContain(runtimeId);
+  });
+
+  it("refuses to call a container ready whose CA did not take", async () => {
+    const sandbox = freshHttpsSandbox("untrusted");
+    await sandbox.answer(
+      "update-ca-certificates",
+      "NO CA AT /etc/cloudflare/certs/cloudflare-containers-ca.crt"
+    );
+    await runInDurableObject(sandbox, async (instance) => {
+      await expect(instance.ensureRunning()).rejects.toThrow(/not trusted/);
+    });
+  });
+});
+
+describe("files", () => {
+  it("serves nothing outside /workspace, and starts no container to refuse", async () => {
+    const sandbox = freshSandbox("confine");
+    await runInDurableObject(sandbox, async (instance) => {
+      await expect(instance.readFile("/proc/1/environ")).rejects.toThrow(
+        /outside \/workspace/
+      );
+      await expect(instance.createRun("run", { cwd: "/etc" })).rejects.toThrow(
+        /outside \/workspace/
+      );
+    });
+    expect((await sandbox.fake()).starts).toBe(0);
+  });
+});

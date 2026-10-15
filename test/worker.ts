@@ -1,8 +1,19 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
+import { echoAdapter } from "agents/harness/container/daemon";
+import type { EgressRoute } from "agents/harness/container";
 import {
   DEFAULT_INSTALL_PLAN,
   WorkspaceObjectBase,
   type WorkspaceObjectConfig
 } from "../src/workspace/index.js";
+import {
+  SandboxObjectBase,
+  githubRoute,
+  sandboxEgress,
+  type SandboxObjectConfig
+} from "../src/sandbox/index.js";
+import { withControlSession } from "../src/sandbox/daemon/composite.js";
+import { containerFor, fakeOf } from "./sandbox/fake-container.js";
 
 // Not one of our classes, and not optional: `ContainerBackend` builds the
 // container's egress loopback out of `ctx.exports.WorkspaceProxy`, so a host that
@@ -45,6 +56,98 @@ export class TestWorkspaceDO extends WorkspaceObjectBase {
         author: { name: "test", email: "test@example.invalid" }
       }
     };
+  }
+}
+
+/**
+ * A sandbox over a fake container: the real harness, the real daemon core with
+ * the echo adapter behind the control session, and `exec` answered by a script
+ * a spec sets. What only a real container can show is in the harness spike.
+ */
+export class TestSandboxDO extends SandboxObjectBase {
+  protected override containerFor(ctx: DurableObjectState): Container {
+    return containerFor(ctx.id, withControlSession(echoAdapter)).asContainer();
+  }
+
+  protected sandboxConfig(): SandboxObjectConfig {
+    return {
+      label: "test-sandbox",
+      adapter: echoAdapter.id,
+      instance: "lite",
+      egress: {
+        // This package declares no ambient `Env`, so `ctx.exports` is untyped here.
+        binding: (
+          this.ctx.exports as unknown as {
+            TestSandboxEgress: SandboxObjectConfig["egress"]["binding"];
+          }
+        ).TestSandboxEgress,
+        routes: [],
+        https: this.https()
+      },
+      installPlan: { ...DEFAULT_INSTALL_PLAN, overrides: {} }
+    };
+  }
+
+  protected https(): EgressRoute[] {
+    return [];
+  }
+
+  /** What the fake saw, for a spec to assert on. */
+  fake() {
+    const fake = fakeOf(this.ctx.id);
+    return {
+      running: fake.running,
+      starts: fake.starts,
+      lastStart: fake.lastStart,
+      snapshots: fake.snapshots,
+      execs: fake.execs.map((call) => call.cmd),
+      httpsHosts: [...fake.httpsIntercepts.keys()],
+      inactivityTimeoutMs: fake.inactivityTimeoutMs
+    };
+  }
+
+  /** Answer `exec` calls whose joined command includes `match` with `stdout`. */
+  answer(match: string, stdout: string, exitCode = 0): void {
+    const previous = fakeOf(this.ctx.id).script;
+    fakeOf(this.ctx.id).script = (call) =>
+      call.cmd.join(" ").includes(match)
+        ? { stdout, exitCode }
+        : previous(call);
+  }
+
+  crash(): Promise<void> {
+    return fakeOf(this.ctx.id).crash();
+  }
+
+  stored(key: string): Promise<unknown> {
+    return this.ctx.storage.get(key);
+  }
+}
+
+/** The same, with GitHub's API intercepted over HTTPS. */
+export class TestSandboxHttpsDO extends TestSandboxDO {
+  protected override https(): EgressRoute[] {
+    return [
+      githubRoute({
+        host: "api.github.com",
+        upstream: "https://api.github.com",
+        tokenBinding: "GITHUB_TOKEN"
+      })
+    ];
+  }
+}
+
+/** The entrypoint a sandbox's routes are handed to. */
+export class TestSandboxEgress extends WorkerEntrypoint<
+  Cloudflare.Env,
+  { routes: readonly EgressRoute[] }
+> {
+  override fetch(request: Request): Promise<Response> {
+    return sandboxEgress(
+      request,
+      this.ctx.props.routes,
+      this.env as Record<string, unknown>
+    );
   }
 }
 

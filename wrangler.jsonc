@@ -27,7 +27,9 @@
       // No `containers` entry paired with it: the pool cannot start a container,
       // and the workspace specs are written against exactly that — a host whose
       // `runtime.exec` fails the way it fails when a container is unreachable.
-      { "name": "TEST_WORKSPACE", "class_name": "TestWorkspaceDO" }
+      { "name": "TEST_WORKSPACE", "class_name": "TestWorkspaceDO" },
+      { "name": "TEST_SANDBOX", "class_name": "TestSandboxDO" },
+      { "name": "TEST_SANDBOX_HTTPS", "class_name": "TestSandboxHttpsDO" }
     ]
   },
 
@@ -37,6 +39,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["TestWorkspaceDO"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["TestSandboxDO", "TestSandboxHttpsDO"]
     }
   ]
 }

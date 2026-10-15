@@ -129,7 +129,9 @@ for (const file of walk(path.join(root, "dist"))) {
  * that holds only the tools.
  */
 const BUILDS_ON = {
-  "./computer": ["./workspace"]
+  "./computer": ["./workspace"],
+  // The image's entrypoint shares the object's constants and run header.
+  "./sandbox/daemon": ["./sandbox"]
 };
 
 /** `./browser` → `dist/browser` — the directory a subpath's files must stay in. */
