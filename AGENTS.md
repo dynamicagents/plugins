@@ -112,10 +112,17 @@ npm run probe:github-mcp -- --record  # and rewrite test/fixtures/github-mcp.jso
 
 It needs `GITHUB_TOKEN` and a pull request in `GITHUB_MCP_PROBE_PR`
 (`OWNER/REPO#NUMBER`); it sends the token only to the endpoint `mcp.ts` names and
-never prints it. The specs run against the fixture offline, so the fixture is what
-makes a render trustworthy — and until somebody has run the probe with `--record`,
-that file is **derived from the server's published output types rather than
-observed**, which its own header says. Re-record rather than editing it by hand.
+never prints it. **It mutates nothing, including when a restriction turns out not to
+hold**: the legs that test the allowlist and the read-only path name a read and an
+issue number the repository cannot have, so a failure is reported rather than
+exercised. Point it at a real pull request without hesitating.
+
+The specs run against the fixture offline, so the fixture is what makes a render
+trustworthy — and until somebody has run the probe with `--record`, that file is
+**derived from the server's published output types rather than observed**, which its
+own header says. Re-record rather than editing it by hand: `--record` replaces every
+value in it with that pull request's, which is why a spec asserting a _value_ states
+it as an override and only the shape tests read from the file.
 
 ---
 

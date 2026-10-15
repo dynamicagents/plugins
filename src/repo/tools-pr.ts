@@ -235,6 +235,10 @@ export function prTools(ctx: RepoContext): ToolSet {
         const submitted = landed.filter(
           (r) => (r.state ?? "").toUpperCase() !== "PENDING"
         );
+        // Reviews arrive oldest first, so a full page leaves the newest unread
+        // — and "has a review landed yet" is what this tool is called for. Said
+        // rather than left to the list, which would otherwise read as complete.
+        const moreReviews = landed.length >= GITHUB_PAGE_SIZE;
 
         return bounded(
           [
@@ -266,6 +270,12 @@ export function prTools(ctx: RepoContext): ToolSet {
                         `${r.submitted_at ? ` at ${r.submitted_at}` : ""}`
                     )
                   ].join("\n"),
+            ...(moreReviews
+              ? [
+                  `(showing the first ${GITHUB_PAGE_SIZE} reviews; this pull ` +
+                    `request has more, and the newest are not among them)`
+                ]
+              : []),
             "",
             changed.length
               ? changed

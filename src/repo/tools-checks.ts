@@ -103,9 +103,28 @@ export function checkTools(ctx: RepoContext): ToolSet {
           perPage: GITHUB_PAGE_SIZE
         };
 
-        // Both of GitHub's CI APIs, and neither needs the head commit looked up
-        // first: each method resolves it from the pull request itself, and the
-        // combined status reports the sha it answered for.
+        /**
+         * The head commit, read first and checked again at the end.
+         *
+         * Neither CI method takes a commit: each resolves the pull request's
+         * head for itself, so a push landing between the two reads combines one
+         * commit's check runs with another's statuses — and the combination
+         * renders as "every check has finished and passed" for a commit whose
+         * runs were never read, which is the one answer a waiting agent acts on
+         * by stopping. Reading the head first costs a call and makes the
+         * mismatch detectable: the combined status reports the sha it answered
+         * for, so an answer that disagrees with this one is thrown away rather
+         * than rendered.
+         */
+        const pr = await mcp("repo_pr_checks", "pull_request_read", {
+          ...where,
+          method: "get"
+        });
+        if (!pr.ok) return bounded(pr.message);
+        const sha = (pr.data as { head?: { sha?: string } }).head?.sha;
+        if (!sha) return `#${number} is not a pull request in ${owner}/${repo}`;
+        const short = sha.slice(0, 7);
+
         const runs = await mcp("repo_pr_checks", "pull_request_read", {
           ...where,
           method: "get_check_runs"
@@ -128,9 +147,19 @@ export function checkTools(ctx: RepoContext): ToolSet {
           sha?: string;
           statuses?: CommitStatus[];
         };
-        const sha = statusData.sha;
-        if (!sha) return `#${number} is not a pull request in ${owner}/${repo}`;
-        const short = sha.slice(0, 7);
+        // The head was this commit before the check runs were read and still is
+        // after the statuses were, so both answers are that commit's. Unequal —
+        // or absent, which is the server declining to say — leaves no partial
+        // answer worth rendering, because the mixture is indistinguishable from
+        // a clean pass.
+        if (statusData.sha !== sha) {
+          return (
+            `#${number}'s checks could not be read as one commit's: this started ` +
+            `at ${short} and the combined status answered for ` +
+            `${statusData.sha ? statusData.sha.slice(0, 7) : "no commit it named"}. ` +
+            "A push landing during the read does this — ask again."
+          );
+        }
 
         const checks = readChecks(
           runData.check_runs ?? [],

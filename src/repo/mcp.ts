@@ -208,8 +208,15 @@ function toolText(result: {
  * Keyed on the config object the way the git queue beside it is, and for the
  * same reason: the tools are rebuilt every turn, so a connection held in that
  * closure would be re-negotiated on each one.
+ *
+ * **The handshake in flight is what is held, not the session it produces.** A
+ * model step may call two repo tools at once, and both would otherwise open
+ * their own connection — or worse, the second would take the first's session
+ * out of the map and send a `tools/call` while `notifications/initialized` was
+ * still on the wire, which the server is entitled to reject. Awaiting one
+ * promise gives the second caller the first's finished handshake.
  */
-const sessions = new WeakMap<object, Session>();
+const sessions = new WeakMap<object, Promise<Session>>();
 
 /** Build the caller for one plugin instance. */
 export function mcpClient(
@@ -217,9 +224,7 @@ export function mcpClient(
   token: () => { token: string } | { failure: string },
   logFailure: (tool: string, detail: { stderr?: string }) => void
 ) {
-  const open = async (signal: AbortSignal): Promise<Session> => {
-    const held = sessions.get(key);
-    if (held) return held;
+  const negotiate = async (signal: AbortSignal): Promise<Session> => {
     const secret = token();
     if ("failure" in secret) throw new Error(secret.failure);
     const response = await rpc(
@@ -256,10 +261,11 @@ export function mcpClient(
         ? { sessionId: response.headers.get("mcp-session-id") as string }
         : {})
     };
-    sessions.set(key, session);
     // The server is entitled to reject a `tools/call` that arrives before this,
     // and it answers the notification with no body. A failure here is not worth
-    // failing the read for: the call that follows says so if it mattered.
+    // failing the read for: the call that follows says so if it mattered. It is
+    // awaited before the session is anybody's, which is the point of holding the
+    // promise rather than the session.
     await rpc(
       secret.token,
       { jsonrpc: "2.0", method: "notifications/initialized" },
@@ -267,6 +273,22 @@ export function mcpClient(
       signal
     ).catch(() => undefined);
     return session;
+  };
+
+  const open = (signal: AbortSignal): Promise<Session> => {
+    const held = sessions.get(key);
+    if (held) return held;
+    const opening = negotiate(signal);
+    sessions.set(key, opening);
+    // A handshake that failed must not be the answer the next read gets. The
+    // caller waiting on this one still sees the failure — it is the call's own,
+    // and the `signal` that aborted it was that caller's — and the read after
+    // it negotiates again. Guarded on identity so a rejection arriving after
+    // somebody else has stored a fresh promise does not take theirs out.
+    opening.catch(() => {
+      if (sessions.get(key) === opening) sessions.delete(key);
+    });
+    return opening;
   };
 
   const once = async (

@@ -61,7 +61,10 @@ rendering one as "nothing there" would tell an agent a busy review is clean.
 
 **github.com only.** GitHub Enterprise Server is not supported: the hosted MCP server
 is github.com's, so there is no `apiBase` to point elsewhere. `allowedHosts` still
-bounds _cloning_, which is generic git and works against any host.
+bounds _cloning_, which is generic git and works against any host — and because it
+does, `githubRepo` refuses a checkout whose origin is on one of those other hosts
+rather than resolving its `owner/repo`, which would name a different repository on
+github.com and let a write reach it.
 
 `repo_pr_thread_reply` is also the only tool here that takes something able to
 name another repository: a thread id is a global node id, not a path segment

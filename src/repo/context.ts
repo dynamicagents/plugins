@@ -1,6 +1,11 @@
 import type { ActionContext } from "@cloudflare/think";
 import { mcpClient, type McpAnswer } from "./mcp.js";
-import { DEFAULT_ALLOWED_HOSTS, parseRepo, repoLocation } from "./url.js";
+import {
+  DEFAULT_ALLOWED_HOSTS,
+  GITHUB_HOST,
+  parseRepo,
+  repoLocation
+} from "./url.js";
 import type {
   RepoCheckout,
   RepoConfig,
@@ -17,9 +22,10 @@ const DEFAULT_WORKDIR = "/workspace";
 /**
  * GitHub's API. Not a host's to configure: the hosted MCP server these tools
  * read through is github.com's alone, so an Enterprise base here would point
- * half of this plugin at an install the other half cannot reach.
+ * half of this plugin at an install the other half cannot reach. That is
+ * {@link GITHUB_HOST}, which `githubRepo` holds every checkout to.
  */
-const API_BASE = "https://api.github.com";
+const API_BASE = `https://api.${GITHUB_HOST}`;
 const DEFAULT_AUTHOR = {
   name: "da-coder",
   email: "coder@dynamicagents.invalid"
@@ -648,6 +654,13 @@ export function repoContext(
    * the reach this plugin does not want to widen; and an agent asking about
    * "issue 42" almost always means the repository it is working in, so the extra
    * parameter would mostly be an extra way to be wrong.
+   *
+   * **The host allowlist is not narrow enough on its own.** It bounds cloning,
+   * which is generic git and works on any host; every API call here goes to
+   * github.com — see {@link GITHUB_HOST}. A widened `allowedHosts` therefore
+   * admits an origin whose `owner/repo` names a *different* repository on
+   * github.com, and resolving it would read that one and let a write reach it.
+   * So the host is checked here rather than discarded.
    */
   const githubRepo = async (
     dir: string
@@ -658,7 +671,14 @@ export function repoContext(
       return {
         refusal: `${dir} has no origin on an allowed host — clone it with repo_clone first`
       };
-    const parsed = parseRepo(remote.url, allowedHosts);
+    if (remote.host !== GITHUB_HOST)
+      return {
+        refusal:
+          `${dir}'s origin is on ${remote.host}, and these tools read and write ` +
+          `${GITHUB_HOST} alone — an owner/repo from another host would name a ` +
+          `different repository there`
+      };
+    const parsed = parseRepo(remote.url, [GITHUB_HOST]);
     if (!parsed)
       return {
         refusal: `could not parse an owner/repo out of ${dir}'s origin`

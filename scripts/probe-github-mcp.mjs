@@ -35,6 +35,11 @@
  *      login the render can show;
  *   6. a stale session id is recoverable.
  *
+ * **It mutates nothing, including when a check fails.** The two legs that would
+ * otherwise be destructive — a tool outside the list, and a write the list
+ * admits — name a read and an issue number the repository cannot have, so a
+ * restriction that turns out not to hold is reported rather than exercised.
+ *
  * It also reports whether `requested_reviewers` on a pull request with a
  * review still pending names a Bot. Nothing here depends on that — the agent
  * waiting on a review reads `get_reviews` and a timeout, never a pending
@@ -198,16 +203,41 @@ notes.push(
 );
 
 // 2. The allowlist gates tools/call, not only tools/list.
-const excluded = await call(opened.session, "merge_pull_request", {
-  ...where,
-  method: "merge"
-});
-check(
-  "P2 a tool outside X-MCP-Tools is refused at tools/call",
-  Boolean(excluded.envelope?.error) ||
-    excluded.envelope?.result?.isError === true,
-  excluded.envelope?.error?.message ?? ""
-);
+//
+// The excluded tool is a *read* this very script makes elsewhere, and the list
+// is narrowed to leave it out — not a write left out by `/readonly` too, which
+// would be refused whether the header did anything or not and would merge the
+// supplied pull request if neither restriction held. P5's identical call on the
+// full list is the control: same tool, same arguments, admitted there and
+// refused here, so only the header can account for the difference.
+//
+// A JSON-RPC error rather than any failure, because that is what `mcp.ts`
+// renders as a refusal: the server never registered the tool, so the call
+// itself fails. An `isError` result would mean the tool ran and disliked its
+// arguments, which is not this.
+const narrowed = await open({ tools: "issue_read" });
+if (narrowed.session) {
+  const excluded = await call(
+    narrowed.session,
+    "pull_request_read",
+    { ...where, method: "get" },
+    { tools: "issue_read" }
+  );
+  check(
+    "P2 a tool outside X-MCP-Tools is refused at tools/call",
+    Boolean(excluded.envelope?.error),
+    excluded.envelope?.error?.message ??
+      (excluded.envelope?.result?.isError === true
+        ? "answered as a tool error, not a JSON-RPC one — mcp.ts renders this as GitHub failing rather than as a refusal"
+        : "answered the call — the header gates tools/list alone")
+  );
+} else {
+  check(
+    "P2 a tool outside X-MCP-Tools is refused at tools/call",
+    false,
+    "could not open a session with a narrowed list"
+  );
+}
 
 // 3. A misspelled name in the list.
 const misspelled = await open({ tools: `${MCP_TOOLS},definitely_not_a_tool` });
@@ -219,27 +249,69 @@ check(
     : `HTTP ${misspelled.response.status}`
 );
 
-// 4. The read-only endpoint refuses a write even when one is allowlisted.
-const writeable = await open({
-  tools: "pull_request_read,issue_read,issue_write"
-});
+// 4. The read-only endpoint composes with the list, and refuses a write.
+//
+// The widened list rides on the `tools/call` as well as on the handshake:
+// passing it to `open` alone leaves `MCP_TOOLS` on the call, and then the
+// header is what refuses the write and `/readonly` is never tested at all.
+//
+// Two legs, because the conclusive one and the direct one are not the same
+// request. The registry settles the policy — a write the header admits and the
+// endpoint does not offer cannot be called by anybody. The call then shows what
+// happens if one is tried anyway, and **nothing it does can land**: the issue
+// number is far past any this repository could have, so an endpoint that routed
+// the write has GitHub refuse it rather than a title change.
+const WRITEABLE = `${MCP_TOOLS},issue_write`;
+const writeable = await open({ tools: WRITEABLE });
 if (writeable.session) {
-  const refused = await call(writeable.session, "issue_write", {
-    owner,
-    repo,
-    method: "update",
-    issue_number: pullNumber,
-    title: "probe must never land this"
-  });
+  const listed = await rpc(
+    { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} },
+    { tools: WRITEABLE, session: writeable.session }
+  );
+  const offered = (listed.envelope?.result?.tools ?? []).map((t) => t.name);
   check(
-    "P4 /readonly refuses a write even when the list admits one",
-    Boolean(refused.envelope?.error) ||
-      refused.envelope?.result?.isError === true,
-    refused.envelope?.error?.message ?? ""
+    "P4 /readonly offers no write even when the list admits one",
+    offered.length > 0 && !offered.includes("issue_write"),
+    offered.length === 0
+      ? "tools/list named none, so this settled nothing"
+      : `offered: ${offered.join(",")}`
+  );
+
+  const refused = await call(
+    writeable.session,
+    "issue_write",
+    {
+      owner,
+      repo,
+      method: "update",
+      issue_number: pullNumber + 1_000_000,
+      title: "probe must never land this"
+    },
+    { tools: WRITEABLE }
+  );
+  const rpcRefusal = refused.envelope?.error?.message;
+  const toolFailure = refused.envelope?.result?.isError === true;
+  check(
+    "P4 /readonly refuses the write at tools/call too",
+    Boolean(rpcRefusal) || toolFailure,
+    rpcRefusal
+      ? `refused before the tool ran: ${rpcRefusal}`
+      : toolFailure
+        ? // Either the endpoint said no or GitHub did, and which one is in the
+          // text. GitHub's answer here means a write was routed, which is worth
+          // reading even though the registry leg above already failed for it.
+          `the tool failed — read which layer: ${
+            (refused.envelope?.result?.content ?? [])
+              .filter((b) => b.type === "text")
+              .map((b) => b.text)
+              .join(" ")
+              .slice(0, 200) || "(no text)"
+          }`
+        : "answered the write"
   );
 } else {
   check(
-    "P4 /readonly refuses a write even when the list admits one",
+    "P4 /readonly offers no write even when the list admits one",
     false,
     "could not open a session with a write tool listed"
   );

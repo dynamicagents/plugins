@@ -230,10 +230,24 @@ type McpCalled = {
  */
 function mcpStub(
   answers: Record<string, McpReply>,
-  opts: { sse?: boolean; sessionId?: string | null; failCall?: number } = {}
+  opts: {
+    sse?: boolean;
+    sessionId?: string | null;
+    failCall?: number;
+    /**
+     * Hold `notifications/initialized` open until {@link finishHandshake} is
+     * called, so a `tools/call` sent during the handshake is observable rather
+     * than a race. Nothing else in the protocol is delayed.
+     */
+    holdNotification?: boolean;
+  } = {}
 ) {
   const mcpCalls: McpCalled[] = [];
   let calls = 0;
+  let finishHandshake = () => {};
+  const notified = new Promise<void>((resolve) => {
+    finishHandshake = resolve;
+  });
   const frame = (payload: unknown, extra: Record<string, string> = {}) =>
     new Response(
       opts.sse
@@ -272,6 +286,7 @@ function mcpStub(
           );
         }
         if (body.method === "notifications/initialized") {
+          if (opts.holdNotification) await notified;
           return new Response(null, { status: 202 });
         }
         const name = body.params?.name ?? "";
@@ -315,11 +330,54 @@ function mcpStub(
         });
       }
     ) as ReturnType<typeof vi.spyOn>;
-  return { spy, mcpCalls };
+  return { spy, mcpCalls, finishHandshake: () => finishHandshake() };
 }
 
 /** The recorded answers, as `mcpStub` takes them. */
 const FIXTURE = recorded as unknown as Record<string, McpReply>;
+
+/**
+ * The values the recorded answers happen to carry, read out of them rather than
+ * copied into an assertion.
+ *
+ * `npm run probe:github-mcp -- --record` replaces every value in that file with
+ * a live pull request's, so a spec naming one of them would fail on the
+ * recording it exists to make trustworthy. What a capture settles is which
+ * **field** a render reads: asserting that the recorded title reaches the output
+ * proves `title` is still where a title lives, and survives re-recording.
+ *
+ * A spec that needs a particular value — an issue that is not a pull request, a
+ * check that failed — states it as an override instead, which is why the
+ * scenarios below do and only the shape tests read from here.
+ */
+const RECORDED = {
+  issue: FIXTURE["issue_read:get"] as unknown as {
+    title: string;
+    body: string;
+  },
+  comment: (
+    FIXTURE["issue_read:get_comments"] as unknown as {
+      user: { login: string };
+      body: string;
+    }[]
+  )[0]!,
+  pr: FIXTURE["pull_request_read:get"] as unknown as {
+    title: string;
+    head: { ref: string; sha: string };
+    base: { ref: string };
+  },
+  file: (
+    FIXTURE["pull_request_read:get_files"] as unknown as {
+      filename: string;
+    }[]
+  )[0]!,
+  review: (
+    FIXTURE["pull_request_read:get_reviews"] as unknown as {
+      user: { login: string };
+      state: string;
+    }[]
+  )[0]!
+};
 
 describe("token containment", () => {
   /**
@@ -1104,6 +1162,48 @@ describe("reading GitHub over MCP", () => {
   });
 
   /**
+   * Two reads in one model step, which the SDK is free to run at once.
+   *
+   * One handshake still, and — the part worth a test — no `tools/call` goes out
+   * before `notifications/initialized` has come back. Holding the negotiation's
+   * promise rather than the session it produces is what buys both: the second
+   * caller awaits the first's finished handshake instead of starting its own or
+   * taking a half-built one.
+   */
+  it("hands a concurrent read the same finished handshake", async () => {
+    const { spy, mcpCalls, finishHandshake } = mcpStub(FIXTURE, {
+      holdNotification: true
+    });
+    try {
+      const set = tools(recorder().exec);
+      const both = Promise.all([
+        run(set, "repo_pr_view", { dir: "/w/r", number: 7 }),
+        run(set, "repo_issue_view", { dir: "/w/r", number: 42 })
+      ]);
+      // Long enough for everything that is not waiting on the notification to
+      // have happened: the second read's `exec` and its own call, if it were
+      // going to make one.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(mcpCalls).toHaveLength(0);
+
+      finishHandshake();
+      await both;
+
+      const initializes = (spy.mock.calls as [unknown, RequestInit?][]).filter(
+        (call: [unknown, RequestInit?]) =>
+          (JSON.parse(String(call[1]?.body ?? "{}")) as { method?: string })
+            .method === "initialize"
+      );
+      expect(initializes).toHaveLength(1);
+      expect(mcpCalls.length).toBeGreaterThan(1);
+      for (const call of mcpCalls)
+        expect(call.headers.get("mcp-session-id")).toBe("session-1");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  /**
    * The allowlist is the bound on what this token can be used for, so it rides
    * on the request rather than being something a host configures. A read that
    * silently went out without it would reach every tool the server offers.
@@ -1182,8 +1282,8 @@ describe("reading GitHub over MCP", () => {
         dir: "/w/r",
         number: 7
       });
-      expect(result).toContain("Add flag");
-      expect(result).toContain("src/a.ts");
+      expect(result).toContain(RECORDED.pr.title);
+      expect(result).toContain(RECORDED.file.filename);
     } finally {
       spy.mockRestore();
     }
@@ -1196,7 +1296,7 @@ describe("reading GitHub over MCP", () => {
         dir: "/w/r",
         number: 7
       });
-      expect(result).toContain("Add flag");
+      expect(result).toContain(RECORDED.pr.title);
       expect(mcpCalls[0]!.headers.get("mcp-session-id")).toBeNull();
     } finally {
       spy.mockRestore();
@@ -1214,7 +1314,7 @@ describe("reading GitHub over MCP", () => {
         dir: "/w/r",
         number: 7
       });
-      expect(result).toContain("Add flag");
+      expect(result).toContain(RECORDED.pr.title);
       expect(mcpCalls.filter((c) => c.args.method === "get")).toHaveLength(2);
     } finally {
       spy.mockRestore();
@@ -1268,11 +1368,10 @@ describe("reading GitHub over MCP", () => {
           number: 42
         });
 
-        expect(result).toContain("Flag is ignored");
-        expect(result).toContain("The --json flag does nothing.");
-        expect(result).toContain("reviewer");
-        expect(result).toContain("needs a test");
-        expect(result).not.toContain("(pull request)");
+        expect(result).toContain(RECORDED.issue.title);
+        expect(result).toContain(RECORDED.issue.body);
+        expect(result).toContain(RECORDED.comment.user.login);
+        expect(result).toContain(RECORDED.comment.body);
       } finally {
         spy.mockRestore();
       }
@@ -1282,13 +1381,21 @@ describe("reading GitHub over MCP", () => {
      * This read carries no `pull_request` key, so the kind is derived from the
      * URL. Worth a test of its own: a pull request read as an issue and not
      * marked as one is the same answer for two different things.
+     *
+     * Both URLs are spelled out rather than taken from the recorded answer,
+     * because the probe reads a *pull request* through `issue_read` — so what
+     * `--record` captures is always the second of these two, and a recording
+     * would otherwise silently delete the first case.
      */
-    it("says when the number was a pull request", async () => {
+    it.each([
+      ["https://github.com/o/r/issues/42", false],
+      ["https://github.com/o/r/pull/42", true]
+    ])("derives the kind from %s", async (html_url, isPullRequest) => {
       const { spy } = readers({
         ...FIXTURE,
         "issue_read:get": {
           ...(FIXTURE["issue_read:get"] as object),
-          html_url: "https://github.com/o/r/pull/42"
+          html_url
         }
       });
       try {
@@ -1296,7 +1403,8 @@ describe("reading GitHub over MCP", () => {
           dir: "/w/r",
           number: 42
         });
-        expect(result).toContain("(pull request)");
+        if (isPullRequest) expect(result).toContain("(pull request)");
+        else expect(result).not.toContain("(pull request)");
       } finally {
         spy.mockRestore();
       }
@@ -1314,7 +1422,7 @@ describe("reading GitHub over MCP", () => {
 
         // Half an answer beats none: the issue was read, and the model is told
         // which half is missing rather than being handed a bare failure.
-        expect(result).toContain("Flag is ignored");
+        expect(result).toContain(RECORDED.issue.title);
         expect(result).toContain("comments could not be read");
       } finally {
         spy.mockRestore();
@@ -1374,11 +1482,13 @@ describe("reading GitHub over MCP", () => {
           number: 7
         });
 
-        expect(result).toContain("Add flag");
-        expect(result).toContain("coder/x → main");
-        expect(result).toContain("src/a.ts");
-        expect(result).toContain("copilot-pull-request-reviewer[bot]");
-        expect(result).toContain("commented");
+        expect(result).toContain(RECORDED.pr.title);
+        expect(result).toContain(
+          `${RECORDED.pr.head.ref} → ${RECORDED.pr.base.ref}`
+        );
+        expect(result).toContain(RECORDED.file.filename);
+        expect(result).toContain(RECORDED.review.user.login);
+        expect(result).toContain(RECORDED.review.state.toLowerCase());
       } finally {
         spy.mockRestore();
       }
@@ -1473,6 +1583,47 @@ describe("reading GitHub over MCP", () => {
       }
     });
 
+    /**
+     * The same reason the comment thread says it was cut, on the list an agent
+     * waits between sessions for: reviews arrive oldest first, so page one of a
+     * pull request with more is precisely the page the newest review is not on.
+     */
+    it("reports a review list that was cut", async () => {
+      const { spy } = readers({
+        ...FIXTURE,
+        "pull_request_read:get_reviews": Array.from(
+          { length: 100 },
+          (_, i) => ({
+            user: { login: `r${i}` },
+            state: "COMMENTED"
+          })
+        )
+      });
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+        expect(result).toMatch(/showing the first 100 reviews/i);
+        expect(result).toMatch(/newest are not among them/i);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("says nothing about review pagination when they all fit", async () => {
+      const { spy } = readers();
+      try {
+        const result = await run(tools(recorder().exec), "repo_pr_view", {
+          dir: "/w/r",
+          number: 7
+        });
+        expect(result).not.toMatch(/showing the first \d+ reviews/i);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("says so when the reviews could not be read at all", async () => {
       const { spy } = readers({
         "pull_request_read:get": FIXTURE["pull_request_read:get"],
@@ -1558,6 +1709,37 @@ describe("what the credential can reach", () => {
 
     expect(result).not.toMatch(/refusing/i);
     expect(gitCalls[0]!.req["url"]).toBe("https://git.acme.dev/o/r");
+  });
+
+  /**
+   * The other half of that independence, and the half that has to refuse.
+   *
+   * A widened allowlist admits an origin whose `owner/repo` names a *different*
+   * repository on github.com, which is where every API call goes. Resolving it
+   * would read that one and let `repo_pr_comment` write to it, so the host is
+   * checked rather than discarded — see `githubRepo` in `./context.ts`.
+   */
+  it("refuses the GitHub tools on a checkout from another allowed host", async () => {
+    const { exec } = recorder({
+      "rev-parse --git-dir": { success: true },
+      "remote get-url origin": { stdout: "https://git.acme.dev/o/r" }
+    });
+    const { git } = gitRecorder();
+    const { spy, mcpCalls } = mcpStub(FIXTURE);
+    try {
+      const result = await run(
+        tools(exec, { git, allowedHosts: ["git.acme.dev"] }),
+        "repo_pr_view",
+        { dir: "/w/r", number: 7 }
+      );
+
+      expect(result).toContain("git.acme.dev");
+      expect(result).toMatch(/github\.com alone/);
+      // Nothing was asked of GitHub about a repository on another host.
+      expect(mcpCalls).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("sends the allowlist with every credentialed operation, not just the first", async () => {
@@ -3099,13 +3281,18 @@ describe("a pull request's checks", () => {
   const SHA = "abc1234def5678";
 
   /**
-   * The two CI reads, keyed by method. The head commit is not looked up: each
-   * method resolves it from the pull request, and the combined status reports
-   * the sha it answered for — which is where the short sha in the render now
-   * comes from.
+   * The three reads, keyed by method: the head commit, then both CI APIs.
+   *
+   * The head is read because neither CI method takes a commit — each resolves
+   * the pull request's head for itself, so the two can answer for different
+   * ones. A scenario here agrees with itself by default, which is what lets the
+   * one below that disagrees say what it is testing.
    */
   const checks = async (answers: Record<string, McpReply>) => {
-    const { spy } = mcpStub(answers);
+    const { spy } = mcpStub({
+      "pull_request_read:get": { head: { sha: SHA } },
+      ...answers
+    });
     try {
       return await run(tools(recorder().exec), "repo_pr_checks", {
         dir: "/w/r",
@@ -3208,25 +3395,81 @@ describe("a pull request's checks", () => {
   });
 
   /**
-   * Without a sha there is no commit to report on, and the render would
+   * Without a head commit there is nothing to report on, and the render would
    * otherwise print `(undefined)` as though it had read one.
    */
-  it("refuses a number the combined status could not resolve", async () => {
+  it("refuses a number that resolves to no head commit", async () => {
     const result = await checks({
+      "pull_request_read:get": {},
       ...runs({ total_count: 0, check_runs: [] }),
-      "pull_request_read:get_status": { statuses: [] }
+      ...statuses({ statuses: [] })
     });
 
     expect(result).toContain("is not a pull request in o/r");
   });
 
+  /**
+   * A push landing mid-read is the failure the head read exists to catch, and
+   * it fails in the worst direction: an earlier commit's passing runs beside a
+   * newer commit's empty status list renders as "every check has passed", which
+   * is the one answer a waiting agent acts on by stopping.
+   */
+  it("gives no answer for a head that moved while it read", async () => {
+    const result = await checks({
+      ...runs({
+        total_count: 1,
+        check_runs: [
+          { name: "lint", status: "completed", conclusion: "success" }
+        ]
+      }),
+      "pull_request_read:get_status": { sha: "9999999aaaa", statuses: [] }
+    });
+
+    expect(result).toContain("could not be read as one commit's");
+    expect(result).toContain("abc1234");
+    expect(result).toContain("9999999");
+    expect(result).not.toContain("Every check has finished");
+  });
+
+  /** The same, when the combined status named no commit at all to compare. */
+  it("gives no answer when the status names no commit", async () => {
+    const result = await checks({
+      ...runs({ total_count: 0, check_runs: [] }),
+      "pull_request_read:get_status": { statuses: [] }
+    });
+
+    expect(result).toContain("no commit it named");
+  });
+
+  /**
+   * What the capture settles is which fields a render reads, not which values
+   * one recording holds — see {@link RECORDED}. The sentinels are the point:
+   * a renamed `name` renders as "(unnamed check)", and a renamed `check_runs`
+   * or `statuses` drops a whole API out of the count.
+   */
   it("reads the recorded shapes the server answers with", async () => {
     const result = await checks(FIXTURE);
-    // Both APIs, from one recorded answer each: a failed check run, a pending
-    // one, and a passing legacy commit status.
-    expect(result).toContain("1 failed, 1 still running, 1 passed");
-    expect(result).toContain("- Test (failure)");
-    expect(result).toContain("Still running:\n- Lint");
+    const recordedRuns = (
+      FIXTURE["pull_request_read:get_check_runs"] as unknown as {
+        check_runs: unknown[];
+      }
+    ).check_runs;
+    const recordedStatuses = (
+      FIXTURE["pull_request_read:get_status"] as unknown as {
+        statuses: unknown[];
+      }
+    ).statuses;
+
+    expect(result).toContain(
+      `Checks on #42 at ${RECORDED.pr.head.sha.slice(0, 7)}:`
+    );
+    expect(result).not.toContain("(unnamed");
+    const counted = /(\d+) failed, (\d+) still running, (\d+) passed/.exec(
+      result
+    )!;
+    expect(Number(counted[1]) + Number(counted[2]) + Number(counted[3])).toBe(
+      recordedRuns.length + recordedStatuses.length
+    );
   });
 });
 
@@ -3323,7 +3566,7 @@ describe("an origin the host reads", () => {
         "repo_pr_view",
         { dir: "/w/r", number: 7 }
       );
-      expect(result).toContain("#7 Add flag");
+      expect(result).toContain(`#7 ${RECORDED.pr.title}`);
       expect(mcpCalls[0]!.args).toMatchObject({
         owner: "o",
         repo: "r",
