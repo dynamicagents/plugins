@@ -88,7 +88,7 @@ export interface ComputerConfig extends WorkspaceClientConfig {
    *
    * "These tools" is exact: `/workspace`'s `workspaceExec` deliberately does not
    * merge it, so a proxy set here does not reach the git that
-   * `@dynamicagents/plugins/repo` runs through that export. The reasoning, and
+   * `@dynamicagents/plugins/repo-github` runs through that export. The reasoning, and
    * how a host opts in explicitly, is written up there.
    *
    * ## Put no secret here
@@ -108,7 +108,7 @@ export interface ComputerConfig extends WorkspaceClientConfig {
    *
    * Do not hand the agent the credential; hand it the *action*. Keep the secret
    * on the Worker and expose one tool that makes the call it is for.
-   * `@dynamicagents/plugins/repo` is the worked example: it holds a GitHub token, calls
+   * `@dynamicagents/plugins/repo-github` is the worked example: it holds a GitHub token, calls
    * the API from the Worker, and runs clone, fetch and push on the host's side of
    * the boundary. **No command in its container is ever given that token.**
    */

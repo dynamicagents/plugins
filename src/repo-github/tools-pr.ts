@@ -2,11 +2,11 @@ import { action, type Action } from "@cloudflare/think";
 import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
+import { sha256Hex } from "@dynamicagents/core";
 import {
   actionTask,
   GITHUB_ACTION_TIMEOUT_MS,
-  GITHUB_PAGE_SIZE,
-  sha256
+  GITHUB_PAGE_SIZE
 } from "./context.js";
 import type { RepoContext } from "./context.js";
 
@@ -328,7 +328,7 @@ export function prActions(ctx: RepoContext): Record<string, Action> {
       inputSchema: commentInput,
       timeoutMs: GITHUB_ACTION_TIMEOUT_MS,
       idempotencyKey: async ({ input, ctx: turn }) =>
-        `${actionTask(turn)}:${input.dir}#${input.number}:comment:${await sha256(input.body)}`,
+        `${actionTask(turn)}:${input.dir}#${input.number}:comment:${await sha256Hex(input.body)}`,
       execute: async ({ dir, number, body }) => {
         const target = await githubRepo(dir);
         if ("refusal" in target) throw new Error(target.refusal);

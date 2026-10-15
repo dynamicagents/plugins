@@ -67,7 +67,7 @@ exclusions, so an excluded directory is never descended into at all.
 ## `.git` is off limits
 
 Present in the workspace, refused by the file tools anyway, and skipped by walks.
-Reading it tells the model less than [`/repo`](../repo/) does, and writing it
+Reading it tells the model less than [`/repo-github`](../repo-github/) does, and writing it
 corrupts the checkout. Repository work goes through the repo tools.
 
 ## Searching
@@ -97,7 +97,7 @@ Consequences worth stating outright:
   and so does a `postinstall`. Use it for a registry host or a `CI` flag, not a key.
   When an agent needs to _act_ with a credential, keep the credential on the Worker
   and give the agent one tool that makes the call:
-  [`/repo`](../repo/)'s `repo_open_pr` is the worked example, and its token never
+  [`/repo-github`](../repo-github/)'s `repo_open_pr` is the worked example, and its token never
   enters the container at all.
 - **`grep`'s `regex` compiles a model-authored pattern** and runs it over every
   file under `path`, inside the Durable Object. A catastrophic-backtracking pattern

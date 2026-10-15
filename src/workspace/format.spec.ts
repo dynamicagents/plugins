@@ -1,39 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { cancelledNote, truncateOutput } from "./format.js";
+import { cancelledNote } from "./format.js";
 
 /**
- * Everything that decides what a result *looks like* by the time a model sees it.
+ * Everything this module decides about what a result *looks like* by the time a
+ * model sees it.
  *
  * Pure functions over strings, so there is no workspace stub here and none is
- * wanted: every assertion below is about a budget being spent the way its content
- * deserves, and a container would only make that slower to find out.
+ * wanted: every assertion below is about a budget being spent the way its
+ * content deserves, and a container would only make that slower to find out.
+ *
+ * The output bound itself is `@dynamicagents/core`'s `truncateOutput` now, and
+ * its specs are there — including the small-budget inversion that was a real
+ * defect in a copy of it.
  */
-
-describe("truncateOutput", () => {
-  it("keeps the head and the tail, which is where the error and the summary are", () => {
-    const text = "A".repeat(200) + "B".repeat(200);
-    const out = truncateOutput(text, 120);
-
-    expect(out.length).toBeLessThan(text.length);
-    expect(out.startsWith("A")).toBe(true);
-    expect(out.endsWith("B")).toBe(true);
-    expect(out).toContain("omitted from the middle");
-  });
-
-  /**
-   * The regression this guard exists for. Without it, `half` goes negative,
-   * `slice(-0)` returns the whole string, and the function hands back *more*
-   * than it was given — a silent inversion of its only job, reachable from a
-   * public config field.
-   */
-  it("never returns more than it was given, however small the budget", () => {
-    for (const max of [0, 1, 40, 60, 80]) {
-      expect(truncateOutput("x".repeat(500), max).length).toBeLessThanOrEqual(
-        Math.max(max, 0)
-      );
-    }
-  });
-});
 
 /**
  * `renderResult` says this on its verdict line, so `bash` has always had it.

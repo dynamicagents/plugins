@@ -40,7 +40,7 @@ function wrapped(command: string, shell: string): string {
  * This is the variant for a caller that **reads the result in code**: `stdout` is
  * a data channel it compares or parses, and `stderr` is a separate diagnostic.
  * {@link file://./exec.ts workspaceExec} is that caller, on behalf of
- * `@dynamicagents/plugins/repo`, which asks git questions like
+ * `@dynamicagents/plugins/repo-github`, which asks git questions like
  * `symbolic-ref --short refs/remotes/origin/HEAD` and `rev-list --count` and
  * needs the answer alone.
  *

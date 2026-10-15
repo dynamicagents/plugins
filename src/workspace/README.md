@@ -9,7 +9,7 @@ and when the container is replaced the tree is pushed into the new one — so th
 checkout outlives the container that held it.
 
 What builds on it: [`/computer`](../computer/) is the agent's tools over it;
-[`/repo`](../repo/) and [`/scratch`](../scratch/) take `workspaceExec` injected;
+[`/repo-github`](../repo-github/) and [`/scratch`](../scratch/) take `workspaceExec` injected;
 [`/claude-code`](../claude-code/) runs its sessions in its container.
 
 ## `node_modules` is on the container's disk
@@ -93,7 +93,7 @@ Sub-agents reach the parent's checkout through `WORKSPACE_RUNTIME_KEY`: the chec
 is one the parent chose, so a sub-agent cannot compute the name itself. The spec's
 `prepare` puts it in `runtime()`, and the tools and the workspace read it back.
 
-`workspaceExec` exports the shell alone, for [`/repo`](../repo/) — so that plugin gets
+`workspaceExec` exports the shell alone, for [`/repo-github`](../repo-github/) — so that plugin gets
 git on a real container without either importing the other. What runs through it is
 `/repo`'s **unauthenticated** half: `status`, `diff`, `add`, `commit`, `checkout`. The
 three operations that authenticate — clone, fetch, push — never reach the container,
@@ -145,7 +145,7 @@ The bundle cost is nothing — `sideEffects` is false, so an agent that only cal
 written into the container's system git config, so a repository the container made for
 itself — a submodule, a `git init` — is attributed rather than nameless.
 
-**`@dynamicagents/plugins/repo` takes its identity separately**, as `RepoConfig.author`,
+**`@dynamicagents/plugins/repo-github` takes its identity separately**, as `RepoConfig.author`,
 and falls back to a generic one when a consumer leaves it unset. Nothing here can reach
 that config and nothing checks the two agree, so a deployment answers both from one
 place: one exported helper that reads the binding, called by the workspace object and

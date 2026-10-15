@@ -60,7 +60,7 @@ export interface WorkspaceClientConfig {
  * An `exec` bound to this workspace, for plugins that need a shell but should
  * not own a container.
  *
- * `@dynamicagents/plugins/repo` is the reason this exists: it needs `git` on a real
+ * `@dynamicagents/plugins/repo-github` is the reason this exists: it needs `git` on a real
  * shell, but depending on this module would weld the two together and stop a
  * host from pointing it at its own container. Structurally typed for the same
  * reason — the two plugins compose without either importing the other.

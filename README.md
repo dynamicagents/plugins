@@ -27,7 +27,7 @@ import { StepAgent } from "@dynamicagents/core/agent";
 import { browser } from "@dynamicagents/plugins/browser";
 import { computer, computerWorkspace } from "@dynamicagents/plugins/computer";
 // `workspaceConfig` names the `/workspace` object this agent works in.
-import { repo } from "@dynamicagents/plugins/repo";
+import { repo } from "@dynamicagents/plugins/repo-github";
 
 export class Coder extends StepAgent<Env> {
   // `computer` runs commands in a container, so the agent's own workspace —
@@ -69,7 +69,7 @@ plugin to the tools an install names.
 | [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                                               | `BROWSER` (paid plan)                              |
 | [`/claude-code`](src/claude-code/) | Sub-agents whose model is a Claude Code session in the workspace container                                       | one or more `claude setup-token` credentials       |
 | [`/computer`](src/computer/)       | An agent's tools over a workspace — `bash`, `grep`, `edit` — and the workspace Think's file tools use            | a `/workspace` object                              |
-| [`/repo`](src/repo/)               | Clone, commit, push a branch, open a pull request — over any container                                           | `GITHUB_TOKEN`                                     |
+| [`/repo-github`](src/repo-github/) | Clone, commit, push a branch, open a pull request on GitHub — over any container                                 | `GITHUB_TOKEN`                                     |
 | [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout                       | —                                                  |
 | [`/workspace`](src/workspace/)     | The Durable Object a container workspace lives in — its container, credentialed git, dependency install and sync | `@cloudflare/computer`, `@platformatic/vfs` (paid) |
 
@@ -111,7 +111,7 @@ The rules the whole design rests on:
 
 A write that must not happen twice — a comment, a reply — is a Think `action()` in
 `actions(ctx)`, with an idempotency key, so a recovered turn replays it rather than
-repeating it. [`/repo`](src/repo/) has two.
+repeating it. [`/repo-github`](src/repo-github/) has two.
 
 A plugin that owns a domain some work is delegated into exports a `SubAgentSpec` as data,
 and the agent binds it to a `SubAgent` class — see [`/claude-code`](src/claude-code/).

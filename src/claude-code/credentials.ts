@@ -38,6 +38,7 @@
  * rotation rules be specified without a container: a pool with a fake store is
  * two object literals.
  */
+import { sha256Hex } from "@dynamicagents/core";
 
 /**
  * One entry's state, as the host persists it.
@@ -88,13 +89,8 @@ export interface CredentialState {
  * resisting a preimage attack.
  */
 export async function fingerprint(token: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(token)
-  );
-  return [...new Uint8Array(digest).slice(0, 8)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  // Eight bytes, so sixteen hex characters.
+  return (await sha256Hex(token)).slice(0, 16);
 }
 
 /**

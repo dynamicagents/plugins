@@ -1,9 +1,15 @@
-# `@dynamicagents/plugins/repo`
+# `@dynamicagents/plugins/repo-github`
 
-Clone, commit, push a work branch, open a pull request.
+Clone, commit, push a work branch, open a pull request — on GitHub.
+
+Named for the provider, so a second forge is a `repo-*` sibling rather than a
+fork of this one. What is generic keeps generic names: the factory is still
+`repo()`, the tools are still `repo_clone` … `repo_pr_checks`, and the config
+and result types are still `Repo*`. An agent installs one forge plugin, so
+nothing the model reads has to change when the provider does.
 
 ```ts
-import { repo } from "@dynamicagents/plugins/repo";
+import { repo } from "@dynamicagents/plugins/repo-github";
 import { workspaceExec } from "@dynamicagents/plugins/workspace";
 
 repo({
@@ -41,9 +47,10 @@ credential somewhere nobody asked about.
 **Reading goes through GitHub's hosted MCP server; writing does not.** Every read
 here — an issue, a pull request, its reviews, its review threads, its checks — is a
 `tools/call` to `https://api.githubcopilot.com/mcp/readonly`, made from the Worker
-with the deployment's token as `Authorization: Bearer`. `src/repo/mcp.ts` holds the
-transport, the endpoint and the `X-MCP-Tools` allowlist, which is two read tools and
-is deliberately not something a host can widen.
+with the deployment's token as `Authorization: Bearer`. The transport is
+`@dynamicagents/core/mcp`'s, over the official `@modelcontextprotocol/client`;
+`./mcp.ts` holds the endpoint and the `X-MCP-Tools` allowlist, which is two
+read tools and is deliberately not something a host can widen.
 
 Opening a pull request and commenting stay on REST, and answering a review thread
 stays on GraphQL — `isResolved` aside, resolving a thread has no REST endpoint, and

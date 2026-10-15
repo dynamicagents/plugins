@@ -2,8 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import type { Action, ActionContext } from "@cloudflare/think";
 import type { Tool, ToolSet } from "ai";
 import {
-  MCP_TOOLS,
-  MCP_URL,
+  GITHUB_MCP_TOOLS,
+  GITHUB_MCP_URL,
   repo,
   REPO_TOOL_NAMES,
   type RepoConfig,
@@ -217,50 +217,23 @@ type McpCalled = {
 /**
  * GitHub's hosted MCP server, answering by `<tool>:<method>`.
  *
- * Enough of streamable HTTP to hold the plugin to the protocol rather than to
- * a convenient shape: `initialize` is required before any call and hands back a
- * session id the later requests must carry, and an unknown tool comes back as a
- * JSON-RPC **error** rather than a result — which is what an `X-MCP-Tools`
- * refusal looks like from the client's side, and the one failure a reader must
- * not render as "nothing there".
+ * Enough of streamable HTTP for a real client to complete a handshake against
+ * it — `initialize` first, a session id the later requests carry — and an
+ * unknown tool answered as a JSON-RPC **error** rather than a result, which is
+ * what an `X-MCP-Tools` refusal looks like from the client's side and the one
+ * failure a reader must not render as "nothing there".
  *
- * `sse` answers in the other encoding the server may choose. A client that can
- * only read JSON passes every test here and then returns nothing in
- * production, so one case drives the server down that branch deliberately.
+ * Only the encodings and recoveries this plugin's own tests need. The protocol
+ * is `@dynamicagents/core/mcp`'s, and the server it is held to is stubbed
+ * there.
  */
-function mcpStub(
-  answers: Record<string, McpReply>,
-  opts: {
-    sse?: boolean;
-    sessionId?: string | null;
-    failCall?: number;
-    /**
-     * Hold `notifications/initialized` open until {@link finishHandshake} is
-     * called, so a `tools/call` sent during the handshake is observable rather
-     * than a race. Nothing else in the protocol is delayed.
-     */
-    holdNotification?: boolean;
-  } = {}
-) {
+function mcpStub(answers: Record<string, McpReply>) {
   const mcpCalls: McpCalled[] = [];
-  let calls = 0;
-  let finishHandshake = () => {};
-  const notified = new Promise<void>((resolve) => {
-    finishHandshake = resolve;
-  });
   const frame = (payload: unknown, extra: Record<string, string> = {}) =>
-    new Response(
-      opts.sse
-        ? `event: message\ndata: ${JSON.stringify(payload)}\n\n`
-        : JSON.stringify(payload),
-      {
-        status: 200,
-        headers: {
-          "content-type": opts.sse ? "text/event-stream" : "application/json",
-          ...extra
-        }
-      }
-    );
+    new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json", ...extra }
+    });
 
   const spy = vi
     .spyOn(globalThis, "fetch")
@@ -274,28 +247,27 @@ function mcpStub(
           params?: { name?: string; arguments?: Record<string, unknown> };
         };
         if (body.method === "initialize") {
-          const sessionId =
-            opts.sessionId === undefined ? "session-1" : opts.sessionId;
           return frame(
             {
               jsonrpc: "2.0",
               id: body.id,
-              result: { protocolVersion: "2025-06-18", capabilities: {} }
+              result: {
+                protocolVersion: "2025-06-18",
+                capabilities: {},
+                // Required of the result, so a client that validates its
+                // handshake refuses a server without it.
+                serverInfo: { name: "github-mcp", version: "1" }
+              }
             },
-            sessionId ? { "mcp-session-id": sessionId } : {}
+            { "mcp-session-id": "session-1" }
           );
         }
         if (body.method === "notifications/initialized") {
-          if (opts.holdNotification) await notified;
           return new Response(null, { status: 202 });
         }
         const name = body.params?.name ?? "";
         const args = body.params?.arguments ?? {};
         mcpCalls.push({ name, args, headers, url });
-        calls += 1;
-        // A session the server has forgotten, once, so the retry can be seen.
-        if (opts.failCall === calls)
-          return new Response("gone", { status: 404 });
         const key = `${name}:${String(args.method ?? "")}`;
         if (key in answers) {
           const answer = answers[key];
@@ -330,7 +302,7 @@ function mcpStub(
         });
       }
     ) as ReturnType<typeof vi.spyOn>;
-  return { spy, mcpCalls, finishHandshake: () => finishHandshake() };
+  return { spy, mcpCalls };
 }
 
 /** The recorded answers, as `mcpStub` takes them. */
@@ -1122,12 +1094,16 @@ describe("talking to GitHub", () => {
 /**
  * Reading GitHub through its hosted MCP server.
  *
- * Two properties are under test and only one of them is a feature. The
- * transport has to speak enough of streamable HTTP that a real server answers
- * it — `initialize` first, the session carried, either encoding read — and the
- * credential has to stay bounded: the token goes out as `Authorization` to one
- * host, under an allowlist the model cannot widen and a path that refuses
- * writes.
+ * What is under test here is this plugin's half: that the connection is kept
+ * per plugin instance however often its tools are rebuilt, that the credential
+ * stays bounded — the token out as `Authorization` to one host, under an
+ * allowlist the model cannot widen and a path that refuses writes — and that a
+ * refusal is rendered as one.
+ *
+ * The protocol itself is not asserted here. `@dynamicagents/core/mcp` owns the
+ * handshake, the session, either encoding and the recovery, and its specs are
+ * where those live; duplicating them against a stub here would only pin the
+ * same behaviour twice and let the copies disagree.
  */
 describe("reading GitHub over MCP", () => {
   const readers = (answers: Record<string, McpReply> = FIXTURE) =>
@@ -1162,48 +1138,6 @@ describe("reading GitHub over MCP", () => {
   });
 
   /**
-   * Two reads in one model step, which the SDK is free to run at once.
-   *
-   * One handshake still, and — the part worth a test — no `tools/call` goes out
-   * before `notifications/initialized` has come back. Holding the negotiation's
-   * promise rather than the session it produces is what buys both: the second
-   * caller awaits the first's finished handshake instead of starting its own or
-   * taking a half-built one.
-   */
-  it("hands a concurrent read the same finished handshake", async () => {
-    const { spy, mcpCalls, finishHandshake } = mcpStub(FIXTURE, {
-      holdNotification: true
-    });
-    try {
-      const set = tools(recorder().exec);
-      const both = Promise.all([
-        run(set, "repo_pr_view", { dir: "/w/r", number: 7 }),
-        run(set, "repo_issue_view", { dir: "/w/r", number: 42 })
-      ]);
-      // Long enough for everything that is not waiting on the notification to
-      // have happened: the second read's `exec` and its own call, if it were
-      // going to make one.
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(mcpCalls).toHaveLength(0);
-
-      finishHandshake();
-      await both;
-
-      const initializes = (spy.mock.calls as [unknown, RequestInit?][]).filter(
-        (call: [unknown, RequestInit?]) =>
-          (JSON.parse(String(call[1]?.body ?? "{}")) as { method?: string })
-            .method === "initialize"
-      );
-      expect(initializes).toHaveLength(1);
-      expect(mcpCalls.length).toBeGreaterThan(1);
-      for (const call of mcpCalls)
-        expect(call.headers.get("mcp-session-id")).toBe("session-1");
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  /**
    * The allowlist is the bound on what this token can be used for, so it rides
    * on the request rather than being something a host configures. A read that
    * silently went out without it would reach every tool the server offers.
@@ -1217,8 +1151,8 @@ describe("reading GitHub over MCP", () => {
       });
 
       const call = mcpCalls[0]!;
-      expect(call.url).toBe(MCP_URL);
-      expect(MCP_URL).toMatch(/\/readonly$/);
+      expect(call.url).toBe(GITHUB_MCP_URL);
+      expect(GITHUB_MCP_URL).toMatch(/\/readonly$/);
       expect(call.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
       expect(call.headers.get("x-mcp-tools")).toBe(
         "pull_request_read,issue_read"
@@ -1238,7 +1172,7 @@ describe("reading GitHub over MCP", () => {
    * change, and this is where it has to be argued for.
    */
   it("allows two read tools and nothing that writes", () => {
-    expect([...MCP_TOOLS]).toEqual(["pull_request_read", "issue_read"]);
+    expect([...GITHUB_MCP_TOOLS]).toEqual(["pull_request_read", "issue_read"]);
     for (const forbidden of [
       "merge_pull_request",
       "add_issue_comment",
@@ -1250,7 +1184,7 @@ describe("reading GitHub over MCP", () => {
       "issue_write",
       "request_copilot_review"
     ]) {
-      expect(MCP_TOOLS as readonly string[]).not.toContain(forbidden);
+      expect(GITHUB_MCP_TOOLS as readonly string[]).not.toContain(forbidden);
     }
   });
 
@@ -1270,52 +1204,6 @@ describe("reading GitHub over MCP", () => {
       });
       expect(result).toMatch(/refused pull_request_read/);
       expect(result).toMatch(/not found/);
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it("reads an answer the server streamed instead of returning as JSON", async () => {
-    const { spy } = mcpStub(FIXTURE, { sse: true });
-    try {
-      const result = await run(tools(recorder().exec), "repo_pr_view", {
-        dir: "/w/r",
-        number: 7
-      });
-      expect(result).toContain(RECORDED.pr.title);
-      expect(result).toContain(RECORDED.file.filename);
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it("works against a server that keeps no session", async () => {
-    const { spy, mcpCalls } = mcpStub(FIXTURE, { sessionId: null });
-    try {
-      const result = await run(tools(recorder().exec), "repo_pr_view", {
-        dir: "/w/r",
-        number: 7
-      });
-      expect(result).toContain(RECORDED.pr.title);
-      expect(mcpCalls[0]!.headers.get("mcp-session-id")).toBeNull();
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  /**
-   * A session the server forgot. Reads are repeatable, so this renegotiates and
-   * asks again rather than handing the model a failure it can do nothing with.
-   */
-  it("renegotiates once when the session has expired", async () => {
-    const { spy, mcpCalls } = mcpStub(FIXTURE, { failCall: 1 });
-    try {
-      const result = await run(tools(recorder().exec), "repo_pr_view", {
-        dir: "/w/r",
-        number: 7
-      });
-      expect(result).toContain(RECORDED.pr.title);
-      expect(mcpCalls.filter((c) => c.args.method === "get")).toHaveLength(2);
     } finally {
       spy.mockRestore();
     }
