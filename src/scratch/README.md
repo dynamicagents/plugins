@@ -79,7 +79,7 @@ them. Only a reset makes a scratchpad empty, so that is the only case where
 
 ## What the host owns
 
-The same split [`/repo`](../repo/) makes: this plugin knows what a scratchpad
+The same split [`/repo-github`](../repo-github/) makes: this plugin knows what a scratchpad
 _is_, the host knows how it addresses one.
 
 ```ts

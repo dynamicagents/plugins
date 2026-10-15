@@ -1,5 +1,5 @@
 import type { ActionContext } from "@cloudflare/think";
-import { sha256Hex, truncateOutput } from "@dynamicagents/core";
+import { truncateOutput } from "@dynamicagents/core";
 import { githubMcp, type GithubMcpCall } from "./mcp.js";
 import {
   DEFAULT_ALLOWED_HOSTS,
@@ -78,13 +78,14 @@ export type RunResult = Awaited<ReturnType<RepoExec>> & { unreachable?: true };
 /**
  * What to tell the model when the plumbing, not the command, is the problem.
  *
- * A sibling of the computer plugin's `execLostNote` rather than an import, for
- * the same reason {@link truncateOutput} is a copy: `verify:exports` fails any
- * subpath whose module graph reaches a sibling's, and installing `repo` must
- * not drag `/computer` in behind it. The wording differs anyway, and the
- * difference is the point — that plugin cannot know the lost command was git,
- * and this one does. What a model needs after a lost `git push` is not "re-run
- * it" but whether re-running it is *safe*.
+ * A sibling of the computer plugin's `execLostNote` rather than an import:
+ * `verify:exports` fails any subpath whose module graph reaches a sibling's,
+ * and installing this plugin must not drag `/computer` in behind it. A helper
+ * two plugins both want goes to `@dynamicagents/core` instead, the way
+ * `truncateOutput` did — but this is not one of those. The wording differs, and
+ * the difference is the point: that plugin cannot know the lost command was
+ * git, and this one does. What a model needs after a lost `git push` is not
+ * "re-run it" but whether re-running it is *safe*.
  */
 function unreachableNote(err: unknown): string {
   if ((err as { code?: unknown } | null | undefined)?.code === "EEXEC_LOST") {

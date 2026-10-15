@@ -33,7 +33,7 @@ import type { AgentPlugin } from "@dynamicagents/core";
  *
  * ## What the host owns
  *
- * The same split [`/repo`](../repo/) makes, and for the same reason — this plugin
+ * The same split [`/repo-github`](../repo-github/) makes, and for the same reason — this plugin
  * knows what a scratchpad *is*, the host knows how it addresses one:
  *
  * - {@link ScratchConfig.beforeOpen} selects the workspace, before anything runs.

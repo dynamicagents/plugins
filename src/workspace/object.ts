@@ -47,7 +47,7 @@ import type { InstallPlan, InstallState } from "./install.js";
 // The shape `/repo` already defines for exactly this: a git failure is data,
 // because it means git answered. A throw on this path means the object was
 // unreachable, which is a different thing and must stay distinguishable.
-import type { RepoGitResult } from "../repo/index.js";
+import type { RepoGitResult } from "../repo-github/index.js";
 
 /**
  * A workspace: one Durable Object, one container, one repository.
