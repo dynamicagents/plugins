@@ -121,6 +121,9 @@ export function serveSandboxDaemon(
       `the sandbox daemon runs as the agent (uid ${AGENT_UID}), and this is uid ${uid}: start it through setpriv`
     );
   const env = options.env ?? process.env;
+  // `serveFromEnv` deletes it from the env it is given, and the CLI inherits
+  // `process.env`: whatever env was given, the CLI gets no way to the daemon.
+  if (env !== process.env) delete process.env[CONTAINER_ENV.token];
   const runtimeId = env[CONTAINER_ENV.runtimeId];
   if (!runtimeId)
     throw new Error(

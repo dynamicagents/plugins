@@ -264,6 +264,12 @@ describe("checkouts and installs", () => {
     );
     expect(installs).toHaveLength(1);
     expect(installs[0]).toContain("/workspace/a");
+    // A checkout's files may be the agent's symlinks: never read as root.
+    const reads = joined((await sandbox.fake()).execs).filter((cmd) =>
+      cmd.includes("cat ")
+    );
+    expect(reads.length).toBeGreaterThan(0);
+    for (const read of reads) expect(read).toMatch(/^setpriv /);
   });
 });
 

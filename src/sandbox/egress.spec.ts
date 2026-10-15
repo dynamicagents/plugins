@@ -43,13 +43,17 @@ const basic = (password: string) =>
 function receivePack(refs: string[]): ArrayBuffer {
   const zero = "0".repeat(40);
   const one = "1".repeat(40);
+  const encoder = new TextEncoder();
   const lines = refs.map((ref, i) => {
     const payload = `${zero} ${one} ${ref}${i === 0 ? "\0report-status side-band-64k" : ""}\n`;
-    return (payload.length + 4).toString(16).padStart(4, "0") + payload;
+    const length = encoder.encode(payload).byteLength + 4;
+    return length.toString(16).padStart(4, "0") + payload;
   });
-  const bytes = new TextEncoder().encode(`${lines.join("")}0000PACK....`);
+  const bytes = encoder.encode(`${lines.join("")}0000PACK....`);
   return bytes.buffer.slice(0, bytes.byteLength) as ArrayBuffer;
 }
+
+const streamOf = (text: string) => new Blob([text]).stream();
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -152,6 +156,21 @@ describe("sandboxEgress — GitHub", () => {
       "refs/heads/claude-coordinator/x",
       "refs/heads/claude-coordinator/y"
     ]);
+  });
+
+  it("reads a ref as the UTF-8 git wrote it", async () => {
+    expect(
+      await receivePackRefs(
+        new Blob([receivePack(["refs/heads/claude-coordinator/é"])]).stream(),
+        null
+      )
+    ).toEqual(["refs/heads/claude-coordinator/é"]);
+  });
+
+  it("refuses a command list git would not have written, rather than reading past it", async () => {
+    for (const body of ["00051-001", "0+3fabc", "0003", "zzzz", "fff1"]) {
+      await expect(receivePackRefs(streamOf(body), null)).rejects.toThrow();
+    }
   });
 
   it("forwards the whole push, pack included, and refuses one that names no ref", async () => {

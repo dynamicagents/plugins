@@ -183,6 +183,8 @@ export abstract class SandboxObjectBase<
   #running = 0;
   /** A stop under way. Work that would start the container waits it out. */
   #stopping: Promise<unknown> | undefined;
+  /** Reclaimed: its storage is gone, and this instance is about to be. */
+  #gone = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -281,7 +283,6 @@ export abstract class SandboxObjectBase<
    * register, and any checkout an image change left behind.
    */
   async ensureRunning(): Promise<{ runtimeId: string }> {
-    await this.#admit();
     await this.#touch();
     if (!this.#container.running) {
       const woke = await this.#harness
@@ -333,7 +334,10 @@ export abstract class SandboxObjectBase<
       }
     }
     await this.#restoreMissing();
-    await this.#rootExec([
+    // As the agent, whose directory it is: a write as root would follow a
+    // symlink the agent left there. A marker the agent forges only starts its
+    // own CLI early.
+    await this.#agentExec([
       "sh",
       "-c",
       `printf %s ${shellQuote(runtimeId)} > ${EGRESS_READY}`
@@ -385,6 +389,10 @@ export abstract class SandboxObjectBase<
   /** Wait out a stop in progress. */
   async #admit(): Promise<void> {
     while (this.#stopping) await this.#stopping.catch(() => undefined);
+    if (this.#gone)
+      throw new Error(
+        `[${this.#cfg.label}] this sandbox was just reclaimed: call it again`
+      );
   }
 
   /**
@@ -414,6 +422,14 @@ export abstract class SandboxObjectBase<
 
   async #rootExec(argv: readonly string[]): Promise<ExecResult> {
     return this.#run(argv, {});
+  }
+
+  /**
+   * As the agent, in a container already running. Anything that reads or
+   * writes a path the agent controls goes through here, never as root.
+   */
+  async #agentExec(argv: readonly string[]): Promise<ExecResult> {
+    return this.#run(asAgent(argv), { env: agentEnv() });
   }
 
   async #run(
@@ -842,7 +858,9 @@ export abstract class SandboxObjectBase<
     });
   }
 
+  /** Mark a use — after any stop, so a reclaim cannot erase what this call writes. */
   async #touch(): Promise<void> {
+    await this.#admit();
     const now = Date.now();
     await this.ctx.storage.put(LAST_USED_KEY, now);
     await this.#idle.set(
@@ -981,7 +999,8 @@ export abstract class SandboxObjectBase<
     await this.ctx.storage.put(INSTALL_ARMED_KEY, {
       ...target,
       job,
-      limitMs: timeoutMs
+      limitMs: timeoutMs,
+      runtimeId: (await this.#harness.container()).runtimeId ?? ""
     } satisfies ArmedInstall);
     await this.#installPoll.set(new Date(Date.now() + INSTALL_POLL_MS));
     return running;
@@ -1024,8 +1043,25 @@ export abstract class SandboxObjectBase<
       await fail("the container stopped while it installed");
       return;
     }
+    // Another container is not running it: the disk it was writing is gone
+    // with the one that was, so it runs again here.
+    if ((await this.#harness.container()).runtimeId !== armed.runtimeId) {
+      await this.ctx.storage.put(INSTALL_KEY, {
+        state: "failed",
+        command: state.command,
+        error: "the container it ran in was replaced",
+        finishedAt: Date.now()
+      } satisfies InstallState);
+      await this.#beginInstall({
+        dir: armed.dir,
+        ...(armed.repo ? { repo: armed.repo } : {})
+      });
+      return;
+    }
     const { exit: exitFile, log } = installFiles(armed.job);
-    const done = await this.#rootExec([
+    // As the agent: the files are in its directory, and a root read would
+    // follow a symlink it left there into a file only root may read.
+    const done = await this.#agentExec([
       "sh",
       "-c",
       `cat ${exitFile} 2>/dev/null; echo; tail -c 2000 ${log} 2>/dev/null`
@@ -1082,8 +1118,9 @@ export abstract class SandboxObjectBase<
     return {
       exists: async (path) =>
         (await this.#rootExec(["test", "-e", path])).exitCode === 0,
+      // As the agent: a checkout's files are its own, and may be symlinks.
       readFile: async (path) => {
-        const read = await this.#rootExec(["cat", path]);
+        const read = await this.#agentExec(["cat", path]);
         if (read.exitCode !== 0)
           throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
         return read.stdout;
@@ -1118,6 +1155,7 @@ export abstract class SandboxObjectBase<
           .catch(() => undefined);
       }
     }
+    this.#gone = true;
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     // After the reply: this instance still holds the state just deleted.
@@ -1162,10 +1200,11 @@ interface InstallTarget {
   repo?: string;
 }
 
-/** The running install: its checkout, the job its files are named for, and its limit. */
+/** The running install: its checkout, the job its files are named for, its limit, and the container it runs in. */
 interface ArmedInstall extends InstallTarget {
   job: string;
   limitMs: number;
+  runtimeId: string;
 }
 
 function installFiles(job: string): { exit: string; log: string } {

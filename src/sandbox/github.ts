@@ -136,6 +136,8 @@ export function branchAllowed(policy: GitPushPolicy, branch: string): boolean {
 
 /** A command list git would never send: thousands of refs fit well inside it. */
 const COMMANDS_MAX_BYTES = 1 << 20;
+/** pkt-line's own ceiling on one packet, its four length digits included. */
+const PKT_MAX = 65520;
 
 /**
  * The refs a `git-receive-pack` request updates, from its pkt-line commands.
@@ -145,6 +147,11 @@ const COMMANDS_MAX_BYTES = 1 << 20;
  * so a caller hands this one branch of a `tee()` and forwards the other: the
  * pack is never held in the Worker. git compresses the request body when it is
  * large, so a gzip body is inflated as it is read.
+ *
+ * Read as strictly as git reads it, since the refs this returns are the ones a
+ * policy allows: a length is four hex digits, `0000` ends the list, and any
+ * other packet shorter than its own length or past the ceiling is refused
+ * rather than skipped. A ref is UTF-8, as git writes it.
  */
 export async function receivePackRefs(
   body: ReadableStream<Uint8Array>,
@@ -155,18 +162,23 @@ export async function receivePackRefs(
       ? body.pipeThrough(new DecompressionStream("gzip"))
       : body
   ).getReader();
-  const text = new TextDecoder("latin1");
+  const ascii = new TextDecoder("latin1");
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const refs: string[] = [];
   let buffer = new Uint8Array(0);
   let read = 0;
   try {
     for (;;) {
       while (buffer.length >= 4) {
-        const length = Number.parseInt(text.decode(buffer.subarray(0, 4)), 16);
-        // A flush ends the list; anything that is not a length is not one.
-        if (!Number.isFinite(length) || length < 4) return refs;
+        const digits = ascii.decode(buffer.subarray(0, 4));
+        if (!/^[0-9a-f]{4}$/i.test(digits))
+          throw new Error(`not a pkt-line length: ${JSON.stringify(digits)}`);
+        const length = Number.parseInt(digits, 16);
+        if (length === 0) return refs;
+        if (length < 4 || length > PKT_MAX)
+          throw new Error(`a pkt-line of length ${length} is not a command`);
         if (buffer.length < length) break;
-        const line = text.decode(buffer.subarray(4, length));
+        const line = utf8.decode(buffer.subarray(4, length));
         buffer = buffer.subarray(length);
         const ref = line.split("\0", 1)[0]?.trim().split(" ")[2];
         if (ref) refs.push(ref);
