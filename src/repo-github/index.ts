@@ -129,9 +129,12 @@ export type RepoExec = (
  * on `exec` where they are cheap and where the model can see them work.
  *
  * A host implements this against whatever git it has on its own side of the
- * boundary. The coder in `starter` runs isomorphic-git inside the
- * Durable Object that owns the workspace filesystem, so a push reads the token
- * from that object's environment and the container never holds one.
+ * boundary. Over `/workspace`, isomorphic-git runs inside the Durable Object
+ * that owns the workspace filesystem, so a push reads the token from that
+ * object's environment and the container never holds one. Over `/sandbox`,
+ * `sandboxRepoGit` runs the container's own git with a placeholder, and the
+ * egress swaps the token in on the Worker side — the container still never
+ * holds one.
  *
  * ## Failures arrive as values
  *

@@ -109,6 +109,11 @@ intercepted request runs in the entrypoint, a stateless Worker invocation, so th
 not on its path. A handler that keeps state in the sandbox — a credential pool — reaches it with
 `call.sandbox()`, by the name it was reached by and the binding `egress.self` names.
 
+**git** clones, fetches and pushes through `sandboxRepoGit`, which `/repo-github` takes as its
+`RepoConfig.git`. It is the container's own git, run as the agent under a limit, with only the
+placeholder: the token and the push policy are the egress's. A clone is noted on the sandbox, so
+an image change brings it back from its backup.
+
 ## The image
 
 The daemon is `@dynamicagents/plugins/sandbox/daemon`, which is Node-only. A consumer bundles it
