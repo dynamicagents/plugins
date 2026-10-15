@@ -10,7 +10,7 @@ import {
 } from "./context.js";
 import type { RepoContext } from "./context.js";
 
-/** A review as a conversation: whether it landed, what it said, and answering it. */
+/** A review as a conversation: what it said, and answering it. */
 
 /**
  * How many pages of review threads one `repo_pr_threads` call will walk.
@@ -25,23 +25,29 @@ import type { RepoContext } from "./context.js";
  */
 const MAX_THREAD_PAGES = 10;
 
-/** One comment in a thread. */
+/** One comment in a thread, as the MCP read returns it. */
 interface ThreadComment {
-  author?: { login?: string };
+  author?: string;
   body?: string;
-}
-
-/** One review thread, as {@link REVIEW_THREADS_QUERY} selects it. */
-interface ReviewThread {
-  id: string;
-  isResolved?: boolean;
-  isOutdated?: boolean;
   path?: string;
   line?: number | null;
-  /** The comment that opened it — the reviewer's actual point. */
-  opening?: { nodes?: ThreadComment[] };
-  /** The end of the conversation, including any reply this plugin sent. */
-  latest?: { totalCount?: number; nodes?: ThreadComment[] };
+  original_line?: number | null;
+}
+
+/** One review thread. `is_resolved` is what the whole workflow turns on. */
+interface ReviewThread {
+  id: string;
+  is_resolved?: boolean;
+  is_outdated?: boolean;
+  comments?: ThreadComment[];
+  /** Every comment on the thread, which may exceed those returned. */
+  total_count?: number;
+}
+
+/** One page of them. */
+interface ThreadPage {
+  review_threads?: ReviewThread[];
+  page_info?: { has_next_page?: boolean; end_cursor?: string | null };
 }
 
 /**
@@ -49,16 +55,10 @@ interface ReviewThread {
  *
  * Both ends, because the two uses pull opposite ways: what the reviewer asked for
  * is at the top, and whether a reply landed is at the bottom. A thread shorter
- * than this is returned whole and the two selections are the same comments, which
- * is why the render de-duplicates on the count rather than on the text.
+ * than this is returned whole, which is the ordinary case — the read asks for a
+ * hundred comments per thread and almost every thread has a handful.
  */
 const MAX_THREAD_COMMENTS = 6;
-
-/** One page of them. */
-interface ThreadPage {
-  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
-  nodes?: ReviewThread[];
-}
 
 /** What {@link THREAD_OWNER_QUERY} returns for a thread id. */
 interface ThreadOwner {
@@ -67,57 +67,6 @@ interface ThreadOwner {
     repository?: { nameWithOwner?: string };
   } | null;
 }
-
-/**
- * The review threads on one pull request.
- *
- * `isResolved` is the field the whole workflow turns on and REST does not expose
- * at all — which is why these three operations are GraphQL while everything else
- * in this file is REST. Both ends of each thread are selected; see
- * {@link MAX_THREAD_COMMENTS} for why one end is not enough.
- */
-const REVIEW_THREADS_QUERY = `
-  query($owner:String!,$repo:String!,$number:Int!,$after:String){
-    repository(owner:$owner,name:$repo){
-      pullRequest(number:$number){
-        reviewThreads(first:${GITHUB_PAGE_SIZE},after:$after){
-          pageInfo{hasNextPage endCursor}
-          nodes{
-            id isResolved isOutdated path line
-            opening: comments(first:1){nodes{author{login} body}}
-            latest: comments(last:${MAX_THREAD_COMMENTS}){totalCount nodes{author{login} body}}
-          }
-        }
-      }
-    }
-  }`;
-
-/**
- * Who is currently *asked* to review, apps included.
- *
- * REST's `pulls/{n}/requested_reviewers` carries `users` and `teams` and no
- * third key, so a Bot reviewer — Copilot is one — is absent from a request that
- * is live, and its answer for "Copilot is working on it right now" is byte for
- * byte its answer for "nobody was ever asked". GraphQL types the requested
- * reviewer as a union with `Bot` in it, which is what makes the two
- * distinguishable at all.
- */
-const REVIEW_REQUESTS_QUERY = `
-  query($owner:String!,$repo:String!,$number:Int!){
-    repository(owner:$owner,name:$repo){
-      pullRequest(number:$number){
-        reviewRequests(first:${GITHUB_PAGE_SIZE}){
-          nodes{
-            requestedReviewer{
-              ... on User{login}
-              ... on Bot{login}
-              ... on Team{slug}
-            }
-          }
-        }
-      }
-    }
-  }`;
 
 /** Which pull request, in which repository, a thread id names. */
 const THREAD_OWNER_QUERY = `
@@ -141,33 +90,54 @@ const THREAD_RESOLVE_MUTATION = `
     resolveReviewThread(input:{threadId:$id}){thread{isResolved}}
   }`;
 
-/** One thread, as the model reads it: where it is, its id, and the conversation. */
+/**
+ * One thread, as the model reads it: where it is, its id, and the conversation.
+ *
+ * Where it is comes from the **first comment** rather than the thread: a thread
+ * is a location only through the comments on it, so a thread whose comments did
+ * not come back has no file to name.
+ */
 function renderThread(t: ReviewThread): string {
-  const where = t.path
-    ? `${t.path}${typeof t.line === "number" ? `:${t.line}` : ""}`
+  const comments = t.comments ?? [];
+  const first = comments[0];
+  const line = first?.line ?? first?.original_line;
+  const where = first?.path
+    ? `${first.path}${typeof line === "number" ? `:${line}` : ""}`
     : "(no file)";
-  const total = t.latest?.totalCount ?? 0;
-  const tail = t.latest?.nodes ?? [];
+  const total = t.total_count ?? comments.length;
+
   // Whole when it fits, and both ends with the middle named when it does not.
   // The opening comment is the reviewer's actual point and the tail is where a
   // reply this plugin sent would be, so neither end can be the one dropped.
-  const conversation =
-    total > tail.length
+  const shown =
+    comments.length > MAX_THREAD_COMMENTS
       ? [
-          ...(t.opening?.nodes ?? []),
+          ...comments.slice(0, 1),
           {
-            author: { login: "…" },
-            body: `(${total - tail.length - 1} earlier replies not shown)`
+            author: "…",
+            body: `(${comments.length - MAX_THREAD_COMMENTS} earlier replies not shown)`
           },
-          ...tail
+          ...comments.slice(-(MAX_THREAD_COMMENTS - 1))
         ]
-      : tail;
+      : comments;
+  // Said only when the read itself was short of the conversation, which the
+  // slice above is not: that one is this render's own choice and both ends
+  // survive it.
+  const unread =
+    total > comments.length
+      ? [
+          {
+            author: "…",
+            body: `(${total - comments.length} comments were not read)`
+          }
+        ]
+      : [];
 
   return [
-    `--- ${where}${t.isResolved ? " [resolved]" : ""}${t.isOutdated ? " [outdated]" : ""}`,
+    `--- ${where}${t.is_resolved ? " [resolved]" : ""}${t.is_outdated ? " [outdated]" : ""}`,
     `id: ${t.id}`,
-    ...conversation.map(
-      (c) => `${c.author?.login ?? "unknown"}: ${c.body ?? ""}`
+    ...[...shown, ...unread].map(
+      (c) => `${c.author ?? "unknown"}: ${c.body ?? ""}`
     )
   ].join("\n");
 }
@@ -176,9 +146,10 @@ function renderThread(t: ReviewThread): string {
  * The owner and repository as their own names, rather than as REST path segments.
  *
  * {@link file://./context.ts githubRepo} percent-encodes both, because that is
- * what makes a path safe. A GraphQL *variable* is not a path — it is compared
- * against the repository's actual name — so an encoded one would silently stop
- * matching the moment a name contains a character worth encoding.
+ * what makes a path safe. A GraphQL *variable* and an MCP argument are not paths
+ * — both are compared against the repository's actual name — so an encoded one
+ * would silently stop matching the moment a name contains a character worth
+ * encoding.
  */
 function decoded(target: { owner: string; repo: string }): {
   owner: string;
@@ -190,146 +161,13 @@ function decoded(target: { owner: string; repo: string }): {
   };
 }
 
-/**
- * The review bot's logins, which GitHub does not spell the same way twice.
- *
- * One account arrives as `Copilot` from the issue timeline, as
- * `copilot-pull-request-reviewer` from GraphQL, and as
- * `copilot-pull-request-reviewer[bot]` from `pulls/{n}/reviews`. Compared
- * exactly against the login a caller names, the request matches and the review
- * never does, so `repo_pr_review_status` reports "none pending — waiting will
- * not change it" at the moment the review lands. That is the one answer a
- * polling caller stops on, so the mismatch does not degrade the tool, it
- * inverts it.
- *
- * An alternation of the spellings that account answers to, and deliberately not
- * a `copilot-` prefix: `copilot-swe-agent` is a **different** account, one that
- * opens pull requests rather than reviewing them, so a prefix would let its
- * request or its authorship answer a question asked about the reviewer.
- */
-const COPILOT_LOGIN = /^copilot(-pull-request-reviewer)?$/;
-
-/**
- * Whether a login from the API is the reviewer the caller asked about.
- *
- * `[bot]` is a suffix REST appends to an app's login and GraphQL does not, so it
- * is never part of the identity — stripping it is what lets a caller name any
- * app reviewer the way GitHub's UI shows it.
- */
-function sameReviewer(a: string, b: string): boolean {
-  const bare = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
-  const [x, y] = [bare(a), bare(b)];
-  return COPILOT_LOGIN.test(x) && COPILOT_LOGIN.test(y) ? true : x === y;
-}
-
 export function reviewTools(ctx: RepoContext): ToolSet {
-  const { bounded, github, githubGraphql, githubRepo } = ctx;
+  const { bounded, mcp, githubRepo } = ctx;
 
   return {
-    repo_pr_review_status: tool({
-      description:
-        "Say whether a reviewer has finished reviewing a pull request in the repository you have checked out. Use it before reading review comments: a review that has not landed has left no comments, and an empty thread list means nothing yet.",
-      inputSchema: z.object({
-        dir: z.string().describe("The checkout directory"),
-        number: z.number().int().positive().describe("Pull request number"),
-        reviewer: z
-          .string()
-          .optional()
-          .describe(
-            'The reviewer to ask about, as their login. Defaults to "Copilot".'
-          )
-      }),
-      execute: async ({ dir, number, reviewer }) => {
-        const target = await githubRepo(dir);
-        if ("refusal" in target) return target.refusal;
-        const { owner, repo } = target;
-        const who = reviewer ?? "Copilot";
-
-        // A *pending* request outranks any review already on the pull request,
-        // and that ordering is the whole logic here. GitHub clears the request
-        // when a review is submitted and writes a new one when a re-review is
-        // asked for, so "still requested" is true now and "has reviewed" is
-        // about the past. Reading them the other way round reports a re-review
-        // as finished the moment it is asked for.
-        const requested = await githubGraphql(
-          "repo_pr_review_status",
-          REVIEW_REQUESTS_QUERY,
-          { owner, repo, number }
-        );
-        if (!requested.ok) return bounded(requested.message);
-        const waiting = (
-          requested.data as {
-            repository?: {
-              pullRequest?: {
-                reviewRequests?: {
-                  nodes?: {
-                    requestedReviewer?: { login?: string; slug?: string };
-                  }[];
-                };
-              };
-            };
-          }
-        ).repository?.pullRequest?.reviewRequests;
-        if (!waiting)
-          return `#${number} is not a pull request in ${owner}/${repo}`;
-        const pending = (waiting.nodes ?? []).some((n) => {
-          const name =
-            n?.requestedReviewer?.login ?? n?.requestedReviewer?.slug;
-          return !!name && sameReviewer(name, who);
-        });
-        if (pending)
-          return `${who} has been asked to review #${number} and has not finished.`;
-
-        const reviews = await github(
-          "repo_pr_review_status",
-          `/repos/${owner}/${repo}/pulls/${number}/reviews?per_page=${GITHUB_PAGE_SIZE}`
-        );
-        if (!reviews.ok) return bounded(reviews.message);
-        const all = reviews.data as {
-          user?: { login?: string };
-          state?: string;
-          submitted_at?: string;
-        }[];
-        const submitted = all.filter(
-          (r) =>
-            !!r.user?.login &&
-            sameReviewer(r.user.login, who) &&
-            // A `PENDING` review is a draft its author has not sent, and it is
-            // visible to whoever holds the token that wrote it. Counting one as
-            // finished reports a review nobody has read, which is the answer a
-            // poll loop acts on by stopping.
-            (r.state ?? "").toUpperCase() !== "PENDING"
-        );
-
-        const theirs = submitted.at(-1);
-        if (!theirs) {
-          // The endpoint pages oldest-first, so a match beyond the first page is
-          // **newer** than everything read — which is to say it is exactly the
-          // review being waited for. So a truncated read cannot answer the
-          // question at all, and must not answer it with "waiting will not help":
-          // that is the one reply a caller ends its polling on.
-          if (all.length >= GITHUB_PAGE_SIZE)
-            return bounded(
-              `#${number} has at least ${GITHUB_PAGE_SIZE} reviews and only the oldest were read, ` +
-                `so whether ${who} has reviewed it is unknown. Read the pull request itself with repo_pr_view, ` +
-                `or look for threads with repo_pr_threads.`
-            );
-          return bounded(
-            `#${number} has no review from ${who}, and none is pending. ` +
-              `Nobody asked them, or the request was withdrawn — waiting will not change it.`
-          );
-        }
-        return bounded(
-          `${who} reviewed #${number}${theirs.submitted_at ? ` at ${theirs.submitted_at}` : ""}` +
-            `${theirs.state ? ` (${theirs.state.toLowerCase()})` : ""}. ` +
-            `Read what it said with repo_pr_threads — a review can finish having left no comments.`
-        );
-      }
-    }),
-
     repo_pr_threads: tool({
       description:
-        "Read the review threads on a pull request in the repository you have checked out — the inline comments a reviewer left on specific lines, which are not on the conversation timeline repo_issue_view reads. Unresolved ones only, unless you ask for all.",
+        "Read the review threads on a pull request in the repository you have checked out — the inline comments a reviewer left on specific lines, which are not on the conversation timeline repo_issue_view reads. Unresolved ones only, unless you ask for all. An empty answer on a pull request whose review has not landed means nothing yet rather than nothing to do — repo_pr_view says whether one has.",
       inputSchema: z.object({
         dir: z.string().describe("The checkout directory"),
         number: z.number().int().positive().describe("Pull request number"),
@@ -344,7 +182,7 @@ export function reviewTools(ctx: RepoContext): ToolSet {
         const { owner, repo } = decoded(target);
 
         const threads: ReviewThread[] = [];
-        let after: string | null = null;
+        let after: string | undefined;
         let truncated = false;
         // Paged, and that is not an optimisation. A review long enough to spill a
         // page puts its newest threads on the last one — exactly the threads the
@@ -356,25 +194,21 @@ export function reviewTools(ctx: RepoContext): ToolSet {
             truncated = true;
             break;
           }
-          const answered:
-            { ok: true; data: unknown } | { ok: false; message: string } =
-            await githubGraphql("repo_pr_threads", REVIEW_THREADS_QUERY, {
-              owner,
-              repo,
-              number,
-              after
-            });
+          const answered = await mcp("repo_pr_threads", "pull_request_read", {
+            owner,
+            repo,
+            pullNumber: number,
+            method: "get_review_comments",
+            perPage: GITHUB_PAGE_SIZE,
+            ...(after ? { after } : {})
+          });
           if (!answered.ok) return bounded(answered.message);
-          const page_ = (
-            answered.data as {
-              repository?: { pullRequest?: { reviewThreads?: ThreadPage } };
-            }
-          ).repository?.pullRequest?.reviewThreads;
-          if (!page_)
+          const page_ = answered.data as ThreadPage;
+          if (!page_?.review_threads)
             return `#${number} is not a pull request in ${owner}/${repo}`;
-          threads.push(...(page_.nodes ?? []));
-          if (!page_.pageInfo?.hasNextPage) break;
-          after = page_.pageInfo.endCursor ?? null;
+          threads.push(...page_.review_threads);
+          if (!page_.page_info?.has_next_page) break;
+          after = page_.page_info.end_cursor ?? undefined;
           if (!after) break;
         }
 
@@ -389,7 +223,7 @@ export function reviewTools(ctx: RepoContext): ToolSet {
 
         const shown = includeResolved
           ? threads
-          : threads.filter((t) => !t.isResolved);
+          : threads.filter((t) => !t.is_resolved);
         if (shown.length === 0)
           return bounded(
             (includeResolved
@@ -414,6 +248,12 @@ export function reviewTools(ctx: RepoContext): ToolSet {
  * thrown. The one outcome returned short of success is a reply that landed on
  * a thread that did not resolve: that reply must never be sent again, so it is
  * settled, and the resolve-only call it asks for is a different key.
+ *
+ * **Still GraphQL, and still this plugin's own.** Replying and resolving have no
+ * REST equivalent, and the hosted MCP server offers them only under a tool that
+ * also submits reviews — `APPROVE` included — which is a grant nothing here
+ * wants. See `./mcp.ts`. Not installed on claude-coordinator, whose revising
+ * Claude Code sessions answer their own reviews from inside their containers.
  */
 export function reviewActions(ctx: RepoContext): Record<string, Action> {
   const { bounded, githubGraphql, githubRepo } = ctx;

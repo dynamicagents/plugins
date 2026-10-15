@@ -21,8 +21,8 @@ repo({
 
 Tools: `repo_clone`, `repo_fetch`, `repo_status`, `repo_diff`, `repo_commit`,
 `repo_push`, `repo_open_pr`, `repo_issue_view`, `repo_pr_view`, `repo_pr_comment`,
-`repo_pr_review_status`, `repo_pr_threads`, `repo_pr_thread_reply`, `repo_pr_checks`,
-and — for a host that keeps worktrees, below — `repo_worktrees` and `repo_worktree`.
+`repo_pr_threads`, `repo_pr_thread_reply`, `repo_pr_checks`, and — for a host that
+keeps worktrees, below — `repo_worktrees` and `repo_worktree`.
 
 `tools: [...]` offers only the tools named, and the context the model reads names
 only those. An agent that coordinates others' work — reading pull requests, never
@@ -38,13 +38,33 @@ repository and nothing else. They resolve the repository from the checkout's own
 origin, so they add no new model input to validate and no new way to point the
 credential somewhere nobody asked about.
 
-**Answering a review is GraphQL, and the rest is REST.** Not a preference:
-`isResolved` is not on any REST representation of a review comment, and resolving
-a thread has no REST endpoint at all. That brings one hazard worth knowing before
-editing `githubGraphql` — **a failed GraphQL query answers `200`**, with the
-errors in the body, so a caller that reads `data` straight through reports a
-permission failure as an empty review. An agent told a review is clean stops
-looking.
+**Reading goes through GitHub's hosted MCP server; writing does not.** Every read
+here — an issue, a pull request, its reviews, its review threads, its checks — is a
+`tools/call` to `https://api.githubcopilot.com/mcp/readonly`, made from the Worker
+with the deployment's token as `Authorization: Bearer`. `src/repo/mcp.ts` holds the
+transport, the endpoint and the `X-MCP-Tools` allowlist, which is two read tools and
+is deliberately not something a host can widen.
+
+Opening a pull request and commenting stay on REST, and answering a review thread
+stays on GraphQL — `isResolved` aside, resolving a thread has no REST endpoint, and
+the one MCP tool that offers it also submits reviews with `APPROVE`, which is a grant
+this plugin declines. Those writes are per-install, not a route the read-only route
+leaves open: an agent that must not write names none of them in `tools: [...]` above,
+so the whole of what it can reach is the two read tools in the allowlist. The GraphQL
+hazard worth knowing before editing `githubGraphql`:
+**a failed query answers `200`**, with the errors in the body, so a caller that reads
+`data` straight through reports a permission failure as success.
+
+The same shape of hazard applies on the MCP route and is handled in `mcp.ts`: a tool
+outside the allowlist comes back as a JSON-RPC error rather than an empty result, and
+rendering one as "nothing there" would tell an agent a busy review is clean.
+
+**github.com only.** GitHub Enterprise Server is not supported: the hosted MCP server
+is github.com's, so there is no `apiBase` to point elsewhere. `allowedHosts` still
+bounds _cloning_, which is generic git and works against any host — and because it
+does, `githubRepo` refuses a checkout whose origin is on one of those other hosts
+rather than resolving its `owner/repo`, which would name a different repository on
+github.com and let a write reach it.
 
 `repo_pr_thread_reply` is also the only tool here that takes something able to
 name another repository: a thread id is a global node id, not a path segment

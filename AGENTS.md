@@ -81,6 +81,51 @@ rather than against the manifest.
 
 ---
 
+## The GitHub MCP route
+
+`/repo` reads GitHub through its **hosted MCP server**, from the Worker, with the
+deployment's token as `Authorization: Bearer`. `src/repo/mcp.ts` is the whole
+transport, and two things in it are policy rather than configuration:
+
+- **`MCP_TOOLS` is an allowlist**, sent as `X-MCP-Tools`. Adding a name to it is a
+  code change somebody reads, which is the point — a host that could widen it could
+  hand the token to a tool nobody reviewed.
+- **`MCP_URL` is the read-only endpoint.** Both caps, not either: the list is the
+  narrow bound and the path is the one that still holds if the list is edited
+  carelessly.
+
+`pull_request_review_write` is the absence worth knowing about. It is the only tool
+that resolves a review thread, and the same name submits a review with `APPROVE`, so
+taking thread resolution would mean taking self-approval. Nothing needs it — a
+revising Claude Code session answers and resolves its own threads with `gh` inside
+its container. `repo_pr_thread_reply` keeps this package's own GraphQL mutations for
+the hosts that do want the tool.
+
+**github.com only.** There is no `apiBase`: Enterprise Server has no hosted MCP
+server to point at, and half this plugin on one host and half on another is worse
+than not supporting it. `allowedHosts` still bounds _cloning_, which is generic git.
+
+```bash
+npm run probe:github-mcp              # check the server against what mcp.ts assumes
+npm run probe:github-mcp -- --record  # and rewrite test/fixtures/github-mcp.json
+```
+
+It needs `GITHUB_TOKEN` and a pull request in `GITHUB_MCP_PROBE_PR`
+(`OWNER/REPO#NUMBER`); it sends the token only to the endpoint `mcp.ts` names and
+never prints it. **It mutates nothing, including when a restriction turns out not to
+hold**: the legs that test the allowlist and the read-only path name a read and an
+issue number the repository cannot have, so a failure is reported rather than
+exercised. Point it at a real pull request without hesitating.
+
+The specs run against the fixture offline, so the fixture is what makes a render
+trustworthy — and until somebody has run the probe with `--record`, that file is
+**derived from the server's published output types rather than observed**, which its
+own header says. Re-record rather than editing it by hand: `--record` replaces every
+value in it with that pull request's, which is why a spec asserting a _value_ states
+it as an override and only the shape tests read from the file.
+
+---
+
 ## Updating Claude Code
 
 The `claude-code` plugin's egress gateway (`src/claude-code/egress.ts`) and stream

@@ -7,8 +7,20 @@
  * other than what it appears to name.
  */
 
+/**
+ * The one host whose API these tools talk to.
+ *
+ * Narrower than {@link DEFAULT_ALLOWED_HOSTS}, which a host may widen: cloning
+ * is generic git and works anywhere, while every API read goes to github.com's
+ * hosted MCP server and every write to github.com's REST and GraphQL. So a
+ * checkout on another allowed host has an origin these tools must refuse rather
+ * than resolve — see `githubRepo` in `./context.ts`, which is where that is
+ * enforced.
+ */
+export const GITHUB_HOST = "github.com";
+
 /** The hosts a clone URL may name. `RepoConfig.allowedHosts` overrides it. */
-export const DEFAULT_ALLOWED_HOSTS = ["github.com"];
+export const DEFAULT_ALLOWED_HOSTS = [GITHUB_HOST];
 
 /** Branch names a push must never target, whatever the model believes. */
 export const PROTECTED_BRANCHES = new Set([

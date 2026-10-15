@@ -82,7 +82,7 @@ function listed(checks: Check[]): string {
 }
 
 export function checkTools(ctx: RepoContext): ToolSet {
-  const { bounded, github, githubRepo } = ctx;
+  const { bounded, mcp, githubRepo } = ctx;
 
   return {
     repo_pr_checks: tool({
@@ -96,27 +96,46 @@ export function checkTools(ctx: RepoContext): ToolSet {
         const target = await githubRepo(dir);
         if ("refusal" in target) return target.refusal;
         const { owner, repo } = target;
+        const where = {
+          owner: decodeURIComponent(owner),
+          repo: decodeURIComponent(repo),
+          pullNumber: number,
+          perPage: GITHUB_PAGE_SIZE
+        };
 
-        const pr = await github(
-          "repo_pr_checks",
-          `/repos/${owner}/${repo}/pulls/${number}`
-        );
+        /**
+         * The head commit, read first and checked again at the end.
+         *
+         * Neither CI method takes a commit: each resolves the pull request's
+         * head for itself, so a push landing between the two reads combines one
+         * commit's check runs with another's statuses — and the combination
+         * renders as "every check has finished and passed" for a commit whose
+         * runs were never read, which is the one answer a waiting agent acts on
+         * by stopping. Reading the head first costs a call and makes the
+         * mismatch detectable: the combined status reports the sha it answered
+         * for, so an answer that disagrees with this one is thrown away rather
+         * than rendered.
+         */
+        const pr = await mcp("repo_pr_checks", "pull_request_read", {
+          ...where,
+          method: "get"
+        });
         if (!pr.ok) return bounded(pr.message);
         const sha = (pr.data as { head?: { sha?: string } }).head?.sha;
         if (!sha) return `#${number} is not a pull request in ${owner}/${repo}`;
         const short = sha.slice(0, 7);
 
-        const runs = await github(
-          "repo_pr_checks",
-          `/repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=${GITHUB_PAGE_SIZE}`
-        );
+        const runs = await mcp("repo_pr_checks", "pull_request_read", {
+          ...where,
+          method: "get_check_runs"
+        });
         if (!runs.ok) return bounded(runs.message);
         // The combined status holds the latest per context, so one page is
         // every context there is.
-        const statuses = await github(
-          "repo_pr_checks",
-          `/repos/${owner}/${repo}/commits/${sha}/status?per_page=${GITHUB_PAGE_SIZE}`
-        );
+        const statuses = await mcp("repo_pr_checks", "pull_request_read", {
+          ...where,
+          method: "get_status"
+        });
         if (!statuses.ok) return bounded(statuses.message);
 
         const runData = runs.data as {
@@ -125,8 +144,23 @@ export function checkTools(ctx: RepoContext): ToolSet {
         };
         const statusData = statuses.data as {
           total_count?: number;
+          sha?: string;
           statuses?: CommitStatus[];
         };
+        // The head was this commit before the check runs were read and still is
+        // after the statuses were, so both answers are that commit's. Unequal —
+        // or absent, which is the server declining to say — leaves no partial
+        // answer worth rendering, because the mixture is indistinguishable from
+        // a clean pass.
+        if (statusData.sha !== sha) {
+          return (
+            `#${number}'s checks could not be read as one commit's: this started ` +
+            `at ${short} and the combined status answered for ` +
+            `${statusData.sha ? statusData.sha.slice(0, 7) : "no commit it named"}. ` +
+            "A push landing during the read does this — ask again."
+          );
+        }
+
         const checks = readChecks(
           runData.check_runs ?? [],
           statusData.statuses ?? []
