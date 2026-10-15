@@ -1,6 +1,6 @@
 import {
-  credentialPool,
   readRefusal,
+  sharedPool,
   type CredentialStore,
   type Lead
 } from "./credentials.js";
@@ -242,7 +242,8 @@ export function claudeCodeEgress(config: EgressConfig): Fetcher {
     ? `claude-code-egress:${config.label}`
     : "claude-code-egress";
   const now = config.now ?? Date.now;
-  const pool = credentialPool({
+  // Shared with the session's admission over the same store — see `sharedPool`.
+  const pool = sharedPool({
     credentials: config.credentials,
     store: config.store,
     ...(config.now ? { now: config.now } : {})

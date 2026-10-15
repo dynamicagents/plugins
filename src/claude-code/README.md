@@ -168,7 +168,7 @@ Three behaviours are worth knowing before you rely on it:
   operator and a `429` would hide it behind a retry loop.
 
 **A mark lasts one session.** Call `session.admit(store)` from the workspace
-object before a session starts. It forgets every mark, so that session's first
+object before a session starts, with the store object `egress` was given. It forgets every mark, so that session's first
 model call asks Anthropic again. A plan upgrade, extra usage switched on, or an
 early reset makes a stored `resetAt` wrong, and trusting it would refuse work
 Anthropic would serve, for hours. Asking again costs one free `429` per

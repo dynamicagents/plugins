@@ -227,6 +227,35 @@ describe("reopening the pool", () => {
     });
   });
 
+  /**
+   * Each change writes a whole snapshot, so a refusal's write that lands after
+   * a reopen would put the cleared mark back.
+   */
+  it("is not undone by an earlier change that writes late", async () => {
+    let release!: () => void;
+    const late = new Promise<void>((resolve) => (release = resolve));
+    let states: CredentialState[] = [];
+    let writes = 0;
+    const p = credentialPool({
+      credentials: () => [A],
+      store: {
+        read: async () => states,
+        write: async (next) => {
+          if (writes++ === 0) await late;
+          states = next;
+        }
+      },
+      now: () => 1_000_000
+    });
+
+    const spending = p.spend(await idOf(A), 9_999_999_999);
+    const reopening = p.reopen();
+    release();
+    await Promise.all([spending, reopening]);
+
+    expect(states[0]).toMatchObject({ resetAt: 0, epoch: 1 });
+  });
+
   it("survives a write that failed, in the pool that made it", async () => {
     const stale: CredentialState[] = [
       { id: await idOf(A), resetAt: 9_999_999_999 }

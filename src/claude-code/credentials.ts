@@ -284,31 +284,53 @@ export function credentialPool(config: CredentialPoolConfig): CredentialPool {
       : { ok: false, retryAt: earliest };
   };
 
-  const update = async (
+  /**
+   * Every change runs after the one before it has written. Each is a read, a
+   * change and a whole-snapshot write, so two interleaved would let the earlier
+   * snapshot land last and put back what the later one cleared.
+   */
+  let tail: Promise<unknown> = Promise.resolve();
+  const serial = <T>(change: () => Promise<T>): Promise<T> => {
+    const run = tail.then(change);
+    tail = run.catch(() => {});
+    return run;
+  };
+
+  /**
+   * The mirror is updated **before** the write is attempted, so a write that
+   * fails still changes what this isolate does next.
+   */
+  const persist = async (
+    states: CredentialState[],
+    detail: Record<string, unknown>
+  ): Promise<void> => {
+    mirror = states;
+    await config.store.write(states).catch((err: unknown) => {
+      console.error("[claude-code] could not persist the credential pool", {
+        ...detail,
+        err: String(err)
+      });
+    });
+  };
+
+  const update = (
     id: string,
     change: (state: CredentialState) => CredentialState
-  ): Promise<Lead> => {
-    const { tokens, keys, states } = await load();
-    const index = keys.indexOf(id);
+  ): Promise<Lead> =>
+    serial(async () => {
+      const { tokens, keys, states } = await load();
+      const index = keys.indexOf(id);
 
-    // An id that is no longer configured: the operator replaced that credential
-    // between the request going out and its refusal coming back. There is
-    // nothing to mark, and marking the slot instead is the bug `id` exists to
-    // prevent — so this returns the current lead and moves on.
-    if (id && index >= 0) {
-      states[index] = change(states[index] ?? { id, resetAt: 0 });
-      // The mirror is updated **before** the write is attempted, so a write that
-      // fails still changes what this isolate does next.
-      mirror = states;
-      await config.store.write(states).catch((err: unknown) => {
-        console.error("[claude-code] could not persist the credential pool", {
-          id,
-          err: String(err)
-        });
-      });
-    }
-    return pick(tokens, keys, states);
-  };
+      // An id that is no longer configured: the operator replaced that
+      // credential between the request going out and its refusal coming back.
+      // There is nothing to mark, and marking the slot instead is the bug `id`
+      // exists to prevent — so this returns the current lead and moves on.
+      if (id && index >= 0) {
+        states[index] = change(states[index] ?? { id, resetAt: 0 });
+        await persist(states, { id });
+      }
+      return pick(tokens, keys, states);
+    });
 
   return {
     async lead(): Promise<Lead> {
@@ -330,36 +352,53 @@ export function credentialPool(config: CredentialPoolConfig): CredentialPool {
       return update(id, (state) => ({ ...state, dead: true }));
     },
 
-    async reopen(): Promise<Lead> {
-      const { tokens, keys, states } = await load();
-      const at = now();
-      const reopened: number[] = [];
-      for (let i = 0; i < states.length; i++) {
-        const state = states[i];
-        if (!state || (!state.dead && state.resetAt <= at)) continue;
-        states[i] = {
-          id: state.id,
-          resetAt: 0,
-          epoch: (state.epoch ?? 0) + 1
-        };
-        reopened.push(i);
-      }
-      if (reopened.length) {
-        // The mirror first, for the same reason as in `update`.
-        mirror = states;
-        console.info("[claude-code] asking Anthropic again about credentials", {
-          slots: reopened
+    reopen: (): Promise<Lead> =>
+      serial(async () => {
+        const { tokens, keys, states } = await load();
+        const at = now();
+        const slots: number[] = [];
+        states.forEach((state, i) => {
+          if (!state.dead && state.resetAt <= at) return;
+          states[i] = {
+            id: state.id,
+            resetAt: 0,
+            epoch: (state.epoch ?? 0) + 1
+          };
+          slots.push(i);
         });
-        await config.store.write(states).catch((err: unknown) => {
-          console.error("[claude-code] could not persist the credential pool", {
-            reopened,
-            err: String(err)
-          });
-        });
-      }
-      return pick(tokens, keys, states);
-    }
+        if (slots.length) {
+          console.info(
+            "[claude-code] asking Anthropic again about credentials",
+            {
+              slots
+            }
+          );
+          await persist(states, { slots });
+        }
+        return pick(tokens, keys, states);
+      })
   };
+}
+
+const pools = new WeakMap<CredentialStore, CredentialPool>();
+
+/**
+ * The pool over `config.store`, one per store for the isolate's life.
+ *
+ * The egress gateway and a session's admission hold the same store, and they
+ * have to be one pool: a pool's mirror is what carries a mark or a clear past a
+ * failed write, and its writes are ordered only among themselves. Two pools
+ * over one store each hold up alone and disagree once storage fails. The first
+ * caller's `credentials` and `now` are the pool's, which is safe because every
+ * holder of a store is configured from one deployment.
+ */
+export function sharedPool(config: CredentialPoolConfig): CredentialPool {
+  let pool = pools.get(config.store);
+  if (!pool) {
+    pool = credentialPool(config);
+    pools.set(config.store, pool);
+  }
+  return pool;
 }
 
 /**

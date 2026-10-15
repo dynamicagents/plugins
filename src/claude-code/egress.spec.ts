@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
 import {
   credentialPool,
+  sharedPool,
   type CredentialState,
   type CredentialStore
 } from "./credentials.js";
@@ -691,6 +692,38 @@ describe("credential rotation", () => {
     const served = await egress.fetch(modelCall());
 
     expect(served.status).toBe(200);
+    expect(sent[2]!.headers.get("authorization")).toBe(`Bearer ${REAL}`);
+  });
+
+  /**
+   * With every write failing, the marks live only in a pool's mirror. Admission
+   * holds the same store, so it has to be the same pool, or it would find
+   * nothing to clear and the gateway would keep refusing locally.
+   */
+  it("shares its pool with admission when storage cannot be written", async () => {
+    let accepting = false;
+    const sent = stubPerCredential(() =>
+      accepting
+        ? new Response("ok", { status: 200 })
+        : new Response("{}", EXHAUSTED)
+    );
+    const store: CredentialStore = {
+      read: async () => [],
+      write: async () => {
+        throw new Error("storage unavailable");
+      }
+    };
+    const egress = rotating({ store });
+
+    await egress.fetch(modelCall()); // spends REAL
+    await egress.fetch(modelCall()); // spends SECOND
+    expect((await egress.fetch(modelCall())).status).toBe(429);
+    expect(sent).toHaveLength(2);
+
+    accepting = true;
+    await sharedPool({ credentials: () => [REAL, SECOND], store }).reopen();
+
+    expect((await egress.fetch(modelCall())).status).toBe(200);
     expect(sent[2]!.headers.get("authorization")).toBe(`Bearer ${REAL}`);
   });
 

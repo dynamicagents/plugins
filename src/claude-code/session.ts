@@ -1,5 +1,5 @@
 import { claudeCodeEgress } from "./egress.js";
-import { credentialPool } from "./credentials.js";
+import { sharedPool } from "./credentials.js";
 import type { CredentialStore, Lead } from "./credentials.js";
 import {
   attachRun,
@@ -228,15 +228,16 @@ export function claudeCodeSession(config: ClaudeCodeConfig) {
      * Admit a session: forget the pool's marks so its first model call asks
      * Anthropic again — see "A mark lasts one session" in `./credentials.ts`.
      *
-     * Called before the session's container work, by the object whose store
-     * the gateway reads. Not a gate on spend: a refused call bills nothing, so
+     * Called before the session's container work, with the store object
+     * passed to {@link egress}, so the two are one pool — see `sharedPool` in
+     * `./credentials.ts`. Not a gate on spend: a refused call bills nothing, so
      * a session admitted onto a spent pool costs its startup and ends on the
      * gateway's `429` naming the earliest reset — far less than refusing an
      * account Anthropic would serve. The lead is not usable only when no
      * credential is configured.
      */
     admit: (store: CredentialStore): Promise<Lead> =>
-      credentialPool({ credentials: config.credentials, store }).reopen(),
+      sharedPool({ credentials: config.credentials, store }).reopen(),
 
     /**
      * The `Fetcher` the workspace object installs as its egress policy.
