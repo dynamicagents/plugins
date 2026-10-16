@@ -10,12 +10,13 @@ import { PROTECTED_BRANCHES } from "./url.js";
  * GitHub from inside a sandbox, with the token on the Worker side: the
  * sandbox's egress rule for it.
  *
- * git reaches GitHub through {@link GITHUB_PLACEHOLDER_HOST} over plain HTTP —
- * a host the harness intercepts, so nothing in the container terminates TLS —
- * by an `insteadOf` rule, with a credential helper that answers with
- * {@link GITHUB_TOKEN_PLACEHOLDER}. `gh` cannot be pointed at a plain-HTTP host,
- * so a sandbox allowed the API intercepts `api.github.com` over HTTPS and gives
- * `gh` the placeholder as `GH_TOKEN`.
+ * The harness intercepts `github.com` over HTTPS, and git's credential helper
+ * answers with {@link GITHUB_TOKEN_PLACEHOLDER}. **Never an `insteadOf` onto a
+ * placeholder host:** git reports the rewritten URL to whatever reads a remote
+ * (`git remote get-url`, `git remote -v`), so `/repo` would take a checkout's
+ * origin for a host it does not allow, and `gh` would find no GitHub remote. A
+ * sandbox allowed the API intercepts `api.github.com` too, and gives `gh` the
+ * placeholder as `GH_TOKEN`.
  *
  * The egress swaps the placeholder for the real token, so a process can *use*
  * GitHub as the deployment's account and never *read* the token. A request
@@ -32,8 +33,8 @@ import { PROTECTED_BRANCHES } from "./url.js";
 /** What `GH_TOKEN` and git's credential helper hold. Shaped like a classic token, so nothing refuses it on shape. */
 export const GITHUB_TOKEN_PLACEHOLDER = "ghp_" + "0".repeat(36);
 
-/** The plain-HTTP host git is pointed at in place of `https://github.com`. */
-export const GITHUB_PLACEHOLDER_HOST = "github.harness.internal";
+/** Where git's own traffic goes. */
+const GIT_HOST = "github.com";
 
 /** The username GitHub expects beside a token in git's Basic auth. */
 const GIT_USER = "x-access-token";
@@ -69,8 +70,10 @@ export function githubSandboxEgress(
   const api = options.api ?? false;
   return {
     name: "github",
-    http: { [GITHUB_PLACEHOLDER_HOST]: "https://github.com" },
-    ...(api ? { https: { [API_HOST]: `https://${API_HOST}` } } : {}),
+    https: {
+      [GIT_HOST]: `https://${GIT_HOST}`,
+      ...(api ? { [API_HOST]: `https://${API_HOST}` } : {})
+    },
     env: githubEnv(api),
     handle: (call) => githubEgress(call, options)
   };
@@ -89,12 +92,10 @@ export function githubSandboxEgress(
 function githubEnv(api: boolean): Record<string, string> {
   return {
     ...(api ? { GH_TOKEN: GITHUB_TOKEN_PLACEHOLDER } : {}),
-    GIT_CONFIG_COUNT: "2",
-    GIT_CONFIG_KEY_0: `url.http://${GITHUB_PLACEHOLDER_HOST}/.insteadOf`,
-    GIT_CONFIG_VALUE_0: "https://github.com/",
-    GIT_CONFIG_KEY_1: `credential.http://${GITHUB_PLACEHOLDER_HOST}.helper`,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: `credential.https://${GIT_HOST}.helper`,
     // Answers `get` only; `store` and `erase` are no-ops that still exit 0.
-    GIT_CONFIG_VALUE_1: `!f() { if test "$1" = get; then printf 'username=${GIT_USER}\\npassword=${GITHUB_TOKEN_PLACEHOLDER}\\n'; fi; }; f`
+    GIT_CONFIG_VALUE_0: `!f() { if test "$1" = get; then printf 'username=${GIT_USER}\\npassword=${GITHUB_TOKEN_PLACEHOLDER}\\n'; fi; }; f`
   };
 }
 
@@ -121,7 +122,7 @@ async function githubEgress(
 
   const policy = options.push;
   const git =
-    new URL(call.request.url).hostname === GITHUB_PLACEHOLDER_HOST
+    new URL(call.request.url).hostname === GIT_HOST
       ? gitTarget(call.target.pathname)
       : undefined;
   let body: ReadableStream | undefined;

@@ -90,7 +90,7 @@ The container holds placeholders only. Each host it may reach is declared by the
 it, as a `SandboxEgressRule`:
 
 - `http`: placeholder hosts, intercepted over plain HTTP, so nothing in the container terminates TLS;
-- `https`: real hosts, for a client that cannot be pointed elsewhere, with the runtime's CA trusted;
+- `https`: real hosts, for a client that cannot be pointed elsewhere or whose URLs other tools read back (git's remotes), with the runtime's CA trusted;
 - `env`: the placeholders and base URLs its processes need, given to every `exec` and CLI turn;
 - `handle`: on the Worker side, swaps the placeholder for the real credential and forwards.
 

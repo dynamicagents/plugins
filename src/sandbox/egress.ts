@@ -26,8 +26,9 @@ export interface SandboxEgressRule {
   readonly http?: Readonly<Record<string, string>>;
   /**
    * Real hosts intercepted over HTTPS, each to its `https:` upstream, for a
-   * client that cannot be pointed at a placeholder. The sandbox trusts the
-   * runtime's interception CA in every container that has one.
+   * client that cannot be pointed at a placeholder, or whose URLs other tools
+   * read back, as git's remotes are. The sandbox trusts the runtime's
+   * interception CA in every container that has one.
    */
   readonly https?: Readonly<Record<string, string>>;
   /**

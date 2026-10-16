@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { freshGitSandbox } from "../../test/sandbox/do.js";
-import { GITHUB_PLACEHOLDER_HOST } from "./sandbox-egress.js";
 import { sandboxRepoGit, type SandboxGitHost } from "./sandbox-git.js";
 
 /**
@@ -15,6 +14,7 @@ const URL = "https://github.com/dynamicagents/plugins.git";
 
 async function setup(name: string) {
   const sandbox = freshGitSandbox(name);
+  await sandbox.answer("update-ca-certificates", "TRUSTED");
   await sandbox.ensureRunning();
   const git = sandboxRepoGit(() => sandbox as unknown as SandboxGitHost);
   const sent = async (match: string) =>
@@ -45,8 +45,8 @@ describe("sandboxRepoGit", () => {
     expect(await sent("/var/lib/da/checkouts/")).toHaveLength(0);
   });
 
-  it("reaches GitHub through the rule's placeholder host, and never waits on a prompt", async () => {
-    const { git, sent } = await setup("routed");
+  it("presents the rule's placeholder to github.com itself, and never waits on a prompt", async () => {
+    const { sandbox, git, sent } = await setup("routed");
     await git.fetch({
       url: URL,
       dir: "/workspace/plugins",
@@ -54,8 +54,12 @@ describe("sandboxRepoGit", () => {
     });
     const [fetch] = await sent("git fetch");
     expect(fetch).toContain(
-      `GIT_CONFIG_KEY_0=url.http://${GITHUB_PLACEHOLDER_HOST}/.insteadOf`
+      "GIT_CONFIG_KEY_0=credential.https://github.com.helper"
     );
+    expect(fetch).not.toMatch(/insteadOf/i);
+    const fake = await sandbox.fake();
+    expect(fake.httpsHosts).toEqual(["github.com"]);
+    expect(fake.httpHosts).toEqual([]);
     expect(fetch).toContain("GIT_TERMINAL_PROMPT=0");
     expect(fetch).not.toContain("GH_TOKEN=");
   });
