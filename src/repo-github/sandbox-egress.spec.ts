@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { egressPlan, sandboxEgress } from "../sandbox/egress.js";
 import {
   branchAllowed,
-  GITHUB_PLACEHOLDER_HOST,
   GITHUB_TOKEN_PLACEHOLDER,
   gitTarget,
   githubSandboxEgress,
@@ -95,14 +94,11 @@ function streamedPush(refs: string[], packChunks: number) {
 
 const push = (body: BodyInit) =>
   send(
-    new Request(
-      `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/git-receive-pack`,
-      {
-        method: "POST",
-        headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
-        body
-      }
-    )
+    new Request(`https://github.com/dynamicagents/plugins/git-receive-pack`, {
+      method: "POST",
+      headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
+      body
+    })
   );
 
 afterEach(() => vi.restoreAllMocks());
@@ -112,7 +108,7 @@ describe("githubSandboxEgress", () => {
     const { calls } = upstream();
     await send(
       new Request(
-        `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/info/refs?service=git-upload-pack`
+        `https://github.com/dynamicagents/plugins/info/refs?service=git-upload-pack`
       )
     );
     expect(calls[0]?.url).toBe(
@@ -125,7 +121,7 @@ describe("githubSandboxEgress", () => {
     const { calls } = upstream();
     await send(
       new Request(
-        `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/info/refs?service=git-receive-pack`,
+        `https://github.com/dynamicagents/plugins/info/refs?service=git-receive-pack`,
         { headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) } }
       )
     );
@@ -148,7 +144,7 @@ describe("githubSandboxEgress", () => {
     const { calls } = upstream();
     const response = await send(
       new Request(
-        `http://${GITHUB_PLACEHOLDER_HOST}/someone/else/info/refs?service=git-upload-pack`,
+        `https://github.com/someone/else/info/refs?service=git-upload-pack`,
         { headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) } }
       )
     );
@@ -194,17 +190,14 @@ describe("githubSandboxEgress", () => {
   it("holds every push, with no policy, to what repo_push may update", async () => {
     const { calls, lookups } = upstream();
     const open = githubSandboxEgress({ tokenBinding: "GITHUB_TOKEN" });
-    const routes = egressPlan([open], "SANDBOX/caller").http;
+    const routes = egressPlan([open], "SANDBOX/caller").https;
     const pushTo = (repo: string, refs: string[]) =>
       sandboxEgress(
-        new Request(
-          `http://${GITHUB_PLACEHOLDER_HOST}/${repo}/git-receive-pack`,
-          {
-            method: "POST",
-            headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
-            body: receivePack(refs)
-          }
-        ),
+        new Request(`https://github.com/${repo}/git-receive-pack`, {
+          method: "POST",
+          headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
+          body: receivePack(refs)
+        }),
         routes,
         ENV,
         [open]
@@ -254,25 +247,31 @@ describe("githubSandboxEgress", () => {
 });
 
 describe("the rule a sandbox carries", () => {
-  it("points git at the placeholder host from the environment, not a gitconfig", () => {
-    expect(RULE.http).toEqual({
-      [GITHUB_PLACEHOLDER_HOST]: "https://github.com"
-    });
+  it("intercepts github.com itself and rewrites no URL, so a remote reads back as cloned", () => {
+    expect(RULE.http).toBeUndefined();
     expect(RULE.env?.GIT_CONFIG_KEY_0).toBe(
-      `url.http://${GITHUB_PLACEHOLDER_HOST}/.insteadOf`
+      "credential.https://github.com.helper"
     );
-    expect(RULE.env?.GIT_CONFIG_VALUE_0).toBe("https://github.com/");
-    expect(RULE.env?.GIT_CONFIG_VALUE_1).toContain(GITHUB_TOKEN_PLACEHOLDER);
+    expect(RULE.env?.GIT_CONFIG_VALUE_0).toContain(GITHUB_TOKEN_PLACEHOLDER);
+    // What `/repo` and `gh` read a checkout's origin through: an `insteadOf`
+    // would rewrite it to a host neither recognises.
+    for (const [key, value] of Object.entries(RULE.env ?? {})) {
+      expect(key).not.toMatch(/insteadof/i);
+      expect(value).not.toMatch(/insteadof/i);
+    }
   });
 
   it("gives `gh` the placeholder and intercepts the API only where the API is allowed", () => {
-    expect(RULE.https).toEqual({ "api.github.com": "https://api.github.com" });
+    expect(RULE.https).toEqual({
+      "github.com": "https://github.com",
+      "api.github.com": "https://api.github.com"
+    });
     expect(RULE.env?.GH_TOKEN).toBe(GITHUB_TOKEN_PLACEHOLDER);
     const gitOnly = githubSandboxEgress({
       tokenBinding: "GITHUB_TOKEN",
       push: POLICY
     });
-    expect(gitOnly.https).toBeUndefined();
+    expect(gitOnly.https).toEqual({ "github.com": "https://github.com" });
     expect(gitOnly.env).not.toHaveProperty("GH_TOKEN");
   });
 });

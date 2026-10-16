@@ -33,7 +33,6 @@ export { GITHUB_MCP_URL, GITHUB_MCP_TOOLS } from "./mcp.js";
  * `RepoGit` that runs the container's own git behind it.
  */
 export {
-  GITHUB_PLACEHOLDER_HOST,
   GITHUB_TOKEN_PLACEHOLDER,
   githubSandboxEgress,
   type GitHubSandboxEgressOptions,

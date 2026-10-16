@@ -146,8 +146,8 @@ reached without a shell. No hooks, no `ext::` transport, no template directory, 
 credential helpers.
 
 Over a `/sandbox` object the three do run in the container, as `sandboxRepoGit`, and
-the token still never enters it. The sandbox carries `githubSandboxEgress`: git is
-pointed at a placeholder host and presents a placeholder, and the egress — a Worker
+the token still never enters it. The sandbox carries `githubSandboxEgress`: the
+harness intercepts `github.com`, git presents a placeholder, and the egress — a Worker
 entrypoint, outside the container — swaps the token in. Every process in the
 container can present the placeholder, so the egress holds every credentialed push to
 what `repo_push` would: no tag, no protected name, and never the repository's default
