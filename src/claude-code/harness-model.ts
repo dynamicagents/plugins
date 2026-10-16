@@ -268,9 +268,8 @@ export function claudeCodeHarnessModel(
         step === "session"
           ? undefined
           : (await storage.get<TurnState>(KEYS.turn("session")))?.startedAt;
-      let state: TurnState = (await storage.get<TurnState>(
-        KEYS.turn(step)
-      )) ?? {
+      const stored = await storage.get<TurnState>(KEYS.turn(step));
+      let state: TurnState = stored ?? {
         attempt: 0,
         startedAt: origin ?? Date.now(),
         from: 0
@@ -281,16 +280,27 @@ export function claudeCodeHarnessModel(
       };
       await save(state);
       const resume = options.resume;
-      await rpc((sandbox) =>
-        sandbox.createRun(runId, {
-          cwd: options.dir,
-          ...(resume
-            ? resume.fork
-              ? { forkOf: resume.run }
-              : { continues: resume.run }
-            : {})
-        })
-      );
+      try {
+        await rpc((sandbox) =>
+          sandbox.createRun(runId, {
+            cwd: options.dir,
+            ...(resume
+              ? resume.fork
+                ? { forkOf: resume.run }
+                : { continues: resume.run }
+              : {})
+          })
+        );
+      } catch (err) {
+        // Recovering, the last invocation's turn may still be running: an
+        // abort stops it. A step that never began has nothing to stop.
+        if (signal?.aborted && stored)
+          await stop(
+            `${runId}:${step}:a${state.attempt}`,
+            signal.reason ?? err
+          );
+        throw err;
+      }
 
       for (;;) {
         const operationId = `${runId}:${step}:a${state.attempt}`;
@@ -376,7 +386,8 @@ export function claudeCodeHarnessModel(
               `claude-code: the sandbox settled the session with no end it could read: ${String(result.text).slice(0, 200)}`
             );
           }
-          return sessionEnd(end, 0, state.sessionId);
+          // No code is a process a signal ended, as the workspace path has it.
+          return sessionEnd(end, end.exitCode ?? -1, state.sessionId);
         }
         const reason = result.reason ?? "";
         const end = decodeRunEnd(reason);

@@ -210,26 +210,28 @@ function parser(operationId: string) {
           sample: parsed.sample
         });
       }
-      const outcome: ContainerOutcome | undefined = result
-        ? {
-            status: "done",
-            text: encodeRunEnd({
-              result,
-              ...(rateLimit ? { rateLimit } : {}),
-              ...(sessionId ? { sessionId } : {})
-            })
-          }
-        : undefined;
-      return {
-        events,
-        ...(state ? { state } : {}),
-        ...(outcome ? { outcome } : {})
-      };
+      return { events, ...(state ? { state } : {}) };
     },
+    /**
+     * The outcome, once the process has exited — the harness settles nothing
+     * before that either. A result with the code the CLI exited with, since a
+     * result can be an error it exits non-zero on; with no result, its stderr.
+     */
     end(exit: {
       readonly code: number | null;
       readonly stderr: string;
     }): ContainerOutcome {
+      if (result) {
+        return {
+          status: "done",
+          text: encodeRunEnd({
+            result,
+            exitCode: exit.code,
+            ...(rateLimit ? { rateLimit } : {}),
+            ...(sessionId ? { sessionId } : {})
+          })
+        };
+      }
       return {
         status: "unanswered",
         reason: encodeRunEnd({

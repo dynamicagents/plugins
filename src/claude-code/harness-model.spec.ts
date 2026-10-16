@@ -55,9 +55,9 @@ type Turn = {
   messages: PolledMessage[];
   result?: Omit<ContainerOperationResult, "operationId" | "session">;
 };
-const done = (sessionId = "sess-1"): Turn["result"] => ({
+const done = (sessionId = "sess-1", exitCode = 0): Turn["result"] => ({
   status: "done",
-  text: encodeRunEnd({ result: { ...RESULT, sessionId }, sessionId })
+  text: encodeRunEnd({ result: { ...RESULT, sessionId }, exitCode, sessionId })
 });
 const lost: Turn["result"] = { status: "unanswered", reason: "container_lost" };
 
@@ -300,6 +300,26 @@ describe("claudeCodeHarnessModel", () => {
       /cancelled by the parent/
     );
     expect(box.submits).toHaveLength(0);
+    expect(box.stops()).toBe(0);
+  });
+
+  it("stops a recovered turn still running when the abort lands before it is polled", async () => {
+    const box = sandbox(() => ({ messages: [] }));
+    const { model, map, notes } = harness(box);
+    // The last invocation submitted the turn, then its object was reset.
+    map.set(`claude-code:${RUN}:turn:session`, {
+      attempt: 0,
+      startedAt: Date.now(),
+      from: 0
+    });
+    const abort = new AbortController();
+    abort.abort(new Error("cancelled by the parent"));
+    await expect(textOf(model, abort.signal)).rejects.toThrow(
+      /cancelled by the parent/
+    );
+    expect(box.stops()).toBe(1);
+    expect(box.submits).toHaveLength(0);
+    expect(notes.map((n) => n.key)).toContain(`${RUN}:session:a0:lost`);
   });
 
   it("carries on another run's conversation by forking it in the same sandbox", async () => {

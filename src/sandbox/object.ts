@@ -279,6 +279,12 @@ export abstract class SandboxObjectBase<
       created_at INTEGER NOT NULL,
       stopped_at INTEGER
     )`);
+    // Which run submitted each operation: runs that share a session share its
+    // operations, and a stop is one run's.
+    sql.exec(`CREATE TABLE IF NOT EXISTS sandbox_operations (
+      operation_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL
+    )`);
     sql.exec(`CREATE TABLE IF NOT EXISTS sandbox_checkouts (
       dir TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
@@ -640,6 +646,26 @@ export abstract class SandboxObjectBase<
       .toArray()[0];
   }
 
+  /** Record `operationId` as `runId`'s, before it is submitted; refuse one another run submitted. */
+  #own(runId: string, operationId: string): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "INSERT OR IGNORE INTO sandbox_operations (operation_id, run_id) VALUES (?, ?)",
+      operationId,
+      runId
+    );
+    const owner = sql
+      .exec<{ run_id: string }>(
+        "SELECT run_id FROM sandbox_operations WHERE operation_id = ?",
+        operationId
+      )
+      .one().run_id;
+    if (owner !== runId)
+      throw new Error(
+        `operation ${operationId} is run ${owner}'s, so run ${runId} cannot submit it`
+      );
+  }
+
   /** Refuse a turn of a run that was stopped: it takes no more. */
   #refuseStopped(runId: string): void {
     if (this.#runRow(runId)?.stopped_at != null)
@@ -679,6 +705,7 @@ export abstract class SandboxObjectBase<
     }
     const turn = header ? text : withRunHeader({ cwd: row.cwd }, prompt);
     this.#refuseStopped(runId);
+    this.#own(runId, operationId);
     await this.ensureRunning();
     this.#refuseStopped(runId);
     const session = this.#harness.session(row.session_id);
@@ -754,18 +781,37 @@ export abstract class SandboxObjectBase<
    * races git's index lock. So this waits for no CLI to be left, and one sync.
    *
    * A stopped run takes no more turns. Its conversation goes on, if it does, in
-   * a run that `continues` it.
+   * a run that `continues` it — whose operations share the session, so only
+   * this run's own are aborted.
    */
   async stopRun(runId: string): Promise<{ stopped: boolean }> {
     await this.#touch();
-    const session = this.#session(runId);
+    const row = this.#runRow(runId);
+    if (!row) throw new Error(`no run ${runId} in this sandbox`);
+    const sql = this.ctx.storage.sql;
     // Marked first, so a submission of it still on its way in refuses itself.
-    this.ctx.storage.sql.exec(
+    sql.exec(
       "UPDATE sandbox_runs SET stopped_at = ? WHERE run_id = ? AND stopped_at IS NULL",
       Date.now(),
       runId
     );
-    const stopped = await session.abort();
+    const own = new Set(
+      sql
+        .exec<{ operation_id: string }>(
+          "SELECT operation_id FROM sandbox_operations WHERE run_id = ?",
+          runId
+        )
+        .toArray()
+        .map((each) => each.operation_id)
+    );
+    const session = this.#harness.session(row.session_id);
+    let stopped = false;
+    for (const open of await this.#harness.pending({
+      session: row.session_id
+    })) {
+      if (own.has(open.operationId))
+        stopped = (await session.abort(open.operationId)) || stopped;
+    }
     if (this.#container.running) {
       const until = Date.now() + CLI_KILL_MS + 10_000;
       while (Date.now() < until && (await this.#cliAlive())) await sleep(500);

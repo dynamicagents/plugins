@@ -6,7 +6,7 @@
  */
 
 /** Bumped when an RPC of the object changes shape, so a caller can tell a busy object still on older code. */
-export const SANDBOX_CONTRACT = 1;
+export const SANDBOX_CONTRACT = 2;
 
 /**
  * The harness's own root session, which a sandbox keeps for control prompts:

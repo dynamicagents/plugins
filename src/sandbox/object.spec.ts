@@ -253,6 +253,40 @@ describe("the harness behaviour a sandbox is built on", () => {
     });
   });
 
+  it(
+    "stops only a run's own operations, never those of a run that continues it",
+    { timeout: 30_000 },
+    async () => {
+      const sandbox = freshSandbox("successor");
+      // No CLI is left to wait for once a stop has aborted.
+      await sandbox.answer("--output-format stream-jso[n]", "", 1);
+      await sandbox.createRun("first", { cwd: "/workspace/repo" });
+      await sandbox.submit("first", "began", "op-first");
+      await eventually(
+        () => pollRun(sandbox, "first", "op-first"),
+        (poll) => poll.result !== undefined
+      );
+      await sandbox.createRun("second", {
+        cwd: "/workspace/repo",
+        continues: "first"
+      });
+      await sandbox.submit("second", "slow 8000 carried on", "op-second");
+      // Stopping the predecessor, on the session the two runs share.
+      expect(await sandbox.stopRun("first")).toEqual({ stopped: false });
+      const polled = await eventually(
+        () => pollRun(sandbox, "second", "op-second"),
+        (poll) => poll.result !== undefined,
+        20_000
+      );
+      expect(polled.result).toMatchObject({ status: "done" });
+      await runInDurableObject(sandbox, async (instance) => {
+        await expect(
+          instance.submit("second", "taken", "op-first")
+        ).rejects.toThrow(/is run first's/);
+      });
+    }
+  );
+
   it("starts the next container from a checkpoint it wrote, and another sandbox from that checkpoint", async () => {
     const parent = freshSandbox("checkpoint");
     await parent.ensureRunning();

@@ -114,7 +114,7 @@ describe("the launch", () => {
 });
 
 describe("the parse", () => {
-  it("sends the session id, then a note per event, then the result as the outcome", () => {
+  it("sends the session id, then a note per event, then the result and the exit code as the outcome", () => {
     const parse = cli().parser(turn());
     const init = parse.line(
       line({
@@ -157,12 +157,32 @@ describe("the parse", () => {
         usage: {}
       })
     );
-    expect(ended.outcome?.status).toBe("done");
-    const end = decodeRunEnd(
-      (ended.outcome as { text: string } | undefined)?.text
-    );
+    // Nothing settles before the process exits, which is when its code is known.
+    expect(ended.outcome).toBeUndefined();
+    const outcome = parse.end({ code: 0, stderr: "" });
+    expect(outcome.status).toBe("done");
+    const end = decodeRunEnd((outcome as { text: string }).text);
     expect(end?.result?.text).toBe("the answer");
+    expect(end?.exitCode).toBe(0);
     expect(end?.sessionId).toBe("sess-1");
+  });
+
+  it("keeps the code a CLI exits with after an error result", () => {
+    const parse = cli().parser(turn());
+    parse.line(
+      line({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        session_id: "sess-1",
+        usage: {}
+      })
+    );
+    const outcome = parse.end({ code: 1, stderr: "" });
+    expect(outcome.status).toBe("done");
+    const end = decodeRunEnd((outcome as { text: string }).text);
+    expect(end?.exitCode).toBe(1);
+    expect(end?.result?.isError).toBe(true);
   });
 
   it("ends a process that printed no result with its exit and the end of its stderr", () => {
