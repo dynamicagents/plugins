@@ -12,6 +12,12 @@
  * environment of the caller's: a `PATH` or `LD_PRELOAD` would otherwise be
  * honoured as root before the drop. The command's environment is applied after
  * it, by `env -i`, which also clears whatever the container's own carries.
+ *
+ * So is its directory, by `env -C`, and never as the platform's `cwd`: a `cwd`
+ * that does not exist fails the spawn, and the platform reports that as the
+ * command not being found in the container (observed). A missing directory is
+ * an answer — `/repo` probes a clone target before cloning into it — so it has
+ * to arrive as one: `env` exits 125 and says which directory.
  */
 
 /** The image's unprivileged user, which owns `/workspace` and runs the CLI. */
@@ -25,10 +31,11 @@ const ENV = "/usr/bin/env";
 const AGENT_PATH =
   "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/** `argv`, run as the agent with no capabilities, in exactly {@link agentEnv}`(env)`. */
+/** `argv`, run as the agent with no capabilities, in exactly {@link agentEnv}`(env)`, from `cwd` when given. */
 export function asAgent(
   argv: readonly string[],
-  env: Readonly<Record<string, string>> = {}
+  env: Readonly<Record<string, string>> = {},
+  cwd?: string
 ): string[] {
   if (argv.length === 0) throw new Error("asAgent: an empty command");
   return [
@@ -41,6 +48,7 @@ export function asAgent(
     "--",
     ENV,
     "-i",
+    ...(cwd ? ["-C", cwd] : []),
     ...Object.entries(agentEnv(env)).map(([name, value]) => `${name}=${value}`),
     ...argv
   ];

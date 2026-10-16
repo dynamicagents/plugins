@@ -410,15 +410,12 @@ export abstract class SandboxObjectBase<
   ): Promise<ExecResult> {
     await this.ensureRunning();
     return this.#run(
-      asAgent(argv, {
-        ...this.#cfg.env,
-        ...options.env,
-        ...this.#egress.env
-      }),
-      {
-        ...(options.cwd ? { cwd: options.cwd } : {}),
-        ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {})
-      }
+      asAgent(
+        argv,
+        { ...this.#cfg.env, ...options.env, ...this.#egress.env },
+        options.cwd
+      ),
+      options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}
     );
   }
 
@@ -485,11 +482,11 @@ export abstract class SandboxObjectBase<
    */
   async #run(
     argv: readonly string[],
-    options: { cwd?: string; timeoutMs?: number }
+    options: { timeoutMs?: number }
   ): Promise<ExecResult> {
     return this.#hold(async () => {
+      // No `cwd`: see `./agent-exec.ts`.
       const process = await this.#container.exec([...argv], {
-        ...(options.cwd ? { cwd: options.cwd } : {}),
         ...(options.timeoutMs
           ? { signal: AbortSignal.timeout(options.timeoutMs) }
           : {}),

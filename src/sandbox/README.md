@@ -139,7 +139,7 @@ await serveSandboxDaemon({
 The image provides:
 
 - the user `agent` (uid and gid `10001`, home `/home/agent`), owning `/workspace`;
-- `setpriv` (util-linux), `timeout` (coreutils), `git`, and `update-ca-certificates`;
+- `setpriv` (util-linux), `timeout` and an `env` that takes `-C` (coreutils), `git`, and `update-ca-certificates`;
 - `/usr/local/bin/sandbox-shim`, from `cloudflare/sandbox`'s donor image, for `Files` and `DirectoryBackup`;
 - `/etc/da/skel`, root-owned, which every session's home starts as. It may be empty.
 
