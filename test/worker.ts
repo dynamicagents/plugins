@@ -17,6 +17,8 @@ import {
   type SandboxEgressRule,
   type SandboxObjectConfig
 } from "../src/sandbox/index.js";
+// Its own module, not the barrel: that brings core and Think into this Worker.
+import { githubSandboxEgress } from "../src/repo-github/sandbox-egress.js";
 import { withControlSession } from "../src/sandbox/daemon/composite.js";
 import { containerFor, fakeOf } from "./sandbox/fake-container.js";
 
@@ -221,8 +223,14 @@ const PROBE_RULE: SandboxEgressRule = {
   }
 };
 
+/** GitHub's rule, as a sandbox running `sandboxRepoGit` carries it. */
+const GITHUB_RULE = githubSandboxEgress({
+  tokenBinding: "GITHUB_TOKEN",
+  push: { repos: ["dynamicagents/plugins"], branches: ["coding/*"] }
+});
+
 /** The rules the test entrypoint serves: every rule a test sandbox may carry. */
-const TEST_RULES: readonly SandboxEgressRule[] = [PROBE_RULE];
+const TEST_RULES: readonly SandboxEgressRule[] = [PROBE_RULE, GITHUB_RULE];
 
 /** The same, carrying {@link PROBE_RULE}. */
 export class TestSandboxHttpsDO extends TestSandboxDO {
@@ -232,6 +240,17 @@ export class TestSandboxHttpsDO extends TestSandboxDO {
 
   protected override rules(): SandboxEgressRule[] {
     return [PROBE_RULE];
+  }
+}
+
+/** The same, carrying {@link GITHUB_RULE}. */
+export class TestSandboxGitDO extends TestSandboxDO {
+  protected override self(): string {
+    return "TEST_SANDBOX_GIT";
+  }
+
+  protected override rules(): SandboxEgressRule[] {
+    return [GITHUB_RULE];
   }
 }
 

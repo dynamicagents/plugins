@@ -29,6 +29,19 @@ export { parseRepo } from "./url.js";
 export { GITHUB_MCP_URL, GITHUB_MCP_TOOLS } from "./mcp.js";
 
 /**
+ * Over a `/sandbox` object: the sandbox's egress rule for GitHub, and the
+ * `RepoGit` that runs the container's own git behind it.
+ */
+export {
+  GITHUB_PLACEHOLDER_HOST,
+  GITHUB_TOKEN_PLACEHOLDER,
+  githubSandboxEgress,
+  type GitHubSandboxEgressOptions,
+  type GitPushPolicy
+} from "./sandbox-egress.js";
+export { sandboxRepoGit, type SandboxGitHost } from "./sandbox-git.js";
+
+/**
  * `@dynamicagents/plugins/repo-github` — clone, commit, push, open a pull
  * request, on GitHub.
  *

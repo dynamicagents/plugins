@@ -86,7 +86,8 @@ it, as a `SandboxEgressRule`:
 its egress entrypoint read that list:
 
 ```ts
-// egress.ts — each rule from the plugin that needs its hosts.
+// egress.ts — each rule from the plugin that needs its hosts:
+// `/repo-github`'s `githubSandboxEgress`, for one.
 export const CODING_EGRESS: readonly SandboxEgressRule[] = [/* … */];
 
 export class CodingEgress extends WorkerEntrypoint<
@@ -108,11 +109,6 @@ A host two rules declare, or an `env` key two rules set, fails the sandbox's con
 intercepted request runs in the entrypoint, a stateless Worker invocation, so the sandbox object is
 not on its path. A handler that keeps state in the sandbox — a credential pool — reaches it with
 `call.sandbox()`, by the name it was reached by and the binding `egress.self` names.
-
-**git** clones, fetches and pushes through `sandboxRepoGit`, which `/repo-github` takes as its
-`RepoConfig.git`. It is the container's own git, run as the agent under a limit, with only the
-placeholder: the token and the push policy are the egress's. A clone is noted on the sandbox, so
-an image change brings it back from its backup.
 
 ## The image
 

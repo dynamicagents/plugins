@@ -134,6 +134,8 @@ for (const file of walk(path.join(root, "dist"))) {
 const BUILDS_ON = {
   // Over a sandbox, its markers' directory.
   "./computer": ["./workspace", "./sandbox"],
+  // Its egress rule and its git are a sandbox's: the contract they meet is `/sandbox`'s.
+  "./repo-github": ["./sandbox"],
   // The image's entrypoint shares the object's constants and run header.
   "./sandbox/daemon": ["./sandbox"],
   // On a sandbox: its run header, its egress routes and its RPCs' shapes.

@@ -1,16 +1,15 @@
-import type { RepoGit, RepoGitResult } from "../repo-github/index.js";
-import { githubEnv } from "./github.js";
-import { SANDBOX_ROOT } from "./header.js";
+import { SANDBOX_ROOT } from "../sandbox/header.js";
+import type { RepoGit, RepoGitResult } from "./index.js";
 
 /**
- * `/repo-github`'s three credentialed operations, as `git` in the sandbox.
+ * The three credentialed operations, as `git` in a sandbox.
  *
  * The workspace ran them in its object, beside the token. Here they run where
- * the checkout is, as the agent, with only the placeholder: git's `insteadOf`
- * sends github.com to the intercepted host, and the egress swaps the token in
- * and holds a push to the sandbox's policy (`./github.ts`, `./egress.ts`). So
- * the container still never holds the token, and a push the policy refuses is
- * refused before GitHub sees it.
+ * the checkout is, as the agent, with only the placeholder. The sandbox carries
+ * `githubSandboxEgress` (`./sandbox-egress.ts`), whose environment sends
+ * github.com to the intercepted host and whose handler swaps the token in and
+ * holds a push to its policy. So the container still never holds the token, and
+ * a push the policy refuses is refused before GitHub sees it.
  *
  * A host passes this as `RepoConfig.git`. A clone is noted on the sandbox, so
  * an image change brings it back from its backup.
@@ -65,7 +64,7 @@ export function sandboxRepoGit(sandbox: () => SandboxGitHost): RepoGit {
       {
         cwd,
         // A credential prompt would wait out the limit: there is nobody to answer it.
-        env: { ...githubEnv(), GIT_TERMINAL_PROMPT: "0" },
+        env: { GIT_TERMINAL_PROMPT: "0" },
         timeoutMs: limitMs + (KILL_AFTER_S + 5) * 1000
       }
     );

@@ -45,7 +45,6 @@ export {
   type EgressPlan,
   type SandboxEgressRule
 } from "./egress.js";
-export { sandboxRepoGit, type SandboxGitHost } from "./git.js";
 export {
   deriveAdvisories,
   renderAdvisory,

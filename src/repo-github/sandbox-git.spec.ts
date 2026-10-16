@@ -1,18 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { freshSandbox } from "../../test/sandbox/do.js";
-import { sandboxRepoGit, type SandboxGitHost } from "./git.js";
+import { freshGitSandbox } from "../../test/sandbox/do.js";
+import { GITHUB_PLACEHOLDER_HOST } from "./sandbox-egress.js";
+import { sandboxRepoGit, type SandboxGitHost } from "./sandbox-git.js";
 
 /**
- * Credentialed git as the container's own, behind a fake container: what is
- * run, as whom, and what comes back. That the egress swaps the token and holds
- * a push to its policy is `./egress.spec.ts`'s.
+ * Credentialed git as the container's own, in a sandbox carrying the GitHub
+ * rule, behind a fake container: what is run, as whom, and what comes back.
+ * That the egress swaps the token and holds a push to its policy is
+ * `./sandbox-egress.spec.ts`'s.
  */
 
 const ALLOWED = ["github.com"];
 const URL = "https://github.com/dynamicagents/plugins.git";
 
 async function setup(name: string) {
-  const sandbox = freshSandbox(name);
+  const sandbox = freshGitSandbox(name);
   await sandbox.ensureRunning();
   const git = sandboxRepoGit(() => sandbox as unknown as SandboxGitHost);
   const sent = async (match: string) =>
@@ -42,6 +44,21 @@ describe("sandboxRepoGit", () => {
     expect(
       await sent("/var/lib/da/checkouts/%2Fworkspace%2Fplugins")
     ).not.toHaveLength(0);
+  });
+
+  it("reaches GitHub through the rule's placeholder host, and never waits on a prompt", async () => {
+    const { git, sent } = await setup("routed");
+    await git.fetch({
+      url: URL,
+      dir: "/workspace/plugins",
+      allowedHosts: ALLOWED
+    });
+    const [fetch] = await sent("git fetch");
+    expect(fetch).toContain(
+      `GIT_CONFIG_KEY_0=url.http://${GITHUB_PLACEHOLDER_HOST}/.insteadOf`
+    );
+    expect(fetch).toContain("GIT_TERMINAL_PROMPT=0");
+    expect(fetch).not.toContain("GH_TOKEN=");
   });
 
   it("refuses a host or a scheme it was not allowed, and runs nothing", async () => {

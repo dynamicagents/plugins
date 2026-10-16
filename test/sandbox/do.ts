@@ -1,6 +1,10 @@
 import { env } from "cloudflare:workers";
 import { makeDoHelpers } from "@dynamicagents/core/testing";
-import type { TestSandboxDO, TestSandboxHttpsDO } from "../worker.js";
+import type {
+  TestSandboxDO,
+  TestSandboxGitDO,
+  TestSandboxHttpsDO
+} from "../worker.js";
 import type { PollResult } from "../../src/sandbox/index.js";
 
 // Cast, because this package generates no ambient `Env` (see
@@ -8,6 +12,7 @@ import type { PollResult } from "../../src/sandbox/index.js";
 const bindings = env as unknown as {
   TEST_SANDBOX: DurableObjectNamespace<TestSandboxDO>;
   TEST_SANDBOX_HTTPS: DurableObjectNamespace<TestSandboxHttpsDO>;
+  TEST_SANDBOX_GIT: DurableObjectNamespace<TestSandboxGitDO>;
 };
 
 /** A fresh sandbox per test, over its own fake container. */
@@ -16,6 +21,9 @@ export const { freshStub: freshSandbox } = makeDoHelpers<TestSandboxDO>(
 );
 export const { freshStub: freshHttpsSandbox } =
   makeDoHelpers<TestSandboxHttpsDO>(bindings.TEST_SANDBOX_HTTPS);
+export const { freshStub: freshGitSandbox } = makeDoHelpers<TestSandboxGitDO>(
+  bindings.TEST_SANDBOX_GIT
+);
 
 /**
  * A run's poll, as its plain type: `PollResult` carries the transcript's JSON
