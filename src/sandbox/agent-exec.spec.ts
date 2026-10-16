@@ -23,6 +23,23 @@ describe("asAgent", () => {
     ]);
   });
 
+  it("changes directory after the drop, before the environment and the command", () => {
+    const argv = asAgent(["git", "status"], { CI: "1" }, "/workspace/repo");
+    expect(
+      argv.slice(argv.indexOf("/usr/bin/env"), argv.indexOf("CI=1"))
+    ).toEqual([
+      "/usr/bin/env",
+      "-i",
+      "-C",
+      "/workspace/repo",
+      "HOME=/home/agent",
+      "USER=agent",
+      "LOGNAME=agent",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ]);
+    expect(argv.slice(-2)).toEqual(["git", "status"]);
+  });
+
   it("puts a caller's environment on the agent's side of the drop, never root's", () => {
     const argv = asAgent(["true"], { LD_PRELOAD: "/workspace/evil.so" });
     expect(argv.indexOf("LD_PRELOAD=/workspace/evil.so")).toBeGreaterThan(

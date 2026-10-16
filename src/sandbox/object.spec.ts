@@ -405,6 +405,22 @@ describe("commands", () => {
     expect(fake.execs[at]?.[0]).toBe("/usr/bin/setpriv");
     expect(fake.execEnvs[at]).toBeNull();
   });
+
+  it("changes into a command's directory as the agent, and hands the platform no cwd", async () => {
+    const sandbox = freshSandbox("cwd-agent");
+    await sandbox.ensureRunning();
+    await sandbox.exec(["git", "rev-parse", "--git-dir"], {
+      cwd: "/workspace/not-cloned-yet"
+    });
+    const fake = await sandbox.fake();
+    const command = fake.execs.at(-1) ?? [];
+    expect(command.indexOf("-C")).toBeGreaterThan(command.indexOf("--"));
+    expect(command[command.indexOf("-C") + 1]).toBe(
+      "/workspace/not-cloned-yet"
+    );
+    // A platform `cwd` that does not exist fails the spawn as "not found".
+    expect(fake.execCwds.every((cwd) => cwd === null)).toBe(true);
+  });
 });
 
 describe("checkouts and installs", () => {
