@@ -141,6 +141,8 @@ export interface PollResult {
   /** Set once the operation settled. */
   result?: ContainerOperationResult;
   messages: PolledMessage[];
+  /** The `from` that skips every message sent so far. */
+  next: number;
 }
 
 export interface SnapshotSeed {
@@ -274,7 +276,14 @@ export abstract class SandboxObjectBase<
       run_id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
       cwd TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      stopped_at INTEGER
+    )`);
+    // Which run submitted each operation: runs that share a session share its
+    // operations, and a stop is one run's.
+    sql.exec(`CREATE TABLE IF NOT EXISTS sandbox_operations (
+      operation_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL
     )`);
     sql.exec(`CREATE TABLE IF NOT EXISTS sandbox_checkouts (
       dir TEXT PRIMARY KEY,
@@ -582,23 +591,36 @@ export abstract class SandboxObjectBase<
    * The harness session a run lives in, made on first ask.
    *
    * The harness refuses a session id it did not mint, so a run's own id maps to
-   * one here. A fork continues another run's conversation as a new branch of it,
-   * which only works inside one object: the forked run's files are this one's.
+   * one here. A run may instead carry on another run's conversation: `continues`
+   * shares its session, and `forkOf` branches a new one from it. Either only
+   * works inside one object, since the conversation's files are this one's, and
+   * only in the same `cwd`, since the CLI files a conversation by directory.
    */
   async createRun(
     runId: string,
-    options: { cwd: string; forkOf?: string }
+    options: { cwd: string; forkOf?: string; continues?: string }
   ): Promise<{ sessionId: string; created: boolean }> {
     this.#confine(options.cwd);
     await this.#touch();
     const existing = this.#runRow(runId);
     if (existing) return { sessionId: existing.session_id, created: false };
+    if (options.forkOf !== undefined && options.continues !== undefined)
+      throw new Error(
+        "a run either continues another run or forks it, not both"
+      );
+    const of = options.forkOf ?? options.continues;
     let sessionId: string;
-    if (options.forkOf !== undefined) {
-      const from = this.#runRow(options.forkOf);
-      if (!from)
-        throw new Error(`no run ${options.forkOf} in this sandbox to fork`);
-      sessionId = (await this.#harness.sessions.fork(from.session_id)).id;
+    if (of !== undefined) {
+      const from = this.#runRow(of);
+      if (!from) throw new Error(`no run ${of} in this sandbox to carry on`);
+      if (from.cwd !== options.cwd)
+        throw new Error(
+          `run ${of} worked in ${from.cwd}, so a run carrying it on cannot work in ${options.cwd}`
+        );
+      sessionId =
+        options.forkOf !== undefined
+          ? (await this.#harness.sessions.fork(from.session_id)).id
+          : from.session_id;
     } else {
       sessionId = (await this.#harness.sessions.create()).id;
     }
@@ -612,13 +634,42 @@ export abstract class SandboxObjectBase<
     return { sessionId, created: true };
   }
 
-  #runRow(runId: string): { session_id: string; cwd: string } | undefined {
+  #runRow(
+    runId: string
+  ):
+    { session_id: string; cwd: string; stopped_at: number | null } | undefined {
     return this.ctx.storage.sql
-      .exec<{ session_id: string; cwd: string }>(
-        "SELECT session_id, cwd FROM sandbox_runs WHERE run_id = ?",
+      .exec<{ session_id: string; cwd: string; stopped_at: number | null }>(
+        "SELECT session_id, cwd, stopped_at FROM sandbox_runs WHERE run_id = ?",
         runId
       )
       .toArray()[0];
+  }
+
+  /** Record `operationId` as `runId`'s, before it is submitted; refuse one another run submitted. */
+  #own(runId: string, operationId: string): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "INSERT OR IGNORE INTO sandbox_operations (operation_id, run_id) VALUES (?, ?)",
+      operationId,
+      runId
+    );
+    const owner = sql
+      .exec<{ run_id: string }>(
+        "SELECT run_id FROM sandbox_operations WHERE operation_id = ?",
+        operationId
+      )
+      .one().run_id;
+    if (owner !== runId)
+      throw new Error(
+        `operation ${operationId} is run ${owner}'s, so run ${runId} cannot submit it`
+      );
+  }
+
+  /** Refuse a turn of a run that was stopped: it takes no more. */
+  #refuseStopped(runId: string): void {
+    if (this.#runRow(runId)?.stopped_at != null)
+      throw new Error(`run ${runId} was stopped, so it takes no more turns`);
   }
 
   #session(runId: string) {
@@ -634,6 +685,10 @@ export abstract class SandboxObjectBase<
    *
    * Every turn runs in the run's `cwd`: a turn with no run header gets one, and
    * a header naming another directory is refused.
+   *
+   * A stopped run takes no turn, checked before and after the turn is queued:
+   * a submission still starting the container when its run is stopped would
+   * otherwise start a CLI after the stop, with nobody left polling it.
    */
   async submit(
     runId: string,
@@ -649,10 +704,18 @@ export abstract class SandboxObjectBase<
       );
     }
     const turn = header ? text : withRunHeader({ cwd: row.cwd }, prompt);
+    this.#refuseStopped(runId);
+    this.#own(runId, operationId);
     await this.ensureRunning();
+    this.#refuseStopped(runId);
+    const session = this.#harness.session(row.session_id);
     const receipt = await this.#hold(() =>
-      this.#harness.session(row.session_id).submit(turn, { operationId })
+      session.submit(turn, { operationId })
     );
+    if (this.#runRow(runId)?.stopped_at != null) {
+      await session.abort(receipt.operationId);
+      throw new Error(`run ${runId} was stopped, so it takes no more turns`);
+    }
     await this.#egressWatch.set(new Date(Date.now() + EGRESS_WATCH_MS));
     return { operationId: receipt.operationId, accepted: receipt.accepted };
   }
@@ -664,11 +727,17 @@ export abstract class SandboxObjectBase<
    * nothing it streamed live. Those of this operation only, so a forked run does
    * not report its parent's history, each with a digest, because a message is
    * replaced in place as its tool calls finish.
+   *
+   * `from` skips that many of them, so a long run is not sent whole on every
+   * poll; pass the last poll's `next`. A message replaced behind `from` is not
+   * sent again, so a caller passes it only for an adapter that never replaces
+   * one.
    */
   async poll(
     runId: string,
     operationId: string,
-    waitMs = POLL_WAIT_MS
+    waitMs = POLL_WAIT_MS,
+    from = 0
   ): Promise<PollResult> {
     await this.#touch();
     const session = this.#session(runId);
@@ -683,10 +752,12 @@ export abstract class SandboxObjectBase<
     }
     if (!result && this.#container.running)
       await this.#prepareRuntime().catch(() => undefined);
+    const own = (await session.messages()).filter(
+      (message) =>
+        message.operationId === operationId && message.role === "assistant"
+    );
     const messages: PolledMessage[] = [];
-    for (const message of await session.messages()) {
-      if (message.operationId !== operationId || message.role !== "assistant")
-        continue;
+    for (const message of own.slice(from)) {
       messages.push({
         id: message.id,
         digest: await digest(message.parts),
@@ -696,7 +767,8 @@ export abstract class SandboxObjectBase<
     return {
       contract: SANDBOX_CONTRACT,
       ...(result ? { result } : {}),
-      messages
+      messages,
+      next: Math.max(from, own.length)
     };
   }
 
@@ -707,10 +779,39 @@ export abstract class SandboxObjectBase<
    * SIGINT, a SIGKILL a few seconds later, then one last sync of its session
    * files. Committing or stopping before that loses what it wrote last, or
    * races git's index lock. So this waits for no CLI to be left, and one sync.
+   *
+   * A stopped run takes no more turns. Its conversation goes on, if it does, in
+   * a run that `continues` it — whose operations share the session, so only
+   * this run's own are aborted.
    */
   async stopRun(runId: string): Promise<{ stopped: boolean }> {
     await this.#touch();
-    const stopped = await this.#session(runId).abort();
+    const row = this.#runRow(runId);
+    if (!row) throw new Error(`no run ${runId} in this sandbox`);
+    const sql = this.ctx.storage.sql;
+    // Marked first, so a submission of it still on its way in refuses itself.
+    sql.exec(
+      "UPDATE sandbox_runs SET stopped_at = ? WHERE run_id = ? AND stopped_at IS NULL",
+      Date.now(),
+      runId
+    );
+    const own = new Set(
+      sql
+        .exec<{ operation_id: string }>(
+          "SELECT operation_id FROM sandbox_operations WHERE run_id = ?",
+          runId
+        )
+        .toArray()
+        .map((each) => each.operation_id)
+    );
+    const session = this.#harness.session(row.session_id);
+    let stopped = false;
+    for (const open of await this.#harness.pending({
+      session: row.session_id
+    })) {
+      if (own.has(open.operationId))
+        stopped = (await session.abort(open.operationId)) || stopped;
+    }
     if (this.#container.running) {
       const until = Date.now() + CLI_KILL_MS + 10_000;
       while (Date.now() < until && (await this.#cliAlive())) await sleep(500);

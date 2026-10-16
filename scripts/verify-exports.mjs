@@ -134,7 +134,11 @@ for (const file of walk(path.join(root, "dist"))) {
 const BUILDS_ON = {
   "./computer": ["./workspace"],
   // The image's entrypoint shares the object's constants and run header.
-  "./sandbox/daemon": ["./sandbox"]
+  "./sandbox/daemon": ["./sandbox"],
+  // On a sandbox: its run header, its egress routes and its RPCs' shapes.
+  "./claude-code": ["./sandbox"],
+  // The Claude Code CLI in a sandbox image: this plugin's parser and cards.
+  "./claude-code/daemon": ["./claude-code", "./sandbox"]
 };
 
 /** `./browser` → `dist/browser` — the directory a subpath's files must stay in. */

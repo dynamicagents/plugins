@@ -1,8 +1,13 @@
-import type { LanguageModel } from "ai";
 import type { ArtifactEntryDetail } from "@dynamicagents/core/artifacts";
 import type { NoteData } from "@dynamicagents/core/subagent";
 import { isPlatformTransientError } from "agents";
 import { lostCard } from "./cards.js";
+import {
+  lastUserText,
+  reportingModel,
+  type CallOptions,
+  type LanguageModelV3
+} from "./language-model.js";
 import type { ClaudeCodeConfig, PermissionMode } from "./config.js";
 import type { ClaudeCodeResult, RateLimitInfo } from "./events.js";
 import { claudeCodeSession, requireCredentials } from "./session.js";
@@ -33,13 +38,6 @@ import {
  * it works goes to the parent as notes instead, through `note`. Nothing else is
  * streamed at all: Think's stall watchdog is off, so a silent stream is not cut.
  */
-
-/** The provider interface this implements, read off `ai` rather than imported. */
-type LanguageModelV3 = Extract<LanguageModel, { specificationVersion: "v3" }>;
-type CallOptions = Parameters<LanguageModelV3["doStream"]>[0];
-type StreamResult = Awaited<ReturnType<LanguageModelV3["doStream"]>>;
-type StreamPart =
-  StreamResult["stream"] extends ReadableStream<infer P> ? P : never;
 
 /** How one exec of a session ended. */
 export interface SessionEnd {
@@ -169,17 +167,6 @@ export interface ClaudeCodeModelOptions {
   /** The text the parent receives. Run once, and kept. */
   report: (outcome: SessionOutcome) => Promise<string>;
 }
-
-/** Zeroed: the session's tokens are the CLI's context, not this conversation's. */
-const USAGE = {
-  inputTokens: {
-    total: 0,
-    noCache: 0,
-    cacheRead: 0,
-    cacheWrite: 0
-  },
-  outputTokens: { total: 0, text: 0, reasoning: 0 }
-};
 
 export function claudeCodeModel(
   options: ClaudeCodeModelOptions
@@ -427,51 +414,7 @@ export function claudeCodeModel(
     return text;
   };
 
-  return {
-    specificationVersion: "v3",
-    provider: "claude-code",
-    modelId: options.config.model ?? "claude-code",
-    supportedUrls: {},
-
-    async doStream(call) {
-      // The stream is returned at once and the session runs inside it, so
-      // nothing waits on a promise for the length of a session.
-      const stream = new ReadableStream<StreamPart>({
-        async start(controller) {
-          controller.enqueue({ type: "stream-start", warnings: [] });
-          try {
-            const text = await run(call);
-            controller.enqueue({ type: "text-start", id: "report" });
-            controller.enqueue({
-              type: "text-delta",
-              id: "report",
-              delta: text
-            });
-            controller.enqueue({ type: "text-end", id: "report" });
-            controller.enqueue({
-              type: "finish",
-              usage: USAGE,
-              finishReason: { unified: "stop", raw: undefined }
-            });
-            controller.close();
-          } catch (err) {
-            controller.error(err);
-          }
-        }
-      });
-      return { stream };
-    },
-
-    async doGenerate(call) {
-      const text = await run(call);
-      return {
-        content: [{ type: "text", text }],
-        finishReason: { unified: "stop", raw: undefined },
-        usage: USAGE,
-        warnings: []
-      };
-    }
-  };
+  return reportingModel(options.config.model ?? "claude-code", run);
 }
 
 /**
@@ -491,19 +434,4 @@ function isStreamCut(err: unknown): boolean {
       return true;
   }
   return false;
-}
-
-/**
- * The task: the last user message's text. On a continued turn the prompt ends
- * with the interrupted assistant message, so the last message is not it.
- */
-function lastUserText(prompt: CallOptions["prompt"]): string {
-  for (let i = prompt.length - 1; i >= 0; i--) {
-    const message = prompt[i]!;
-    if (message.role !== "user") continue;
-    return message.content
-      .map((part) => (part.type === "text" ? part.text : ""))
-      .join("");
-  }
-  throw new Error("claude-code: the run has no task — no user message");
 }

@@ -70,6 +70,11 @@ describe("the harness behaviour a sandbox is built on", () => {
     });
     expect(polled.messages.map((m) => m.message.role)).toEqual(["assistant"]);
     expect(polled.messages[0]?.digest).toMatch(/^[0-9a-f]{24}$/);
+    // Paged: what a poll already sent is not sent again.
+    expect(polled.next).toBe(1);
+    expect(
+      (await pollRun(sandbox, "run-1", "op-1", polled.next)).messages
+    ).toEqual([]);
   });
 
   it("runs every turn of a run in its directory, and refuses one aimed elsewhere", async () => {
@@ -169,6 +174,118 @@ describe("the harness behaviour a sandbox is built on", () => {
       polled.messages.every((m) => m.message.operationId === "op-write")
     ).toBe(true);
   });
+
+  it(
+    "starts nothing for a submission that arrives after its run was stopped",
+    { timeout: 20_000 },
+    async () => {
+      const sandbox = freshSandbox("late");
+      await sandbox.answer("--output-format stream-jso[n]", "", 1);
+      await sandbox.createRun("run-1", { cwd: "/workspace/repo" });
+      // Held where a submission waits on a new container: its egress marker.
+      await sandbox.holdExec(EGRESS_READY);
+      await runInDurableObject(sandbox, async (instance, state) => {
+        const late = instance.submit("run-1", "too late", "op-1").then(
+          () => "accepted",
+          (err: unknown) => String(err)
+        );
+        await eventually(
+          async () => instance.fake(),
+          (fake) => joined(fake.execs).some((cmd) => cmd.includes(EGRESS_READY))
+        );
+        // The stop lands while the submission is still starting the container.
+        const stopping = instance.stopRun("run-1");
+        await eventually(
+          async () =>
+            state.storage.sql
+              .exec<{ stopped_at: number | null }>(
+                "SELECT stopped_at FROM sandbox_runs WHERE run_id = 'run-1'"
+              )
+              .one().stopped_at,
+          (stoppedAt) => stoppedAt !== null
+        );
+        instance.freeExec();
+        await stopping;
+        expect(await late).toMatch(/was stopped/);
+        await expect(instance.submit("run-1", "again", "op-2")).rejects.toThrow(
+          /was stopped/
+        );
+      });
+    }
+  );
+
+  it("continues a run's conversation as another run, in the same directory only", async () => {
+    const sandbox = freshSandbox("continue");
+    await sandbox.createRun("first", { cwd: "/workspace/repo" });
+    await sandbox.submit("first", "began", "op-first");
+    await eventually(
+      () => pollRun(sandbox, "first", "op-first"),
+      (poll) => poll.result !== undefined
+    );
+    const next = await sandbox.createRun("second", {
+      cwd: "/workspace/repo",
+      continues: "first"
+    });
+    expect(next.created).toBe(true);
+    await sandbox.submit("second", "carried on", "op-second");
+    const polled = await eventually(
+      () => pollRun(sandbox, "second", "op-second"),
+      (poll) => poll.result !== undefined
+    );
+    expect(polled.result).toMatchObject({
+      status: "done",
+      text: "echo: carried on (turn 2)"
+    });
+    await runInDurableObject(sandbox, async (instance) => {
+      await expect(
+        instance.createRun("third", {
+          cwd: "/workspace/other",
+          continues: "first"
+        })
+      ).rejects.toThrow(/cannot work in \/workspace\/other/);
+      await expect(
+        instance.createRun("fourth", {
+          cwd: "/workspace/repo",
+          continues: "first",
+          forkOf: "first"
+        })
+      ).rejects.toThrow(/not both/);
+    });
+  });
+
+  it(
+    "stops only a run's own operations, never those of a run that continues it",
+    { timeout: 30_000 },
+    async () => {
+      const sandbox = freshSandbox("successor");
+      // No CLI is left to wait for once a stop has aborted.
+      await sandbox.answer("--output-format stream-jso[n]", "", 1);
+      await sandbox.createRun("first", { cwd: "/workspace/repo" });
+      await sandbox.submit("first", "began", "op-first");
+      await eventually(
+        () => pollRun(sandbox, "first", "op-first"),
+        (poll) => poll.result !== undefined
+      );
+      await sandbox.createRun("second", {
+        cwd: "/workspace/repo",
+        continues: "first"
+      });
+      await sandbox.submit("second", "slow 8000 carried on", "op-second");
+      // Stopping the predecessor, on the session the two runs share.
+      expect(await sandbox.stopRun("first")).toEqual({ stopped: false });
+      const polled = await eventually(
+        () => pollRun(sandbox, "second", "op-second"),
+        (poll) => poll.result !== undefined,
+        20_000
+      );
+      expect(polled.result).toMatchObject({ status: "done" });
+      await runInDurableObject(sandbox, async (instance) => {
+        await expect(
+          instance.submit("second", "taken", "op-first")
+        ).rejects.toThrow(/is run first's/);
+      });
+    }
+  );
 
   it("starts the next container from a checkpoint it wrote, and another sandbox from that checkpoint", async () => {
     const parent = freshSandbox("checkpoint");

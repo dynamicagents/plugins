@@ -352,6 +352,18 @@ export function lostCard(why: string): Card {
   };
 }
 
+/** A session's container lost mid-turn, and the session resuming in a new one. */
+export function containerLostCard(reason: string): Card {
+  return {
+    text: "Container lost — the session resumes in a new one",
+    detail: {
+      title: "Session",
+      status: "error",
+      sections: [section("Why", reason, "text")]
+    }
+  };
+}
+
 function duration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;

@@ -46,6 +46,10 @@
       "types": "./dist/claude-code/index.d.ts",
       "import": "./dist/claude-code/index.js"
     },
+    "./claude-code/daemon": {
+      "types": "./dist/claude-code/daemon/index.d.ts",
+      "import": "./dist/claude-code/daemon/index.js"
+    },
     "./workspace": {
       "types": "./dist/workspace/index.d.ts",
       "import": "./dist/workspace/index.js"
