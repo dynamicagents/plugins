@@ -87,10 +87,16 @@ export interface ClaudeCodeHarnessModelOptions {
    * stopped. Default {@link DEFAULT_HARNESS_TIMEOUT_MS}.
    */
   timeoutMs?: number;
+  /**
+   * File one note on the parent's transcript. `at` is when the daemon read the
+   * line it came from: a poll files a batch at once, so the filing time would
+   * give a tool's call and its result the same moment.
+   */
   note: (
     key: string,
     text: string,
-    detail?: ArtifactEntryDetail
+    detail?: ArtifactEntryDetail,
+    at?: number
   ) => Promise<void>;
   /** As `./model.ts` `ClaudeCodeModelOptions.onSession`. */
   onSession?: (record: SessionRecord) => Promise<void>;
@@ -435,7 +441,13 @@ export function claudeCodeHarnessModel(
       // Keyed on the message, which is the operation and the note's position:
       // the parent's transcript dedupes on the key, so a refiled poll is free.
       try {
-        await options.note(message.id, note.text, note.detail);
+        const at = message.message.createdAt;
+        await options.note(
+          message.id,
+          note.text,
+          note.detail,
+          at > 0 ? at : undefined
+        );
         return {};
       } catch (err) {
         console.warn("[claude-code] a note was not filed — polling it again", {

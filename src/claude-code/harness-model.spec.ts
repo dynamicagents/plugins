@@ -34,7 +34,8 @@ const RESULT = {
 const message = (
   operationId: string,
   id: string,
-  text: string
+  text: string,
+  createdAt = 0
 ): PolledMessage => ({
   id: `${operationId}:${id}`,
   digest: id,
@@ -43,13 +44,18 @@ const message = (
     role: "assistant",
     parts: [{ type: "text", text }],
     operationId,
-    createdAt: 0
+    createdAt
   }
 });
 const session = (op: string, id = "sess-1") =>
   message(op, "session", encodeSessionId(id));
-const note = (op: string, n: number, text: string) =>
-  message(op, `claude:${n}`, encodeNote({ key: `claude:${n}`, text }));
+const note = (op: string, n: number, text: string, createdAt = 0) =>
+  message(
+    op,
+    `claude:${n}`,
+    encodeNote({ key: `claude:${n}`, text }),
+    createdAt
+  );
 
 type Turn = {
   messages: PolledMessage[];
@@ -129,7 +135,7 @@ function harness(
   box: ReturnType<typeof sandbox>,
   over: Partial<ClaudeCodeHarnessModelOptions> = {}
 ) {
-  const notes: { key: string; text: string }[] = [];
+  const notes: { key: string; text: string; at?: number }[] = [];
   const reports: SessionOutcome[] = [];
   const sessions: SessionRecord[] = [];
   const { map, storage } = memoryStorage();
@@ -139,8 +145,8 @@ function harness(
     runId: RUN,
     dir: "/workspace/repo",
     schema: "write",
-    note: async (key, text) => {
-      notes.push({ key, text });
+    note: async (key, text, _detail, at) => {
+      notes.push({ key, text, ...(at !== undefined ? { at } : {}) });
     },
     onSession: async (record) => {
       sessions.push(record);
@@ -220,6 +226,22 @@ describe("claudeCodeHarnessModel", () => {
     // Once: a recovered turn reads the report back rather than running again.
     expect(await textOf(model)).toBe("report 1");
     expect(box.submits).toHaveLength(1);
+  });
+
+  /** A poll files a batch at once: the time is the daemon's, from when it read each line. */
+  it("files each note at the time the daemon read it", async () => {
+    const box = sandbox((op) => ({
+      messages: [
+        session(op),
+        note(op, 0, "Bash: npm test", 1_000),
+        note(op, 1, "1 passed", 4_000),
+        note(op, 2, "unstamped")
+      ],
+      result: done()
+    }));
+    const { model, notes } = harness(box);
+    await textOf(model);
+    expect(notes.map((n) => n.at)).toEqual([1_000, 4_000, undefined]);
   });
 
   it("resumes a session whose container was lost, in the same conversation, told what happened", async () => {
