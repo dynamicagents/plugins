@@ -1,9 +1,9 @@
 import { DEFAULT_CWD, DEFAULT_TIMEOUT_MS } from "../workspace/exec.js";
 import { withAbort } from "@dynamicagents/core";
-import type { WorkspaceClient } from "@cloudflare/computer";
+import type { ComputerClient } from "./client.js";
 import { execGate, writeGate, type ExecGate } from "./gate.js";
 import type { WorkspaceAdvisory } from "../workspace/advisory.js";
-import type { ComputerConfig } from "./index.js";
+import type { ComputerToolsConfig } from "./index.js";
 
 /**
  * The machinery every container tool closes over: the resolved config, the
@@ -32,17 +32,17 @@ const INSTALL_POLL_MS = 3_000;
 
 /** What {@link computerContext} hands each group of tools. */
 export interface ComputerContext {
-  config: ComputerConfig;
+  config: ComputerToolsConfig;
   cwd: string;
   timeoutMs: number;
   maxChars: number;
-  workspace: () => Promise<WorkspaceClient>;
+  workspace: () => Promise<ComputerClient>;
   awaitAdvisories: (command: string, signal?: AbortSignal) => Promise<ExecGate>;
   definedEnv: () => Record<string, string> | undefined;
   inWorkspace: (
     gerund: string,
     subject: string,
-    body: (fs: WorkspaceClient["fs"]) => Promise<string>
+    body: (fs: ComputerClient["fs"]) => Promise<string>
   ) => Promise<string>;
   refuseWrite: () => Promise<string | undefined>;
   scope: () => string;
@@ -50,10 +50,10 @@ export interface ComputerContext {
 
 /** Takes what {@link file://./index.ts buildComputerTools} takes. */
 export function computerContext(
-  workspace: () => Promise<WorkspaceClient>,
-  config: ComputerConfig,
+  workspace: () => Promise<ComputerClient>,
+  config: ComputerToolsConfig,
   advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
-  fsWorkspace: () => Promise<WorkspaceClient> = workspace,
+  fsWorkspace: () => Promise<ComputerClient> = workspace,
   lockScope?: () => string
 ): ComputerContext {
   const cwd = config.cwd ?? DEFAULT_CWD;
@@ -178,7 +178,7 @@ export function computerContext(
   const inWorkspace = async (
     gerund: string,
     subject: string,
-    body: (fs: WorkspaceClient["fs"]) => Promise<string>
+    body: (fs: ComputerClient["fs"]) => Promise<string>
   ): Promise<string> => {
     try {
       using ws = await fsWorkspace();

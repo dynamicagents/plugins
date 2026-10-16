@@ -1,10 +1,9 @@
 import type { ToolSet } from "ai";
 import { definePlugin, PluginSetupError } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
-import type { WorkspaceClient } from "@cloudflare/computer";
+import type { ComputerClient } from "./client.js";
 import type { WorkspaceAdvisory } from "../workspace/advisory.js";
 import type { WorkspaceClientConfig } from "../workspace/exec.js";
-import { openWorkspace, openWorkspaceFs } from "../workspace/open.js";
 import { workspaceRoute } from "./proxy.js";
 import { computerContext } from "./context.js";
 import { execTools } from "./tools-exec.js";
@@ -25,6 +24,9 @@ import { grepTools } from "./tools-grep.js";
  * The agent's own workspace has to be this one — `computerWorkspace` — or
  * Think's `read` and `write` would work on a different tree from `bash`. The
  * plugin refuses to start otherwise; see `./proxy.ts`.
+ *
+ * Over a `/sandbox` object instead, the plugin is `sandboxComputer` and the
+ * workspace `sandboxWorkspace` (`./sandbox.ts`); the tools are the same.
  *
  * ## The dependency tree is not in the workspace
  *
@@ -54,6 +56,19 @@ export {
   type ExecGate
 } from "./gate.js";
 export { computerWorkspace, isComputerWorkspace } from "./proxy.js";
+export {
+  sandboxClient,
+  sandboxWorkspace,
+  type SandboxComputerConfig,
+  type SandboxComputerHost
+} from "./sandbox.js";
+export type { ComputerClient } from "./client.js";
+
+/** What the tools read of a config: everything but where the workspace is. */
+export type ComputerToolsConfig = Omit<
+  ComputerConfig,
+  "binding" | "workspaceName"
+>;
 
 export interface ComputerConfig extends WorkspaceClientConfig {
   /**
@@ -125,10 +140,10 @@ export interface ComputerConfig extends WorkspaceClientConfig {
  *   {@link file://./file-lock.ts}. Defaults to this tool set alone.
  */
 export function buildComputerTools(
-  workspace: () => Promise<WorkspaceClient>,
-  config: ComputerConfig,
+  workspace: () => Promise<ComputerClient>,
+  config: ComputerConfig | ComputerToolsConfig,
   advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
-  fsWorkspace: () => Promise<WorkspaceClient> = workspace,
+  fsWorkspace: () => Promise<ComputerClient> = workspace,
   lockScope?: () => string
 ): ToolSet {
   const ctx = computerContext(
@@ -168,12 +183,55 @@ const CONTEXT = [
 ].join("\n");
 
 /**
+ * The same, for a sandbox. What differs is where the files are: the container's
+ * own disk, so nothing answers without it, and `node_modules` sits beside the
+ * checkout rather than under a mount.
+ */
+const SANDBOX_CONTEXT = [
+  "You have a Linux container with a shell, a package manager and network access:",
+  "- `bash` runs any shell command — builds, tests, installs, git.",
+  "- `read` / `write` / `edit` / `delete` work on files; `edit` replaces an exact unique string and is the right tool for a small change.",
+  "- `grep` searches file contents; `list` lists a directory; `find` finds files by glob.",
+  "Search with `grep` and `find` rather than running them through `bash`: they come back with line numbers and a bounded result instead of a wall of text.",
+  "Command output is truncated from the middle when large, so run targeted commands and read specific files rather than printing everything.",
+  "The checkout is the container's own disk, and it is kept between tasks: a stopped container starts again from it, so it may already contain work from an earlier task — check before assuming it is empty.",
+  "`node_modules` is on that disk beside the checkout and is kept with it. The file tools leave it out — use `bash` there.",
+  "`.git` is off limits to these tools, and searches and recursive listings skip it. It is git's internal state — reading it tells you less than the repository tools do, and writing it corrupts the checkout. Repository work goes through the repo tools (`repo_status`, `repo_diff`, `repo_commit`, `repo_push`); if a task needs git state you cannot get that way, say so in your result rather than reaching into `.git` yourself."
+].join("\n");
+
+/**
  * The container plugin. Its tools reach the workspace through the agent's own
  * `computerWorkspace` — the one Think's `read` and `write` use — so the two can
  * never resolve different ones. `config` answers everything else: the shell,
  * the limits, the environment.
  */
-export function computer(config: ComputerConfig): AgentPlugin {
+export function computer(
+  config: ComputerConfig | ComputerToolsConfig
+): AgentPlugin {
+  return computerPlugin(config, "workspace", CONTEXT);
+}
+
+/**
+ * The container plugin over a `/sandbox` object: the agent's workspace is
+ * `sandboxWorkspace` (`./sandbox.ts`), and the model is told the checkout is
+ * the container's disk.
+ */
+export function sandboxComputer(config: ComputerToolsConfig): AgentPlugin {
+  return computerPlugin(config, "sandbox", SANDBOX_CONTEXT);
+}
+
+const WORKSPACE_SETTER = {
+  workspace:
+    "`override workspace = computerWorkspace(config, () => this.pluginContext().runtime())`",
+  sandbox:
+    "`override workspace = sandboxWorkspace(config, () => this.pluginContext().runtime())`"
+} as const;
+
+function computerPlugin(
+  config: ComputerToolsConfig,
+  kind: "workspace" | "sandbox",
+  context: string
+): AgentPlugin {
   return definePlugin({
     name: "computer",
 
@@ -181,32 +239,29 @@ export function computer(config: ComputerConfig): AgentPlugin {
       // Here, not in `execute`: the start check builds every plugin's tools,
       // so a missing workspace fails the start rather than a turn.
       const route = workspaceRoute(ctx.workspace());
-      if (!route)
+      if (route?.kind !== kind)
         throw new PluginSetupError(
           `plugin "computer" runs \`bash\` in a container, but ${ctx.agentName}'s ` +
             "workspace is not that container's, so Think's `read` and `write` " +
             "would work on a different tree. Set it on the agent class: " +
-            "`override workspace = computerWorkspace(config, () => this.pluginContext().runtime())`."
+            `${WORKSPACE_SETTER[kind]}.`
         );
-
       // Resolved per call, not memoized: the name belongs to the turn — a
       // sub-agent's comes from `runtime()`, see `/workspace`'s `WORKSPACE_RUNTIME_KEY` —
-      // and a stale stub would silently route a second caller's commands into
+      // and a stale one would silently route a second caller's commands into
       // the first caller's files.
-      const host = () => route.host(route.name());
-
       return buildComputerTools(
-        () => openWorkspace(host()),
+        () => route.open(route.name()),
         config,
         // No try/catch here: `buildComputerTools` fails the gate open itself,
         // so wrapping again would only make it look like the guarantee lives in
         // two places.
-        () => host().advisories(),
-        () => openWorkspaceFs(host()),
+        () => route.advisories(route.name()),
+        () => route.openFs(route.name()),
         route.name
       );
     },
 
-    context: [{ provider: { get: async () => CONTEXT } }]
+    context: [{ provider: { get: async () => context } }]
   });
 }

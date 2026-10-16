@@ -105,7 +105,32 @@ Consequences worth stating outright:
   runtime's own limits bound it, and it costs the agent its own turn, but it is the
   one value a model supplies here that reaches a compiler.
 
+## Over a sandbox
+
+The same tools run over a [`/sandbox`](../sandbox/) object, whose checkout is the container's own
+disk:
+
+```ts
+import { sandboxComputer, sandboxWorkspace } from "@dynamicagents/plugins/computer";
+
+override workspace = sandboxWorkspace(
+  { binding: this.env.CODING_SANDBOX, sandboxName: () => this.name },
+  () => this.pluginContext().runtime()
+);
+// …
+sandboxComputer(config)
+```
+
+What changes is where everything happens. Every call reaches the container, and a file read wakes
+a stopped one. `grep` and `find` are `ripgrep` there, as the agent: hidden and ignored files are
+read, and `.git` and `node_modules` are pruned, as the workspace's walk does. A command runs under
+`timeout` at its limit, and a cancel marks it before signalling it, so one still starting the
+container never runs. The model is told the checkout is the
+container's disk, and nothing about a mount. `computer` refuses a sandbox's workspace and
+`sandboxComputer` a workspace's, so the agent's two halves cannot disagree.
+
 ## Requirements
 
 [`/workspace`](../workspace/)'s: a workspace object, the Workers **Paid** plan, and
-`@cloudflare/computer`.
+`@cloudflare/computer`. Over a sandbox, [`/sandbox`](../sandbox/)'s, with `ripgrep`, `timeout` and
+`pkill` in the image.

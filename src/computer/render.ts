@@ -1,7 +1,4 @@
-import type {
-  WorkspaceClient,
-  WorkspaceRuntimeStatus
-} from "@cloudflare/computer";
+import type { CommandResult, GrepMatch } from "./client.js";
 import { truncateOutput } from "@dynamicagents/core";
 
 /**
@@ -33,7 +30,6 @@ const MAX_MATCH_LINE_CHARS = 200;
  * so there is no name to import. Reading it back off the method keeps this correct
  * by construction.
  */
-type GrepMatch = Awaited<ReturnType<WorkspaceClient["fs"]["grep"]>>[number];
 
 /** One matching line, bounded — see {@link MAX_MATCH_LINE_CHARS}. */
 function capLine(text: string): string {
@@ -147,7 +143,7 @@ export function renderGrepMatches(
  *
  * ## `status` is not the exit code
  *
- * `WorkspaceRuntimeStatus` is `completed | failed | cancelled`. Dropping it
+ * A `status` is `completed | failed | cancelled`. Dropping it
  * renders a command killed at the `timeoutMs` ceiling exactly like one that ran
  * to completion and failed — "your test suite was killed at ten minutes" and
  * "your test suite has a failing test", which want opposite responses. Anything
@@ -163,7 +159,7 @@ export function renderResult(
     exitCode: number;
     stdout: string;
     stderr: string;
-    status?: WorkspaceRuntimeStatus;
+    status?: CommandResult["status"];
     sync?: { status: "complete" | "pending" };
   },
   maxChars: number
