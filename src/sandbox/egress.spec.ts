@@ -1,339 +1,185 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { githubRoute, ROUTE_SANDBOX, sandboxEgress } from "./egress.js";
 import {
-  branchAllowed,
-  GITHUB_PLACEHOLDER_HOST,
-  GITHUB_TOKEN_PLACEHOLDER,
-  gitTarget,
-  githubEnv,
-  receivePackRefs
-} from "./github.js";
+  egressPlan,
+  forward,
+  sandboxEgress,
+  type EgressCall,
+  type SandboxEgressRule
+} from "./egress.js";
 
-const TOKEN = "github_pat_real";
-const ENV = { GITHUB_TOKEN: TOKEN };
-const POLICY = {
-  repos: ["dynamicagents/plugins"],
-  branches: ["claude-coordinator/*"]
-};
-const GIT = githubRoute({
-  host: GITHUB_PLACEHOLDER_HOST,
-  upstream: "https://github.com",
-  tokenBinding: "GITHUB_TOKEN",
-  push: POLICY
+/** A rule that answers with what it was handed, and forwards nothing. */
+function echoRule(
+  name: string,
+  hosts: { http?: Record<string, string>; https?: Record<string, string> },
+  env?: Record<string, string>
+): SandboxEgressRule & { calls: EgressCall[] } {
+  const calls: EgressCall[] = [];
+  return {
+    name,
+    ...hosts,
+    ...(env ? { env } : {}),
+    calls,
+    async handle(call) {
+      calls.push(call);
+      return new Response(call.target.toString());
+    }
+  };
+}
+
+const GIT = echoRule("git", {
+  http: { "git.harness.internal": "https://git.example.com" }
 });
-const API = githubRoute({
-  host: "api.github.com",
-  upstream: "https://api.github.com",
-  tokenBinding: "GITHUB_TOKEN"
+const API = echoRule("api", {
+  https: { "api.example.com": "https://api.example.com/v3/" }
 });
-
-function upstream(): { calls: Request[] } {
-  const calls: Request[] = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    calls.push(new Request(input as RequestInfo, init));
-    return new Response("upstream", { status: 200 });
-  });
-  return { calls };
-}
-
-const basic = (password: string) =>
-  `Basic ${btoa(`x-access-token:${password}`)}`;
-
-/** A receive-pack body updating `refs`, as git writes it: pkt-lines, a flush, then the pack. */
-function receivePack(refs: string[]): ArrayBuffer {
-  const zero = "0".repeat(40);
-  const one = "1".repeat(40);
-  const encoder = new TextEncoder();
-  const lines = refs.map((ref, i) => {
-    const payload = `${zero} ${one} ${ref}${i === 0 ? "\0report-status side-band-64k" : ""}\n`;
-    const length = encoder.encode(payload).byteLength + 4;
-    return length.toString(16).padStart(4, "0") + payload;
-  });
-  const bytes = encoder.encode(`${lines.join("")}0000PACK....`);
-  return bytes.buffer.slice(0, bytes.byteLength) as ArrayBuffer;
-}
-
-const streamOf = (text: string) => new Blob([text]).stream();
-
-/**
- * A push as git streams it: the commands, then pack chunks produced only as
- * they are read, so nothing is buffered ahead of the reader.
- */
-function streamedPush(refs: string[], packChunks: number) {
-  const commands = new Uint8Array(receivePack(refs));
-  const chunk = new Uint8Array(4096).fill(0x50);
-  let pulled = 0;
-  const stream = new ReadableStream<Uint8Array>(
-    {
-      pull(controller) {
-        if (pulled === 0) controller.enqueue(commands);
-        else if (pulled <= packChunks) controller.enqueue(chunk);
-        else controller.close();
-        pulled += 1;
-      }
-    },
-    { highWaterMark: 0 }
-  );
-  return { stream, bytes: commands.byteLength + packChunks * chunk.byteLength };
-}
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("sandboxEgress — GitHub", () => {
-  it("lets an anonymous request through anonymous, at the real host", async () => {
-    const { calls } = upstream();
-    await sandboxEgress(
-      new Request(
-        `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/info/refs?service=git-upload-pack`
-      ),
-      [GIT],
-      ENV
+describe("egressPlan", () => {
+  it("stamps every route with the sandbox that registers it, and merges the rules' environment", () => {
+    const plan = egressPlan(
+      [
+        echoRule(
+          "a",
+          { http: { "a.internal": "https://a.example.com" } },
+          { A: "1" }
+        ),
+        echoRule(
+          "b",
+          { https: { "b.example.com": "https://b.example.com" } },
+          { B: "2" }
+        )
+      ],
+      "SANDBOX/one"
     );
-    expect(calls[0]?.url).toBe(
-      "https://github.com/dynamicagents/plugins/info/refs?service=git-upload-pack"
-    );
-    expect(calls[0]?.headers.get("authorization")).toBeNull();
+    expect(plan.http.map((route) => route.host)).toEqual(["a.internal"]);
+    expect(plan.https.map((route) => route.host)).toEqual(["b.example.com"]);
+    for (const route of [...plan.http, ...plan.https])
+      expect(Object.values(route.headers)).toEqual(["SANDBOX/one"]);
+    expect(plan.env).toEqual({ A: "1", B: "2" });
   });
 
-  it("swaps the placeholder for the token in the scheme it came in, and sends no x-da-* header", async () => {
-    const { calls } = upstream();
-    await sandboxEgress(
-      new Request(
-        `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/info/refs?service=git-receive-pack`,
-        {
-          headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) }
-        }
-      ),
-      [GIT],
-      ENV
-    );
-    expect(calls[0]?.headers.get("authorization")).toBe(basic(TOKEN));
-    for (const [name] of calls[0]?.headers ?? [])
-      expect(name).not.toMatch(/^x-da-/);
-
-    await sandboxEgress(
-      new Request("https://api.github.com/repos/dynamicagents/plugins/pulls", {
-        headers: { authorization: `Bearer ${GITHUB_TOKEN_PLACEHOLDER}` }
-      }),
-      [API],
-      ENV
-    );
-    expect(calls[1]?.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+  it("refuses a host two rules declare, over either protocol", () => {
+    expect(() =>
+      egressPlan([
+        echoRule("a", { http: { "x.internal": "https://x.example.com" } }),
+        echoRule("b", { https: { "x.internal": "https://x.example.com" } })
+      ])
+    ).toThrow(/x\.internal is declared by both a and b/);
   });
 
-  it("refuses a credentialed request for a repository outside the policy", async () => {
-    const { calls } = upstream();
+  it("refuses an environment key two rules set", () => {
+    expect(() =>
+      egressPlan([
+        echoRule("a", {}, { TOKEN: "a" }),
+        echoRule("b", {}, { TOKEN: "b" })
+      ])
+    ).toThrow(/TOKEN is set by both a and b/);
+  });
+
+  it("refuses an upstream that is not https", () => {
+    expect(() =>
+      egressPlan([
+        echoRule("a", { http: { "x.internal": "http://x.example.com" } })
+      ])
+    ).toThrow(/not https/);
+  });
+});
+
+describe("sandboxEgress", () => {
+  const routes = egressPlan([GIT, API], "SANDBOXES/caller");
+  const all = [...routes.http, ...routes.https];
+
+  it("hands a request to the rule serving its host, aimed at that rule's upstream", async () => {
     const response = await sandboxEgress(
-      new Request(
-        `http://${GITHUB_PLACEHOLDER_HOST}/someone/else/info/refs?service=git-upload-pack`,
-        {
-          headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) }
-        }
-      ),
-      [GIT],
-      ENV
+      new Request("https://api.example.com/repos/a/b?page=2"),
+      all,
+      {},
+      [GIT, API]
+    );
+    expect(await response.text()).toBe(
+      "https://api.example.com/v3/repos/a/b?page=2"
+    );
+    expect(API.calls.at(-1)?.request.url).toBe(
+      "https://api.example.com/repos/a/b?page=2"
+    );
+  });
+
+  it("refuses a host this container never registered", async () => {
+    const response = await sandboxEgress(
+      new Request("http://git.harness.internal/"),
+      routes.https,
+      {},
+      [GIT, API]
     );
     expect(response.status).toBe(403);
-    expect(calls).toHaveLength(0);
   });
 
-  it("pushes the branches the policy allows, and refuses the rest before GitHub sees them", async () => {
-    const { calls } = upstream();
-    const push = (refs: string[]) =>
-      sandboxEgress(
-        new Request(
-          `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/git-receive-pack`,
-          {
-            method: "POST",
-            headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
-            body: receivePack(refs)
-          }
-        ),
-        [GIT],
-        ENV
-      );
-    expect((await push(["refs/heads/claude-coordinator/ab12c"])).status).toBe(
-      200
-    );
-    const refused = await push([
-      "refs/heads/claude-coordinator/ab12c",
-      "refs/heads/main"
-    ]);
-    expect(refused.status).toBe(403);
-    expect(await refused.text()).toMatch(/refs\/heads\/main/);
-    expect((await push(["refs/tags/v1"])).status).toBe(403);
-    expect(calls).toHaveLength(1);
-  });
-
-  it("reads the refs of a gzipped receive-pack body", async () => {
-    const gz = new Blob([
-      receivePack([
-        "refs/heads/claude-coordinator/x",
-        "refs/heads/claude-coordinator/y"
-      ])
-    ])
-      .stream()
-      .pipeThrough(new CompressionStream("gzip"));
-    expect(await receivePackRefs(gz, "gzip")).toEqual([
-      "refs/heads/claude-coordinator/x",
-      "refs/heads/claude-coordinator/y"
-    ]);
-  });
-
-  it("reads a ref as the UTF-8 git wrote it", async () => {
-    expect(
-      await receivePackRefs(
-        new Blob([receivePack(["refs/heads/claude-coordinator/é"])]).stream(),
-        null
-      )
-    ).toEqual(["refs/heads/claude-coordinator/é"]);
-  });
-
-  it("reads a streamed push's refs without waiting on the pack, and forwards all of it", async () => {
-    const { calls } = upstream();
-    const { stream, bytes } = streamedPush(
-      ["refs/heads/claude-coordinator/ab12c"],
-      64
-    );
+  it("refuses a registered host no rule serves", async () => {
     const response = await sandboxEgress(
-      new Request(
-        `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/git-receive-pack`,
-        {
-          method: "POST",
-          headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
-          body: stream
-        }
-      ),
-      [GIT],
-      ENV
+      new Request("http://git.harness.internal/"),
+      all,
+      {},
+      [API]
     );
-    expect(response.status).toBe(200);
-    expect((await calls[0]!.arrayBuffer()).byteLength).toBe(bytes);
+    expect(response.status).toBe(403);
+    expect(await response.text()).toMatch(/No egress rule/);
   });
 
-  it("refuses a streamed push's disallowed ref without waiting on the pack", async () => {
-    const { calls } = upstream();
-    const { stream } = streamedPush(["refs/heads/main"], 64);
-    const [inspected, rest] = stream.tee();
-    expect(await receivePackRefs(inspected, null)).toEqual(["refs/heads/main"]);
-    void rest.cancel();
-    expect(calls).toHaveLength(0);
-  });
-
-  it("refuses a command list git would not have written, rather than reading past it", async () => {
-    for (const body of ["00051-001", "0+3fabc", "0003", "zzzz", "fff1"]) {
-      await expect(receivePackRefs(streamOf(body), null)).rejects.toThrow();
-    }
-  });
-
-  it("forwards the whole push, pack included, and refuses one that names no ref", async () => {
-    const { calls } = upstream();
-    const sent = receivePack(["refs/heads/claude-coordinator/ab12c"]);
-    const push = (body: ArrayBuffer) =>
-      sandboxEgress(
-        new Request(
-          `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/git-receive-pack`,
-          {
-            method: "POST",
-            headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
-            body
-          }
-        ),
-        [GIT],
-        ENV
-      );
-    expect((await push(sent)).status).toBe(200);
-    expect(new Uint8Array(await calls[0]!.arrayBuffer())).toEqual(
-      new Uint8Array(sent)
-    );
-    expect((await push(receivePack([]))).status).toBe(400);
-    expect(calls).toHaveLength(1);
-  });
-
-  it("names the missing token rather than sending the placeholder on", async () => {
-    const { calls } = upstream();
-    const response = await sandboxEgress(
-      new Request("https://api.github.com/user", {
-        headers: { authorization: `token ${GITHUB_TOKEN_PLACEHOLDER}` }
-      }),
-      [API],
-      {}
-    );
-    expect(response.status).toBe(401);
-    expect(calls).toHaveLength(0);
-  });
-});
-
-describe("sandboxEgress — routing", () => {
-  it("refuses a host with no route", async () => {
-    upstream();
-    expect(
-      (
-        await sandboxEgress(
-          new Request("http://elsewhere.internal/"),
-          [GIT],
-          ENV
-        )
-      ).status
-    ).toBe(403);
-  });
-
-  it("hands a route of another kind to its handler, with the route's x-da-* values", async () => {
-    upstream();
-    const seen: Record<string, string>[] = [];
-    const route = {
-      host: "anthropic.harness.internal",
-      upstream: "https://api.anthropic.com",
-      headers: {
-        "x-da-kind": "anthropic",
-        [ROUTE_SANDBOX]: "SANDBOX/caller|repo"
-      },
-      strip: []
-    };
-    const response = await sandboxEgress(
-      new Request("http://anthropic.harness.internal/v1/messages"),
-      [route],
-      ENV,
-      {
-        anthropic: async (call) => {
-          seen.push({ ...call.control });
-          return new Response(call.target.toString());
+  it("reaches the sandbox the route names, by the name it was reached by", async () => {
+    const reached: string[] = [];
+    const env = {
+      SANDBOXES: {
+        getByName(name: string) {
+          reached.push(name);
+          return { name };
         }
       }
+    };
+    await sandboxEgress(new Request("http://git.harness.internal/"), all, env, [
+      GIT
+    ]);
+    expect(GIT.calls.at(-1)?.sandbox()).toEqual({ name: "caller" });
+    expect(reached).toEqual(["caller"]);
+  });
+
+  it("names a route that reaches no sandbox, rather than calling the wrong one", async () => {
+    const unnamed = egressPlan([GIT]).http;
+    await sandboxEgress(
+      new Request("http://git.harness.internal/"),
+      unnamed,
+      {},
+      [GIT]
     );
-    expect(await response.text()).toBe("https://api.anthropic.com/v1/messages");
-    expect(seen[0]?.[ROUTE_SANDBOX]).toBe("SANDBOX/caller|repo");
+    expect(() => GIT.calls.at(-1)?.sandbox()).toThrow(/names no sandbox/);
   });
 });
 
-describe("GitHub helpers", () => {
-  it("points git at the placeholder host from the environment, not a gitconfig", () => {
-    const env = githubEnv();
-    expect(env.GIT_CONFIG_KEY_0).toBe(
-      `url.http://${GITHUB_PLACEHOLDER_HOST}/.insteadOf`
-    );
-    expect(env.GIT_CONFIG_VALUE_0).toBe("https://github.com/");
-    expect(env.GH_TOKEN).toBe(GITHUB_TOKEN_PLACEHOLDER);
-  });
-
-  it("reads which repository and service a smart-HTTP path is", () => {
-    expect(gitTarget("/Dynamicagents/Plugins.git/git-receive-pack")).toEqual({
-      repo: "dynamicagents/plugins",
-      service: "receive-pack"
+describe("forward", () => {
+  it("sends the method, the body and the rewritten headers to the target, following no redirect", async () => {
+    const sent: Request[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      sent.push(new Request(input as RequestInfo, init));
+      return new Response("ok");
     });
-    expect(gitTarget("/dynamicagents/plugins/info/refs")).toEqual({
-      repo: "dynamicagents/plugins",
-      service: undefined
-    });
-    expect(gitTarget("/repos/dynamicagents/plugins/pulls")).toBeUndefined();
-  });
-
-  it("matches branch patterns by prefix only where they end in *", () => {
-    expect(branchAllowed(POLICY, "claude-coordinator/x")).toBe(true);
-    expect(branchAllowed(POLICY, "claude-coordinator")).toBe(false);
-    expect(branchAllowed({ repos: [], branches: ["main"] }, "main")).toBe(true);
-    expect(branchAllowed({ repos: [], branches: ["main"] }, "main2")).toBe(
-      false
-    );
+    const call: EgressCall = {
+      request: new Request("http://git.harness.internal/x", {
+        method: "POST",
+        headers: { authorization: "Bearer placeholder", "x-kept": "1" },
+        body: "payload"
+      }),
+      target: new URL("https://git.example.com/x"),
+      env: {},
+      sandbox: () => {
+        throw new Error("unused");
+      }
+    };
+    await forward(call, (headers) => headers.set("authorization", "real"));
+    expect(sent[0]?.url).toBe("https://git.example.com/x");
+    expect(sent[0]?.method).toBe("POST");
+    expect(sent[0]?.redirect).toBe("manual");
+    expect(sent[0]?.headers.get("authorization")).toBe("real");
+    expect(sent[0]?.headers.get("x-kept")).toBe("1");
+    expect(await sent[0]?.text()).toBe("payload");
   });
 });

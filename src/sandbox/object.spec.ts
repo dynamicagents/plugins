@@ -287,13 +287,38 @@ describe("checkouts and installs", () => {
   });
 });
 
-describe("HTTPS egress", () => {
-  it("is registered per container and its CA trusted before the marker is written", async () => {
+describe("egress", () => {
+  it("routes a rule's host to its handler, which reaches back to the sandbox the request came from", async () => {
+    const sandbox = freshHttpsSandbox("through");
+    await sandbox.answer("update-ca-certificates", "TRUSTED");
+    await sandbox.ensureRunning();
+    const answer = JSON.parse(
+      await sandbox.throughEgress("https://api.example.com/repos?page=2")
+    ) as { target: string; sandbox: string | null };
+    expect(answer.target).toBe("https://api.example.com/v1/repos?page=2");
+    expect(answer.sandbox).toBe(await sandbox.whoami());
+    expect(answer.sandbox).not.toBeNull();
+  });
+
+  it("gives the rules' environment to the CLI's container and to every command, over the command's own", async () => {
+    const sandbox = freshHttpsSandbox("env");
+    await sandbox.answer("update-ca-certificates", "TRUSTED");
+    await sandbox.exec(["true"], { env: { PROBE_TOKEN: "mine", OTHER: "1" } });
+    const fake = await sandbox.fake();
+    expect(fake.startEnv.PROBE_TOKEN).toBe("placeholder");
+    const command = fake.execs.at(-1) ?? [];
+    expect(command).toContain("PROBE_TOKEN=placeholder");
+    expect(command).not.toContain("PROBE_TOKEN=mine");
+    expect(command).toContain("OTHER=1");
+  });
+
+  it("registers HTTPS hosts per container, with the CA trusted before the marker is written", async () => {
     const sandbox = freshHttpsSandbox("https");
     await sandbox.answer("update-ca-certificates", "TRUSTED");
     const { runtimeId } = await sandbox.ensureRunning();
     const fake = await sandbox.fake();
-    expect(fake.httpsHosts).toEqual(["api.github.com"]);
+    expect(fake.httpsHosts).toEqual(["api.example.com"]);
+    expect(fake.httpHosts).toEqual([]);
     const execs = joined(fake.execs);
     const trust = execs.findIndex((cmd) =>
       cmd.includes("update-ca-certificates")

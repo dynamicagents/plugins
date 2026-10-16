@@ -11,10 +11,10 @@ import {
 } from "../src/workspace/index.js";
 import {
   SandboxObjectBase,
-  githubRoute,
   readRunHeader,
   sandboxEgress,
   type RunHeader,
+  type SandboxEgressRule,
   type SandboxObjectConfig
 } from "../src/sandbox/index.js";
 import { withControlSession } from "../src/sandbox/daemon/composite.js";
@@ -114,20 +114,38 @@ export class TestSandboxDO extends SandboxObjectBase {
       instance: "lite",
       egress: {
         // This package declares no ambient `Env`, so `ctx.exports` is untyped here.
-        binding: (
+        entrypoint: (
           this.ctx.exports as unknown as {
-            TestSandboxEgress: SandboxObjectConfig["egress"]["binding"];
+            TestSandboxEgress: SandboxObjectConfig["egress"]["entrypoint"];
           }
         ).TestSandboxEgress,
-        routes: [],
-        https: this.https()
+        self: this.self(),
+        rules: this.rules()
       },
       installPlan: { ...DEFAULT_INSTALL_PLAN, overrides: {} }
     };
   }
 
-  protected https(): EgressRoute[] {
+  protected self(): string {
+    return "TEST_SANDBOX";
+  }
+
+  protected rules(): SandboxEgressRule[] {
     return [];
+  }
+
+  /** The name this sandbox was reached by, for a rule's handler that calls back into it. */
+  whoami(): string | null {
+    return this.ctx.id.name ?? null;
+  }
+
+  /** A request from the container to `url`, through the intercept registered for its host. */
+  async throughEgress(url: string): Promise<string> {
+    const fake = fakeOf(this.ctx.id);
+    const host = new URL(url).hostname;
+    const binding = fake.intercepts.get(host) ?? fake.httpsIntercepts.get(host);
+    if (!binding) throw new Error(`nothing intercepts ${host}`);
+    return (await binding.fetch(url)).text();
   }
 
   /** What the fake saw, for a spec to assert on. */
@@ -140,7 +158,9 @@ export class TestSandboxDO extends SandboxObjectBase {
       snapshots: fake.snapshots,
       execs: fake.execs.map((call) => call.cmd),
       execEnvs: fake.execs.map((call) => call.env ?? null),
+      httpHosts: [...fake.intercepts.keys()],
       httpsHosts: [...fake.httpsIntercepts.keys()],
+      startEnv: { ...fake.lastEnv },
       inactivityTimeoutMs: fake.inactivityTimeoutMs
     };
   }
@@ -181,16 +201,37 @@ export class TestSandboxDO extends SandboxObjectBase {
   }
 }
 
-/** The same, with GitHub's API intercepted over HTTPS. */
+/**
+ * A rule as a plugin declares one: a host over HTTPS, a placeholder for its
+ * processes, and a handler that answers with where the request was aimed and
+ * which sandbox it came from — reached back through `call.sandbox()`.
+ */
+const PROBE_RULE: SandboxEgressRule = {
+  name: "probe",
+  https: { "api.example.com": "https://api.example.com/v1" },
+  env: { PROBE_TOKEN: "placeholder" },
+  async handle(call) {
+    const sandbox = call.sandbox() as unknown as {
+      whoami(): Promise<string | null>;
+    };
+    return Response.json({
+      target: call.target.toString(),
+      sandbox: await sandbox.whoami()
+    });
+  }
+};
+
+/** The rules the test entrypoint serves: every rule a test sandbox may carry. */
+const TEST_RULES: readonly SandboxEgressRule[] = [PROBE_RULE];
+
+/** The same, carrying {@link PROBE_RULE}. */
 export class TestSandboxHttpsDO extends TestSandboxDO {
-  protected override https(): EgressRoute[] {
-    return [
-      githubRoute({
-        host: "api.github.com",
-        upstream: "https://api.github.com",
-        tokenBinding: "GITHUB_TOKEN"
-      })
-    ];
+  protected override self(): string {
+    return "TEST_SANDBOX_HTTPS";
+  }
+
+  protected override rules(): SandboxEgressRule[] {
+    return [PROBE_RULE];
   }
 }
 
@@ -203,7 +244,8 @@ export class TestSandboxEgress extends WorkerEntrypoint<
     return sandboxEgress(
       request,
       this.ctx.props.routes,
-      this.env as Record<string, unknown>
+      this.env as Record<string, unknown>,
+      TEST_RULES
     );
   }
 }

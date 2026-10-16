@@ -17,27 +17,26 @@ and the object reattaches and replays what it missed. A container that dies sett
 The harness is imported, not forked. What it lacks is closed from outside it, and each gap below is
 one a spec here pins (`object.spec.ts`), over the real harness and the real daemon core:
 
-| the harness…                                                                 | so the sandbox…                                                                                                                                                                                                                                                                                     |
-| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| re-arms the container's inactivity timeout only in its lifecycle's `onStart` | starts the lifecycle in the constructor, so no RPC reaches the container without it. A wake that skipped it was measured stopping the container within seconds.                                                                                                                                     |
-| starts a container only for a prompt                                         | keeps the root session as a **control session** that the daemon answers without a CLI. `ensureRunning()` is a `control:wake` prompt on it.                                                                                                                                                          |
-| takes adapter options once per harness, and runs every turn in one directory | puts a **run header** on the prompt's first line (`header.ts`) with each run's mode, schema, effort, fork and `cwd`. The daemon takes it off before the CLI reads its stdin.                                                                                                                        |
-| refuses a session id it did not mint                                         | maps each run to the session it made (`createRun`)                                                                                                                                                                                                                                                  |
-| intercepts egress over HTTP only                                             | intercepts `egress.https` routes itself once per container, trusts the CA the runtime mounts after that call, and only then writes [`EGRESS_READY`](./constants.ts) with the container's runtime id. A CLI turn waits for that marker, and the alarm checks for new containers while a run is open. |
-| snapshots a container only when it stops it                                  | `checkpoint()` snapshots now and writes the harness's own record, so that is the next start. `seedFrom()` starts another sandbox of the class from it.                                                                                                                                              |
-| stops with no hook                                                           | the sandbox's own idle stop **backs up every checkout to R2** (`DirectoryBackup`), then stops. A start on a new image, which drops the snapshot, restores each checkout from its backup.                                                                                                            |
-| settles an abort before the CLI has left                                     | `stopRun()` waits for no CLI to be left, plus one sync, before anything commits or stops                                                                                                                                                                                                            |
+| the harness…                                                                 | so the sandbox…                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| re-arms the container's inactivity timeout only in its lifecycle's `onStart` | starts the lifecycle in the constructor, so no RPC reaches the container without it. A wake that skipped it was measured stopping the container within seconds.                                                                                                                                        |
+| starts a container only for a prompt                                         | keeps the root session as a **control session** that the daemon answers without a CLI. `ensureRunning()` is a `control:wake` prompt on it.                                                                                                                                                             |
+| takes adapter options once per harness, and runs every turn in one directory | puts a **run header** on the prompt's first line (`header.ts`) with each run's mode, schema, effort, fork and `cwd`. The daemon takes it off before the CLI reads its stdin.                                                                                                                           |
+| refuses a session id it did not mint                                         | maps each run to the session it made (`createRun`)                                                                                                                                                                                                                                                     |
+| intercepts egress over HTTP only                                             | intercepts its rules' `https` hosts itself once per container, trusts the CA the runtime mounts after that call, and only then writes [`EGRESS_READY`](./constants.ts) with the container's runtime id. A CLI turn waits for that marker, and the alarm checks for new containers while a run is open. |
+| snapshots a container only when it stops it                                  | `checkpoint()` snapshots now and writes the harness's own record, so that is the next start. `seedFrom()` starts another sandbox of the class from it.                                                                                                                                                 |
+| stops with no hook                                                           | the sandbox's own idle stop **backs up every checkout to R2** (`DirectoryBackup`), then stops. A start on a new image, which drops the snapshot, restores each checkout from its backup.                                                                                                               |
+| settles an abort before the CLI has left                                     | `stopRun()` waits for no CLI to be left, plus one sync, before anything commits or stops                                                                                                                                                                                                               |
 
 ## The object
 
 ```ts
 import {
   DEFAULT_INSTALL_PLAN,
-  githubRoute,
-  GITHUB_PLACEHOLDER_HOST,
   SandboxObjectBase,
   type SandboxObjectConfig
 } from "@dynamicagents/plugins/sandbox";
+import { CODING_EGRESS } from "./egress";
 
 export class CodingSandbox extends SandboxObjectBase<Env> {
   protected sandboxConfig(): SandboxObjectConfig {
@@ -46,15 +45,9 @@ export class CodingSandbox extends SandboxObjectBase<Env> {
       adapter: "da-claude", // the adapter id the image's daemon serves
       instance: { vcpu: 2, memoryMib: 6144, diskMb: 8000 },
       egress: {
-        binding: this.ctx.exports.CodingEgress,
-        routes: [
-          githubRoute({
-            host: GITHUB_PLACEHOLDER_HOST,
-            upstream: "https://github.com",
-            tokenBinding: "GITHUB_TOKEN",
-            push: { repos: ["owner/repo"], branches: ["coding/*"] }
-          })
-        ]
+        entrypoint: this.ctx.exports.CodingEgress,
+        self: "CODING_SANDBOX",
+        rules: CODING_EGRESS
       },
       installPlan: { ...DEFAULT_INSTALL_PLAN, overrides: {} },
       backups: {
@@ -81,28 +74,40 @@ The RPCs:
 
 ## Egress
 
-Each route's `host` is intercepted in the container and handed to one entrypoint the consumer
-exports. That entrypoint serves it with `sandboxEgress`, plus a handler per route kind it adds.
-GitHub is built in. The Anthropic credential pool is `/claude-code`'s, so it arrives as a handler
-rather than an import:
+The container holds placeholders only. Each host it may reach is declared by the plugin that needs
+it, as a `SandboxEgressRule`:
+
+- `http`: placeholder hosts, intercepted over plain HTTP, so nothing in the container terminates TLS;
+- `https`: real hosts, for a client that cannot be pointed elsewhere, with the runtime's CA trusted;
+- `env`: the placeholders and base URLs its processes need, given to every `exec` and CLI turn;
+- `handle`: on the Worker side, swaps the placeholder for the real credential and forwards.
+
+`/sandbox` names no host. A consumer lists a class's rules once, and both the class's config and
+its egress entrypoint read that list:
 
 ```ts
+// egress.ts — each rule from the plugin that needs its hosts.
+export const CODING_EGRESS: readonly SandboxEgressRule[] = [/* … */];
+
 export class CodingEgress extends WorkerEntrypoint<
   Env,
   { routes: EgressRoute[] }
 > {
   fetch(request: Request) {
-    return sandboxEgress(request, this.ctx.props.routes, this.env);
+    return sandboxEgress(
+      request,
+      this.ctx.props.routes,
+      this.env,
+      CODING_EGRESS
+    );
   }
 }
 ```
 
-**GitHub** requests go out anonymous unless they present `GITHUB_TOKEN_PLACEHOLDER`, which commands
-get from `githubEnv()`. The egress swaps the placeholder for the token it reads from `env` at that
-moment. git reaches GitHub through `GITHUB_PLACEHOLDER_HOST` over plain HTTP, so nothing in the
-container terminates TLS. With a `push` policy, a credentialed `git-receive-pack` may update only the
-allowed branches of the allowed repositories, and the refs are read from the request before GitHub
-sees it.
+A host two rules declare, or an `env` key two rules set, fails the sandbox's construction. An
+intercepted request runs in the entrypoint, a stateless Worker invocation, so the sandbox object is
+not on its path. A handler that keeps state in the sandbox — a credential pool — reaches it with
+`call.sandbox()`, by the name it was reached by and the binding `egress.self` names.
 
 ## The image
 

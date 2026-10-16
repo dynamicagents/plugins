@@ -5,8 +5,7 @@ import {
   type ContainerEgressBinding,
   type ContainerInstance,
   type ContainerMessage,
-  type ContainerOperationResult,
-  type EgressRoute
+  type ContainerOperationResult
 } from "agents/harness/container";
 import {
   installScheduler,
@@ -21,6 +20,11 @@ import {
 } from "@cloudflare/sandbox";
 import { asAgent, AGENT_GID, AGENT_UID, shellQuote } from "./agent-exec.js";
 import { deriveAdvisories, type WorkspaceAdvisory } from "./advisory.js";
+import {
+  egressPlan,
+  type EgressPlan,
+  type SandboxEgressRule
+} from "./egress.js";
 import { humanMs } from "./format.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
 import {
@@ -90,15 +94,15 @@ export interface SandboxObjectConfig {
   /** The image to start: a key of `ctx.container.images`. Default `app`. */
   image?: string;
   instance: ContainerInstance;
-  /** Non-secret environment for the daemon and the CLI. */
+  /** Non-secret environment for the daemon and the CLI. No key a rule's `env` sets. */
   env?: Readonly<Record<string, string>>;
   egress: {
-    /** `ctx.exports.<Entrypoint>`: the consumer's entrypoint calling `sandboxEgress`. */
-    binding: ContainerEgressBinding;
-    /** Intercepted over HTTP by the harness at every start. */
-    routes: readonly EgressRoute[];
-    /** Intercepted over HTTPS by this object, once per container, with the CA trusted. */
-    https?: readonly EgressRoute[];
+    /** `ctx.exports.<Entrypoint>`: the consumer's entrypoint, calling `sandboxEgress` with {@link rules}. */
+    entrypoint: ContainerEgressBinding;
+    /** The `env` binding this class is reached by, so a rule's handler can reach the sandbox a request came from. */
+    self: string;
+    /** What the container may reach, each declared by the plugin that needs it (`./egress.ts`). */
+    rules: readonly SandboxEgressRule[];
   };
   installPlan: InstallPlan;
   /** Where checkouts are backed up before every stop. Without it an image change loses unpushed work. */
@@ -166,6 +170,7 @@ export abstract class SandboxObjectBase<
   }
 
   readonly #cfg: SandboxObjectConfig;
+  readonly #egress: EgressPlan;
   readonly #container: Container;
   readonly #harness: ContainerHarness;
   readonly #wake: ScheduledHost<WakeHandlers, Env>;
@@ -183,16 +188,30 @@ export abstract class SandboxObjectBase<
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#cfg = this.sandboxConfig();
+    this.#egress = egressPlan(
+      this.#cfg.egress.rules,
+      ctx.id.name === undefined
+        ? undefined
+        : `${this.#cfg.egress.self}/${ctx.id.name}`
+    );
+    const clash = Object.keys(this.#cfg.env ?? {}).filter((key) =>
+      Object.hasOwn(this.#egress.env, key)
+    );
+    if (clash.length > 0)
+      throw new Error(
+        `[${this.#cfg.label}] env sets ${clash.join(", ")}, which an egress rule sets`
+      );
     this.#container = this.containerFor(ctx);
     this.#harness = new ContainerHarness({
       container: this.#container,
       agent: containerAgent({
         image: this.#image(),
         adapter: this.#cfg.adapter,
-        env: { ...this.#cfg.env },
-        egress: this.#cfg.egress.routes
+        // The daemon's environment, which each CLI turn inherits.
+        env: { ...this.#cfg.env, ...this.#egress.env },
+        egress: [...this.#egress.http]
       }),
-      egress: this.#cfg.egress.binding,
+      egress: this.#cfg.egress.entrypoint,
       instance: this.#cfg.instance,
       idleTimeoutMs: HARNESS_IDLE_MS,
       onContainerLost: "fail"
@@ -315,9 +334,11 @@ export abstract class SandboxObjectBase<
       "-c",
       `mkdir -p ${RUN_DIR} && chown ${AGENT_UID}:${AGENT_GID} ${RUN_DIR}`
     ]);
-    const https = this.#cfg.egress.https ?? [];
+    const https = this.#egress.https;
     if (https.length > 0) {
-      const fetcher = this.#cfg.egress.binding({ props: { routes: https } });
+      const fetcher = this.#cfg.egress.entrypoint({
+        props: { routes: [...https] }
+      });
       for (const route of https)
         await container.interceptOutboundHttps(route.host, fetcher);
       const trust = await this.#rootExec(["sh", "-c", TRUST_CA_COMMAND]);
@@ -357,7 +378,7 @@ export abstract class SandboxObjectBase<
     await this.#egressWatch.set(new Date(Date.now() + EGRESS_WATCH_MS));
   }
 
-  /** A command as the agent, with no capabilities. */
+  /** A command as the agent, with no capabilities, and every egress rule's `env` over its own. */
   async exec(
     argv: readonly string[],
     options: {
@@ -367,7 +388,7 @@ export abstract class SandboxObjectBase<
     } = {}
   ): Promise<ExecResult> {
     await this.ensureRunning();
-    return this.#run(asAgent(argv, options.env), {
+    return this.#run(asAgent(argv, { ...options.env, ...this.#egress.env }), {
       ...(options.cwd ? { cwd: options.cwd } : {}),
       ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {})
     });

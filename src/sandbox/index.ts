@@ -37,22 +37,14 @@ export {
   asAgent
 } from "./agent-exec.js";
 export {
+  CREDENTIAL_HEADERS,
+  egressPlan,
   forward,
-  githubRoute,
-  ROUTE_KIND,
-  ROUTE_PUSH,
-  ROUTE_SANDBOX,
-  ROUTE_TOKEN,
   sandboxEgress,
   type EgressCall,
-  type EgressHandler
+  type EgressPlan,
+  type SandboxEgressRule
 } from "./egress.js";
-export {
-  GITHUB_PLACEHOLDER_HOST,
-  GITHUB_TOKEN_PLACEHOLDER,
-  githubEnv,
-  type GitPushPolicy
-} from "./github.js";
 export {
   deriveAdvisories,
   renderAdvisory,

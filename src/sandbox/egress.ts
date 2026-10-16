@@ -1,104 +1,173 @@
 import type { EgressRoute } from "agents/harness/container";
-import {
-  branchAllowed,
-  githubAuthorization,
-  githubError,
-  gitTarget,
-  presentsPlaceholder,
-  receivePackRefs,
-  type GitPushPolicy
-} from "./github.js";
 
 /**
  * The container's way out, on the Worker side.
  *
- * The harness intercepts each route's `host` in the container and hands the
- * request to one entrypoint, which a consumer defines and exports so it exists
- * on `ctx.exports`. That entrypoint calls {@link sandboxEgress} with its props'
- * routes, the Worker's `env`, and a handler per kind of route it serves — the
- * Anthropic credential pool lives in `/claude-code`, so it arrives here as a
- * handler rather than an import.
+ * A plugin that needs a host from inside the container declares it as a
+ * {@link SandboxEgressRule}: the hosts to intercept, the placeholders its
+ * processes see, and the handler that swaps a placeholder for the real
+ * credential. A consumer lists the rules a sandbox class carries once, and
+ * hands that list both to the class's config and to the entrypoint that calls
+ * {@link sandboxEgress}. This module names no host and holds no credential.
  *
- * A route is the harness's own `EgressRoute`, and its `upstream` stays a real
- * https URL, which the harness requires. What only this module reads travels
- * in `x-da-*` headers on the route, which are removed before anything is
- * forwarded: {@link ROUTE_KIND}, {@link ROUTE_TOKEN}, {@link ROUTE_PUSH},
- * {@link ROUTE_SANDBOX}.
+ * An intercepted request reaches the entrypoint, a stateless Worker invocation
+ * outside the container. The sandbox object is on the path only when a handler
+ * calls it ({@link EgressCall.sandbox}).
  */
 
-/** Which handler serves the route. Absent: forwarded with the route's own headers. */
-export const ROUTE_KIND = "x-da-kind";
-/** The `env` binding holding the credential, read at the moment it is used, never carried. */
-export const ROUTE_TOKEN = "x-da-token-binding";
-/** A {@link GitPushPolicy}, as JSON. */
-export const ROUTE_PUSH = "x-da-push";
-/** `<binding>/<name>` of the sandbox the route belongs to, for a handler that keeps state there. */
-export const ROUTE_SANDBOX = "x-da-sandbox";
+export interface SandboxEgressRule {
+  /** Names the rule where a clash or a refusal is reported. */
+  readonly name: string;
+  /**
+   * Hosts intercepted over plain HTTP, each to its real `https:` upstream: a
+   * placeholder host the container is pointed at, so nothing in it terminates
+   * TLS.
+   */
+  readonly http?: Readonly<Record<string, string>>;
+  /**
+   * Real hosts intercepted over HTTPS, each to its `https:` upstream, for a
+   * client that cannot be pointed at a placeholder. The sandbox trusts the
+   * runtime's interception CA in every container that has one.
+   */
+  readonly https?: Readonly<Record<string, string>>;
+  /**
+   * What a process needs to reach those hosts — a placeholder credential, a
+   * base URL. Every command `exec` runs and every CLI turn gets it, over its
+   * own environment. Never a secret: the container can read it.
+   */
+  readonly env?: Readonly<Record<string, string>>;
+  /** Serve one intercepted request: swap the placeholder for the real credential, then {@link forward}. */
+  handle(call: EgressCall): Promise<Response>;
+}
 
-const CONTROL = [ROUTE_KIND, ROUTE_TOKEN, ROUTE_PUSH, ROUTE_SANDBOX];
+/** One request the container made, for the rule serving its host. */
+export interface EgressCall {
+  readonly request: Request;
+  /** The rule's upstream for the request's host, with the request's path and query. */
+  readonly target: URL;
+  /** The Worker's `env`, where a credential is read at the moment it is used. */
+  readonly env: Readonly<Record<string, unknown>>;
+  /**
+   * The sandbox whose container made the request, by the name it was reached
+   * by — waking it if it is not in memory. Throws for a sandbox reached without
+   * a name.
+   */
+  sandbox(): DurableObjectStub;
+}
 
-/** Headers that carry a credential, removed from whatever the container sent. */
-const CREDENTIAL_HEADERS = [
+/** What one sandbox registers for its rules. */
+export interface EgressPlan {
+  /** Intercepted over HTTP by the harness, at every start. */
+  readonly http: readonly EgressRoute[];
+  /** Intercepted over HTTPS by the sandbox, once per container. */
+  readonly https: readonly EgressRoute[];
+  /** Every rule's `env`, merged. */
+  readonly env: Readonly<Record<string, string>>;
+}
+
+/**
+ * On each route, `<binding>/<name>` of the sandbox it was registered by. A
+ * route is the only thing the harness hands the entrypoint, so it is the only
+ * way the entrypoint can know which sandbox's container is calling.
+ */
+const ROUTE_SANDBOX = "x-da-sandbox";
+
+/** Headers that carry a credential, which a handler removes from what the container sent. */
+export const CREDENTIAL_HEADERS: readonly string[] = [
   "authorization",
   "x-api-key",
   "proxy-authorization"
 ];
 
-/** A route's request, already re-aimed at its upstream, for a handler to finish. */
-export interface EgressCall {
-  readonly request: Request;
-  /** The upstream URL: the route's upstream with the request's path and query. */
-  readonly target: URL;
-  readonly route: EgressRoute;
-  /** The route's `x-da-*` values. */
-  readonly control: Readonly<Record<string, string>>;
-  readonly env: Readonly<Record<string, unknown>>;
+/**
+ * `rules` as the sandbox `sandbox` (`<binding>/<name>`) registers them.
+ *
+ * Throws for a host two rules declare, an environment key two rules set, or an
+ * upstream that is not https: each would otherwise surface as a request that
+ * reaches the wrong handler, or none.
+ */
+export function egressPlan(
+  rules: readonly SandboxEgressRule[],
+  sandbox?: string
+): EgressPlan {
+  const hosts = new Map<string, string>();
+  const keys = new Map<string, string>();
+  const http: EgressRoute[] = [];
+  const https: EgressRoute[] = [];
+  const env: Record<string, string> = {};
+  const route = (
+    rule: SandboxEgressRule,
+    host: string,
+    upstream: string
+  ): EgressRoute => {
+    const owner = hosts.get(host);
+    if (owner !== undefined)
+      throw new Error(
+        `egress: ${host} is declared by both ${owner} and ${rule.name}`
+      );
+    hosts.set(host, rule.name);
+    if (!upstream.startsWith("https://"))
+      throw new Error(
+        `egress: ${rule.name} sends ${host} to ${upstream}, which is not https`
+      );
+    return {
+      host,
+      upstream,
+      headers: sandbox === undefined ? {} : { [ROUTE_SANDBOX]: sandbox },
+      strip: []
+    };
+  };
+  for (const rule of rules) {
+    for (const [host, upstream] of Object.entries(rule.http ?? {}))
+      http.push(route(rule, host, upstream));
+    for (const [host, upstream] of Object.entries(rule.https ?? {}))
+      https.push(route(rule, host, upstream));
+    for (const [key, value] of Object.entries(rule.env ?? {})) {
+      const owner = keys.get(key);
+      if (owner !== undefined)
+        throw new Error(
+          `egress: ${key} is set by both ${owner} and ${rule.name}`
+        );
+      keys.set(key, rule.name);
+      env[key] = value;
+    }
+  }
+  return { http, https, env };
 }
 
-export type EgressHandler = (call: EgressCall) => Promise<Response>;
-
-/** Serve one request the container made. */
+/**
+ * Serve one request the container made: `routes` are what the sandbox
+ * registered for this container, which the harness hands the entrypoint as its
+ * props, and `rules` the same list the sandbox's config holds.
+ */
 export async function sandboxEgress(
   request: Request,
   routes: readonly EgressRoute[],
   env: Readonly<Record<string, unknown>>,
-  handlers: Readonly<Record<string, EgressHandler>> = {}
+  rules: readonly SandboxEgressRule[]
 ): Promise<Response> {
   const url = new URL(request.url);
   const route = routes.find((each) => each.host === url.hostname);
   if (!route) {
     return new Response(`No egress route for ${url.hostname}`, { status: 403 });
   }
-  const target = new URL(
-    `${route.upstream.replace(/\/+$/, "")}${url.pathname}${url.search}`
-  );
-  const control: Record<string, string> = {};
-  const forwarded: Record<string, string> = {};
-  for (const [name, value] of Object.entries(route.headers)) {
-    if (CONTROL.includes(name.toLowerCase()))
-      control[name.toLowerCase()] = value;
-    else forwarded[name] = value;
+  for (const rule of rules) {
+    const upstream =
+      upstreamOf(rule.http, url.hostname) ??
+      upstreamOf(rule.https, url.hostname);
+    if (upstream === undefined) continue;
+    const named = route.headers[ROUTE_SANDBOX];
+    return rule.handle({
+      request,
+      target: new URL(
+        `${upstream.replace(/\/+$/, "")}${url.pathname}${url.search}`
+      ),
+      env,
+      sandbox: () => sandboxStub(env, named)
+    });
   }
-  const call: EgressCall = {
-    request,
-    target,
-    route: { ...route, headers: forwarded },
-    control,
-    env
-  };
-  const kind = control[ROUTE_KIND];
-  if (kind === "github") return githubEgress(call);
-  if (kind !== undefined) {
-    const handler = handlers[kind];
-    if (!handler) {
-      return new Response(`No egress handler for ${kind}`, { status: 500 });
-    }
-    return handler(call);
-  }
-  return forward(call, (headers) => {
-    for (const name of route.strip) headers.delete(name);
-    for (const [name, value] of Object.entries(forwarded))
-      headers.set(name, value);
+  return new Response(`No egress rule serves ${url.hostname}`, {
+    status: 403
   });
 }
 
@@ -121,96 +190,31 @@ export async function forward(
   });
 }
 
-/**
- * GitHub: anonymous unless the placeholder is presented; then the real token,
- * and for git, the push policy.
- */
-async function githubEgress(call: EgressCall): Promise<Response> {
-  const presented = presentsPlaceholder(
-    call.request.headers.get("authorization")
-  );
-  const strip = (headers: Headers) => {
-    for (const name of CREDENTIAL_HEADERS) headers.delete(name);
-  };
-  if (!presented) return forward(call, strip);
+function upstreamOf(
+  hosts: Readonly<Record<string, string>> | undefined,
+  host: string
+): string | undefined {
+  return hosts && Object.hasOwn(hosts, host) ? hosts[host] : undefined;
+}
 
-  const binding = call.control[ROUTE_TOKEN];
-  const token = binding ? call.env[binding] : undefined;
-  if (typeof token !== "string" || token === "") {
-    return githubError(
-      "no GitHub token is configured for this deployment, so nothing can be done as its account",
-      401
+function sandboxStub(
+  env: Readonly<Record<string, unknown>>,
+  named: string | undefined
+): DurableObjectStub {
+  const slash = named?.indexOf("/") ?? -1;
+  const namespace =
+    named !== undefined && slash > 0 ? env[named.slice(0, slash)] : undefined;
+  if (
+    named === undefined ||
+    !namespace ||
+    typeof (namespace as DurableObjectNamespace).getByName !== "function"
+  ) {
+    throw new Error(
+      `egress: this route names no sandbox the Worker can reach (${JSON.stringify(named ?? null)}); ` +
+        "a sandbox is reached by name, and its config's `egress.self` is its binding"
     );
   }
-
-  const policy = readPolicy(call.control[ROUTE_PUSH]);
-  const git = gitTarget(call.target.pathname);
-  let body: ReadableStream | undefined;
-  if (policy && git) {
-    if (!policy.repos.some((repo) => repo.toLowerCase() === git.repo)) {
-      return githubError(
-        `this sandbox may not use ${git.repo} as the deployment's account`,
-        403
-      );
-    }
-    if (git.service === "receive-pack" && call.request.method === "POST") {
-      const [inspected, forwarded] = (
-        call.request.body ?? new Blob().stream()
-      ).tee();
-      const refs = await receivePackRefs(
-        inspected,
-        call.request.headers.get("content-encoding")
-      ).catch(() => undefined);
-      if (!refs || refs.length === 0) {
-        void forwarded.cancel().catch(() => undefined);
-        return githubError("this push names no ref this egress can read", 400);
-      }
-      const refused = refs.filter(
-        (ref) =>
-          !ref.startsWith("refs/heads/") ||
-          !branchAllowed(policy, ref.slice("refs/heads/".length))
-      );
-      if (refused.length > 0) {
-        void forwarded.cancel().catch(() => undefined);
-        return githubError(
-          `this sandbox may not push ${refused.join(", ")}; it may push ${policy.branches.join(", ")}`,
-          403
-        );
-      }
-      body = forwarded;
-    }
-  }
-  return forward(
-    call,
-    (headers) => {
-      strip(headers);
-      headers.set("authorization", githubAuthorization(presented, token));
-    },
-    body
+  return (namespace as DurableObjectNamespace).getByName(
+    named.slice(slash + 1)
   );
-}
-
-function readPolicy(value: string | undefined): GitPushPolicy | undefined {
-  if (value === undefined) return undefined;
-  const parsed = JSON.parse(value) as GitPushPolicy;
-  return { repos: [...parsed.repos], branches: [...parsed.branches] };
-}
-
-/** A GitHub route for `host`: git's placeholder host, or `api.github.com` intercepted over HTTPS. */
-export function githubRoute(options: {
-  host: string;
-  upstream: "https://github.com" | "https://api.github.com";
-  tokenBinding: string;
-  push?: GitPushPolicy;
-}): EgressRoute {
-  return {
-    host: options.host,
-    upstream: options.upstream,
-    headers: {
-      [ROUTE_KIND]: "github",
-      [ROUTE_TOKEN]: options.tokenBinding,
-      ...(options.push ? { [ROUTE_PUSH]: JSON.stringify(options.push) } : {})
-    },
-    strip: CREDENTIAL_HEADERS
-  };
 }
