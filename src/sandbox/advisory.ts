@@ -1,0 +1,346 @@
+import type { InstallState } from "./install-plan.js";
+import { humanMs } from "./format.js";
+
+/**
+ * What a caller must not assume about a workspace, and how to say it.
+ *
+ * The same module as `../workspace/advisory.ts` without its storage ceiling,
+ * which a checkout on the container's own disk does not have; the workspace
+ * copy goes with that subpath.
+ *
+ * ## Why this is not `InstallState`
+ *
+ * `InstallState` is the durable record of **a job the host ran** — core's
+ * `JobState`, which owns arming, the single-flight guard, the staleness bound
+ * and the generation marker. It is right for that and unchanged by this file.
+ *
+ * Every *reader*, though, is asking a different question: **can I rely on this
+ * workspace right now?** The two diverge, and expressing the second through the
+ * first goes wrong in ways that are each easy to reintroduce:
+ *
+ * - "The tree is fine now", after an agent installed by hand, has no honest
+ *   spelling as a job record: fabricating a `done` rests on the presence of a
+ *   `node_modules` directory, which the wreckage of the very install being
+ *   overridden already satisfies.
+ *
+ * So an advisory is **derived at read time** and describes the workspace, not a
+ * job. Its absence is the good case, which is what removes the need to invent
+ * anything: nothing to say means an empty array.
+ *
+ * ## One home for what each kind means
+ *
+ * {@link shapeOf} is the only exhaustive `switch` over {@link WorkspaceAdvisory}
+ * that decides *policy*, and {@link renderAdvisory} the only one that decides
+ * *wording*. Everything else reads {@link AdvisoryShape}. A new kind is a
+ * compile error in exactly those two places, and whoever adds it has to say what
+ * it means and what to do about it — which is the drift that put the same blind
+ * spot in two independent readers, closed by the compiler rather than by
+ * discipline.
+ */
+
+/** Something a caller must not assume away. An empty array is the good case. */
+export type WorkspaceAdvisory =
+  | {
+      kind: "deps-building";
+      command: string;
+      startedAt: number;
+      tail?: string;
+    }
+  | {
+      kind: "deps-broken";
+      command: string;
+      error: string;
+      exitCode?: number;
+      tail?: string;
+      /**
+       * Whether a `node_modules` directory is nevertheless sitting there.
+       *
+       * Reported rather than acted on, because its presence proves nothing in
+       * either direction. A half-finished `npm ci` leaves the directory behind
+       * with an incomplete tree, so treating existence as success hides the
+       * common failure outright; and an agent that re-ran the install by hand
+       * leaves a record the host cannot update, since the host cannot see an
+       * install it did not start. Both look identical from here, so the reader
+       * is told which way the ambiguity runs rather than being handed a guess.
+       */
+      treePresent: boolean;
+    }
+  | { kind: "deps-absent"; reason: string };
+
+/**
+ * The three axes every reader decides on, so none of them re-derives severity
+ * from a prose string.
+ *
+ * They are separate because they vary independently. Every kind a sandbox can
+ * report today is `universal: false, writesPersist: true` — its checkout is the
+ * container's own disk, with no ceiling of its own — and the axes stay because
+ * the readers decide on them rather than on a kind.
+ */
+export interface AdvisoryShape {
+  /**
+   * Clears with nobody acting, so waiting is useful — and **only** this may
+   * block a command.
+   *
+   * The rule is load-bearing. Blocking on something permanent deadlocks: nothing
+   * clears a failed install record except another checkout, so one failure would
+   * disable the shell for the rest of the session — `echo hello` included —
+   * while the message told the model to re-run the install with the tool that is
+   * refusing to run.
+   */
+  transient: boolean;
+  /**
+   * Reaches commands that never read `node_modules`.
+   *
+   * A dependency problem does not; `cat README.md` is unaffected and must not
+   * queue behind an install.
+   */
+  universal: boolean;
+  /** Whether a write made under this survives. `false` is the loudest thing here. */
+  writesPersist: boolean;
+}
+
+/** What each advisory *means*. The one exhaustive home for policy. */
+export function shapeOf(advisory: WorkspaceAdvisory): AdvisoryShape {
+  switch (advisory.kind) {
+    case "deps-building":
+      return { transient: true, universal: false, writesPersist: true };
+    case "deps-broken":
+      return { transient: false, universal: false, writesPersist: true };
+    case "deps-absent":
+      return { transient: false, universal: false, writesPersist: true };
+    default: {
+      // A new kind lands here as a type error, which is the point: it cannot be
+      // added without someone stating whether it is transient, whether it
+      // reaches every command, and whether writes survive it.
+      const unhandled: never = advisory;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * Who is being told, which decides the **verbs** rather than the facts.
+ *
+ * Not a styling knob. The two readers can do different things, and wording that
+ * names an action the reader does not have is worse than silence:
+ *
+ * - `tool-call` — one shell command, which either ran or did not. It can be told
+ *   "nothing was run, call again in a moment".
+ * - `session` — a whole `claude -p` run that has not started. There is no
+ *   command that failed to run and nothing to call again; it can install
+ *   dependencies itself, and it can stop and report.
+ */
+export type AdvisoryAudience = "tool-call" | "session";
+
+/** A failed install's own last words, fenced so a model reads them as output. */
+function quoted(tail: string | undefined): string {
+  const trimmed = tail?.trim();
+  return trimmed ? `\n\n\`\`\`\n${trimmed}\n\`\`\`` : "";
+}
+
+/**
+ * One advisory, in words, for one audience. The only place this wording exists.
+ *
+ * Hosts render nothing themselves. A deployment writing its own copy would be
+ * re-deriving severity from `reason` and `error` strings, which is the mistake
+ * this file exists to remove — one repository further out, where it is harder to
+ * see.
+ */
+export function renderAdvisory(
+  advisory: WorkspaceAdvisory,
+  to: AdvisoryAudience
+): string {
+  switch (advisory.kind) {
+    case "deps-building": {
+      const elapsed = humanMs(Date.now() - advisory.startedAt);
+      const fact =
+        `The host is still installing this checkout's dependencies ` +
+        `(\`${advisory.command}\`, ${elapsed} so far).${quoted(advisory.tail)}`;
+      return to === "tool-call"
+        ? `${fact}\n\nAnything importing from \`node_modules\` will fail until ` +
+            "it finishes."
+        : `${fact}\n\nAnything importing from \`node_modules\` may fail until ` +
+            "it finishes. Wait and retry rather than starting a second install " +
+            "on top of the one already running.";
+    }
+
+    case "deps-broken": {
+      const code =
+        advisory.exitCode === undefined ? "" : ` (exit ${advisory.exitCode})`;
+      // Said once, for both audiences: the tree being there is not evidence the
+      // install worked, and a reader that assumes either way gets it wrong half
+      // the time.
+      const ambiguity = advisory.treePresent
+        ? " A `node_modules` directory is present, which settles nothing — a " +
+          "failed install leaves a partial one behind. If you re-ran the " +
+          "install yourself and it succeeded, this is stale; otherwise the tree " +
+          "is incomplete."
+        : "";
+      const fact =
+        `The host's dependency install \`${advisory.command}\` **failed**` +
+        `${code}: ${advisory.error}${quoted(advisory.tail)}`;
+      return to === "tool-call"
+        ? `${fact}\n\nAnything importing from \`node_modules\` will fail until ` +
+            `that install is re-run.${ambiguity}`
+        : `${fact}\n\nSo \`node_modules\` is missing or incomplete.${ambiguity} Read that ` +
+            "output before treating a build or test failure as your own. If it " +
+            "looks transient, re-run the install yourself. If it is an " +
+            "environment fault you cannot fix from in here — no network, a " +
+            "refused registry, a TLS failure — **say exactly that and stop**, " +
+            "rather than working around it: that report is the only way the " +
+            "operator finds out.";
+    }
+
+    case "deps-absent": {
+      const fact = `The host installed no dependencies: ${advisory.reason}.`;
+      return to === "tool-call"
+        ? `${fact}\n\nIf this command needs \`node_modules\`, install them ` +
+            "yourself first."
+        : `${fact}\n\nIf you need \`node_modules\`, install them yourself first.`;
+    }
+
+    default: {
+      const unhandled: never = advisory;
+      return unhandled;
+    }
+  }
+}
+
+/** What the host knows, in the shape {@link deriveAdvisories} reads. */
+export interface AdvisoryInput {
+  /** The durable install record, exactly as the job wrote it. */
+  install: InstallState;
+  /**
+   * Whether a `node_modules` directory exists — **existence only, not health**.
+   *
+   * Named for what it can actually observe. A host answers it by looking for the
+   * directory in the workspace, and that is a narrower question than "are the
+   * dependencies fine": an `npm ci` that died partway leaves the directory
+   * behind holding an incomplete tree, so a `true` here is entirely consistent
+   * with the install having failed for real.
+   *
+   * So it never suppresses a proven failure. It travels onto the advisory as
+   * {@link WorkspaceAdvisory} `treePresent` and the reader is told which way the
+   * ambiguity runs. The alternative — treating it as proof of success — is what
+   * made a durable record of a failed install disappear on exactly the failure
+   * mode it was recording.
+   */
+  dependencyTreePresent: boolean;
+
+  /**
+   * A reinstall the host has already queued, as the moment it was queued.
+   *
+   * The difference between "your dependencies are broken" and "your
+   * dependencies are being rebuilt", and the two read identically from the
+   * durable record alone — an install whose container was replaced writes
+   * `failed`, and the arming that will repair it is a separate fact the record
+   * does not carry.
+   *
+   * A production session was briefed `deps-broken` six seconds before the
+   * armed reinstall it did not know about finished, and spent its own turns
+   * re-running `npm ci` on top of a tree that was already landing.
+   */
+  reinstallArmedAt?: number;
+}
+
+/**
+ * Everything currently true about a workspace, from what the host can see.
+ *
+ * An array, so a reader handles any number the same way and a new kind that can
+ * be true beside another needs no new shape.
+ *
+ * Order is severity-descending, so a renderer that shows only the first shows
+ * the one that matters.
+ */
+export function deriveAdvisories(
+  input: AdvisoryInput
+): readonly WorkspaceAdvisory[] {
+  const advisories: WorkspaceAdvisory[] = [];
+
+  const install = input.install;
+  switch (install.state) {
+    case "running":
+      advisories.push({
+        kind: "deps-building",
+        command: install.command,
+        startedAt: install.startedAt,
+        ...(install.tail ? { tail: install.tail } : {})
+      });
+      break;
+
+    case "failed":
+      /**
+       * A queued reinstall changes the *kind*, not the severity of the facts.
+       *
+       * `deps-broken` is permanent by definition — nothing clears that record
+       * except another checkout — and that permanence is what the reader acts
+       * on: a session told this installs for itself. When a reinstall is
+       * already armed that is the wrong instruction and the wrong shape, because
+       * the condition does clear with nobody acting. `deps-building` is the one
+       * that says so, and its wording for a session already asks the reader to
+       * wait rather than start a second install on top of the first.
+       *
+       * Counted from when the reinstall was armed rather than when it starts:
+       * arming is the moment the repair became certain, and the alarm that runs
+       * it owns no clock this can read.
+       */
+      if (input.reinstallArmedAt !== undefined) {
+        advisories.push({
+          kind: "deps-building",
+          command: install.command,
+          startedAt: input.reinstallArmedAt,
+          ...(install.tail ? { tail: install.tail } : {})
+        });
+        break;
+      }
+      // Otherwise always reported. The record is durable evidence that an
+      // install failed, and nothing available here is evidence that a later one
+      // succeeded — so the presence of a tree qualifies the advisory instead of
+      // deleting it.
+      advisories.push({
+        kind: "deps-broken",
+        command: install.command,
+        error: install.error,
+        treePresent: input.dependencyTreePresent,
+        ...(install.exitCode === undefined
+          ? {}
+          : { exitCode: install.exitCode }),
+        ...(install.tail ? { tail: install.tail } : {})
+      });
+      break;
+
+    case "skipped":
+      advisories.push({ kind: "deps-absent", reason: install.reason });
+      break;
+
+    // Nothing to say. `idle` means no install has been armed yet, which the
+    // host resolves on its own when it finds no tree in the workspace, and
+    // `done` is the ordinary case — a caller told its dependencies are fine has been told
+    // nothing, at the cost of prefix tokens on every run.
+    case "idle":
+    case "done":
+      break;
+
+    default: {
+      const unhandled: never = install;
+      return unhandled;
+    }
+  }
+
+  return advisories;
+}
+
+/**
+ * Everything a session should know before it starts, or `undefined` for silence.
+ *
+ * The counterpart to {@link file://../computer/gate.ts execGate}, for the reader that is a
+ * whole run rather than one command. It cannot be blocked and does not need to
+ * be: it can install dependencies itself, and the only thing it must not do is
+ * work silently against a workspace that is not what it assumes.
+ */
+export function sessionAdvisory(
+  advisories: readonly WorkspaceAdvisory[]
+): string | undefined {
+  if (advisories.length === 0) return undefined;
+  return advisories.map((a) => renderAdvisory(a, "session")).join("\n\n");
+}

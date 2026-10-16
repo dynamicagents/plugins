@@ -70,6 +70,7 @@ plugin to the tools an install names.
 | [`/claude-code`](src/claude-code/) | Sub-agents whose model is a Claude Code session in the workspace container                                       | one or more `claude setup-token` credentials       |
 | [`/computer`](src/computer/)       | An agent's tools over a workspace — `bash`, `grep`, `edit` — and the workspace Think's file tools use            | a `/workspace` object                              |
 | [`/repo-github`](src/repo-github/) | Clone, commit, push a branch, open a pull request on GitHub — over any container                                 | `GITHUB_TOKEN`                                     |
+| [`/sandbox`](src/sandbox/)         | A container whose disk is the checkout, driven from a Durable Object through `agents`' `ContainerHarness`        | `@cloudflare/sandbox`, an image running its daemon |
 | [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout                       | —                                                  |
 | [`/workspace`](src/workspace/)     | The Durable Object a container workspace lives in — its container, credentialed git, dependency install and sync | `@cloudflare/computer`, `@platformatic/vfs` (paid) |
 
