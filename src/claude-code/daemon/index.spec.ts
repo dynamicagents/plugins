@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import type { SandboxCliTurn } from "../../sandbox/daemon/index.js";
-import { GITHUB_TOKEN_PLACEHOLDER } from "../../sandbox/github.js";
 import {
   ANTHROPIC_PLACEHOLDER_HOST,
   decodeNote,
@@ -92,14 +91,12 @@ describe("the launch", () => {
 
   it("gives the CLI placeholders only, and no env can swap in a credential", () => {
     const { env } = cli({
-      github: true,
       author: { name: "Ada", email: "ada@example.invalid" },
       env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-REAL", EXTRA: "1" }
     }).command(turn());
     expect(env).toMatchObject({
       CLAUDE_CODE_OAUTH_TOKEN: CREDENTIAL_PLACEHOLDER,
       ANTHROPIC_BASE_URL: `http://${ANTHROPIC_PLACEHOLDER_HOST}`,
-      GH_TOKEN: GITHUB_TOKEN_PLACEHOLDER,
       GIT_AUTHOR_NAME: "Ada",
       GIT_COMMITTER_EMAIL: "ada@example.invalid",
       DISABLE_AUTOUPDATER: "1",

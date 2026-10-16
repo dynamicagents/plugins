@@ -40,7 +40,6 @@ import {
   encodeSessionId
 } from "../harness-wire.js";
 import { CREDENTIAL_PLACEHOLDER } from "../placeholder.js";
-import { githubEnv } from "../../sandbox/github.js";
 
 export interface ClaudeCodeDaemonOptions {
   /** Reported in the daemon's `hello`, and what the sandbox object names as its adapter. */
@@ -54,8 +53,6 @@ export interface ClaudeCodeDaemonOptions {
   permissionMode?: PermissionMode;
   /** Who the session's own commits are attributed to — see `../config.ts` `ClaudeCodeConfig.author`. */
   author?: { name: string; email: string };
-  /** Give the session git's and `gh`'s placeholder, for a sandbox whose egress has GitHub routes. */
-  github?: boolean;
   maxSubagentDepth?: number;
   maxConcurrentSubagents?: number;
   /** More environment for the session. Never a credential: it is the container's. */
@@ -130,7 +127,9 @@ function command(
  * `IS_SANDBOX`, and each session has its own home, so no `CLAUDE_CONFIG_DIR`.
  *
  * The credential and its base URL are applied last, so a deployment's `env`
- * cannot point the CLI at a real one.
+ * cannot point the CLI at a real one. What other hosts need — git's and `gh`'s
+ * placeholders — the CLI inherits from the daemon, whose environment the
+ * sandbox fills from its egress rules.
  */
 function sessionEnv(options: ClaudeCodeDaemonOptions): Record<string, string> {
   const author = options.author;
@@ -158,7 +157,6 @@ function sessionEnv(options: ClaudeCodeDaemonOptions): Record<string, string> {
           GIT_COMMITTER_EMAIL: author.email
         }
       : {}),
-    ...(options.github ? githubEnv() : {}),
     ANTHROPIC_BASE_URL: `http://${ANTHROPIC_PLACEHOLDER_HOST}`,
     CLAUDE_CODE_OAUTH_TOKEN: CREDENTIAL_PLACEHOLDER
   };

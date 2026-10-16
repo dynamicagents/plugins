@@ -1,10 +1,4 @@
-import type { EgressRoute } from "agents/harness/container";
-import {
-  ROUTE_KIND,
-  ROUTE_SANDBOX,
-  type EgressCall,
-  type EgressHandler
-} from "../sandbox/egress.js";
+import type { EgressCall, SandboxEgressRule } from "../sandbox/egress.js";
 import { ANTHROPIC_HOST } from "./egress.js";
 import { ANTHROPIC_PLACEHOLDER_HOST } from "./harness-wire.js";
 import {
@@ -22,12 +16,13 @@ import {
  * lead as the Bearer, and a refusal that spends or rejects the credential moves
  * the lead and tells the CLI to retry on the next one. What differs is where
  * the pool is. A sandbox's egress entrypoint is stateless, so the pool lives in
- * the sandbox object and is reached by name — the route carries it — through
+ * the sandbox the request came from, reached through `call.sandbox()` as a
  * {@link CredentialLease}.
  *
- * The CLI reaches this over plain HTTP to a host the harness intercepts, so
- * nothing in the container terminates TLS; the upstream is https, which the
- * harness requires of every route.
+ * The CLI reaches this over plain HTTP to a placeholder host the harness
+ * intercepts, so nothing in the container terminates TLS. The daemon points
+ * the CLI at it (`./daemon/index.ts`), after the deployment's own environment,
+ * so the rule sets no `env`.
  */
 
 /** The pool, as the object holding it answers over RPC. */
@@ -37,60 +32,27 @@ export interface CredentialLease {
   reject(id: string): Promise<Lead>;
 }
 
-/** The route kind this handler serves, as `sandboxEgress` dispatches it. */
-export const ANTHROPIC_ROUTE_KIND = "anthropic";
-
 /** The one-second retry that lands a rotated request on the next credential. */
 const ROTATED_RETRY_AFTER = "1";
 /** How much of a refusal's body the log keeps. */
 const CAPTURE_BYTES = 2048;
 
-/**
- * The route a sandbox holding a pool gives its container, `sandbox` being
- * `<binding>/<name>` of that sandbox: the binding in the Worker's `env`, and
- * the name the object was reached by.
- */
-export function anthropicRoute(sandbox: string): EgressRoute {
-  return {
-    host: ANTHROPIC_PLACEHOLDER_HOST,
-    upstream: `https://${ANTHROPIC_HOST}`,
-    headers: { [ROUTE_KIND]: ANTHROPIC_ROUTE_KIND, [ROUTE_SANDBOX]: sandbox },
-    strip: ["authorization", "x-api-key", "proxy-authorization"]
-  };
-}
-
-export interface AnthropicEgressOptions {
-  /** The pool `call` leases from. Default: the sandbox its route names. */
+export interface ClaudeCodeSandboxEgressOptions {
+  /** The pool `call` leases from. Default: the sandbox it came from, which holds one through {@link credentialHost}. */
   pool?: (call: EgressCall) => CredentialLease;
   label?: string;
   now?: () => number;
 }
 
-/** The sandbox `call`'s route names, as the object that holds its pool. */
-function namedPool(call: EgressCall): CredentialLease {
-  const named = call.control[ROUTE_SANDBOX] ?? "";
-  const slash = named.indexOf("/");
-  const namespace = slash > 0 ? call.env[named.slice(0, slash)] : undefined;
-  if (
-    !namespace ||
-    typeof (namespace as DurableObjectNamespace).getByName !== "function"
-  ) {
-    throw new Error(
-      `the Anthropic route names no sandbox binding: ${JSON.stringify(named)}`
-    );
-  }
-  return (namespace as DurableObjectNamespace).getByName(
-    named.slice(slash + 1)
-  ) as unknown as CredentialLease;
-}
-
-/** {@link ANTHROPIC_ROUTE_KIND}'s handler, for `sandboxEgress`. */
-export function anthropicEgress(
-  options: AnthropicEgressOptions = {}
-): EgressHandler {
+/** The egress rule of a sandbox that runs Claude Code. */
+export function claudeCodeSandboxEgress(
+  options: ClaudeCodeSandboxEgressOptions = {}
+): SandboxEgressRule {
   const tag = options.label ?? "claude-code-egress";
   const now = options.now ?? Date.now;
-  const poolOf = options.pool ?? namedPool;
+  const poolOf =
+    options.pool ??
+    ((call: EgressCall) => call.sandbox() as unknown as CredentialLease);
 
   const spent = (lead: Extract<Lead, { ok: false }>): Response => {
     if (lead.retryAt === undefined) {
@@ -117,14 +79,7 @@ export function anthropicEgress(
     );
   };
 
-  return async (call) => {
-    if (call.target.protocol !== "https:") {
-      return apiError(
-        "permission_error",
-        "a credential is never attached to a plaintext request",
-        403
-      );
-    }
+  const handle = async (call: EgressCall): Promise<Response> => {
     const pool = poolOf(call);
     const lead = await pool.lead();
     if (!lead.ok) return spent(lead);
@@ -190,6 +145,12 @@ export function anthropicEgress(
       429,
       { "retry-after": ROTATED_RETRY_AFTER }
     );
+  };
+
+  return {
+    name: "claude-code",
+    http: { [ANTHROPIC_PLACEHOLDER_HOST]: `https://${ANTHROPIC_HOST}` },
+    handle
   };
 }
 

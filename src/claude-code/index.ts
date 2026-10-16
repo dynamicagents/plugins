@@ -56,8 +56,8 @@
  *
  * Over `/sandbox` instead, the model is {@link claudeCodeHarnessModel}, the
  * credential pool lives in the sandbox object ({@link credentialHost}) and is
- * leased by the egress handler {@link anthropicEgress}, and the image's daemon
- * runs `@dynamicagents/plugins/claude-code/daemon`'s CLI.
+ * leased by the sandbox's egress rule {@link claudeCodeSandboxEgress}, and the image's
+ * daemon runs `@dynamicagents/plugins/claude-code/daemon`'s CLI.
  */
 
 export { claudeCodeModel } from "./model.js";
@@ -77,14 +77,9 @@ export type {
   ClaudeCodeHarnessModelOptions,
   SandboxRuns
 } from "./harness-model.js";
-export {
-  ANTHROPIC_ROUTE_KIND,
-  anthropicEgress,
-  anthropicRoute,
-  credentialHost
-} from "./harness-egress.js";
+export { claudeCodeSandboxEgress, credentialHost } from "./harness-egress.js";
 export type {
-  AnthropicEgressOptions,
+  ClaudeCodeSandboxEgressOptions,
   CredentialLease
 } from "./harness-egress.js";
 export { ANTHROPIC_PLACEHOLDER_HOST } from "./harness-wire.js";

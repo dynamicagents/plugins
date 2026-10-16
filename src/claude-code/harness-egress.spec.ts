@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { sandboxEgress } from "../sandbox/egress.js";
+import { egressPlan, sandboxEgress } from "../sandbox/egress.js";
 import {
-  ANTHROPIC_ROUTE_KIND,
-  anthropicEgress,
-  anthropicRoute,
-  credentialHost
+  claudeCodeSandboxEgress,
+  credentialHost,
+  type CredentialLease
 } from "./harness-egress.js";
 import { ANTHROPIC_PLACEHOLDER_HOST } from "./harness-wire.js";
 import { CREDENTIAL_PLACEHOLDER } from "./placeholder.js";
@@ -16,7 +15,7 @@ import { CREDENTIAL_PLACEHOLDER } from "./placeholder.js";
 
 // The pool reads the real clock, so this one is now, to the second.
 const NOW = Math.floor(Date.now() / 1000) * 1000;
-const ROUTE = anthropicRoute("CODING_SANDBOX/slot-1");
+const SANDBOX = "CODING_SANDBOX/slot-1";
 
 function memoryStorage(): DurableObjectStorage {
   const map = new Map<string, unknown>();
@@ -51,7 +50,18 @@ function serve(tokens: string[]) {
     storage: memoryStorage(),
     credentials: () => tokens
   });
-  const handler = anthropicEgress({ pool: () => pool, now: () => NOW });
+  return send(
+    claudeCodeSandboxEgress({ pool: () => pool, now: () => NOW }),
+    {}
+  );
+}
+
+/** A request the CLI makes, through the routes a sandbox registers for `rule`. */
+function send(
+  rule: ReturnType<typeof claudeCodeSandboxEgress>,
+  env: Record<string, unknown>
+) {
+  const { http } = egressPlan([rule], SANDBOX);
   return (headers: Record<string, string> = {}) =>
     sandboxEgress(
       new Request(`http://${ANTHROPIC_PLACEHOLDER_HOST}/v1/messages?beta=1`, {
@@ -62,15 +72,15 @@ function serve(tokens: string[]) {
         },
         body: "{}"
       }),
-      [ROUTE],
-      {},
-      { [ANTHROPIC_ROUTE_KIND]: handler }
+      http,
+      env,
+      [rule]
     );
 }
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("anthropicEgress", () => {
+describe("claudeCodeSandboxEgress", () => {
   it("sends the pool's lead as the Bearer, to the real host, and nothing of the CLI's own", async () => {
     const { calls } = upstream([]);
     const response = await serve(["sk-ant-oat01-A"])({ "x-api-key": "k" });
@@ -113,27 +123,40 @@ describe("anthropicEgress", () => {
   });
 });
 
-describe("anthropicRoute", () => {
-  it("is the placeholder host over the real https upstream, naming its sandbox", () => {
-    expect(ROUTE).toMatchObject({
-      host: ANTHROPIC_PLACEHOLDER_HOST,
-      upstream: "https://api.anthropic.com",
-      headers: {
-        "x-da-kind": ANTHROPIC_ROUTE_KIND,
-        "x-da-sandbox": "CODING_SANDBOX/slot-1"
-      }
+describe("claudeCodeSandboxEgress's rule", () => {
+  it("declares the CLI's placeholder host over the real API, and leaves the CLI's environment to the daemon", () => {
+    const rule = claudeCodeSandboxEgress();
+    expect(rule.http).toEqual({
+      [ANTHROPIC_PLACEHOLDER_HOST]: "https://api.anthropic.com"
     });
+    expect(rule.https).toBeUndefined();
+    expect(rule.env).toBeUndefined();
   });
 
-  it("refuses a route whose sandbox binding is not in the Worker's env", async () => {
+  it("leases from the sandbox the request came from", async () => {
     upstream([]);
-    await expect(
-      sandboxEgress(
-        new Request(`http://${ANTHROPIC_PLACEHOLDER_HOST}/v1/messages`),
-        [ROUTE],
-        {},
-        { [ANTHROPIC_ROUTE_KIND]: anthropicEgress() }
-      )
-    ).rejects.toThrow(/names no sandbox binding/);
+    const pool = credentialHost({
+      storage: memoryStorage(),
+      credentials: () => ["sk-ant-oat01-A"]
+    });
+    const reached: string[] = [];
+    const env = {
+      CODING_SANDBOX: {
+        getByName(name: string): CredentialLease {
+          reached.push(name);
+          return pool;
+        }
+      }
+    };
+    expect((await send(claudeCodeSandboxEgress(), env)()).status).toBe(200);
+    expect(reached).toEqual(["slot-1"]);
+  });
+
+  it("names a sandbox the Worker cannot reach, rather than sending the placeholder on", async () => {
+    const { calls } = upstream([]);
+    await expect(send(claudeCodeSandboxEgress(), {})()).rejects.toThrow(
+      /names no sandbox/
+    );
+    expect(calls).toHaveLength(0);
   });
 });
