@@ -162,7 +162,7 @@ async function githubEgress(call: EgressCall): Promise<Response> {
         call.request.headers.get("content-encoding")
       ).catch(() => undefined);
       if (!refs || refs.length === 0) {
-        await forwarded.cancel().catch(() => undefined);
+        void forwarded.cancel().catch(() => undefined);
         return githubError("this push names no ref this egress can read", 400);
       }
       const refused = refs.filter(
@@ -171,7 +171,7 @@ async function githubEgress(call: EgressCall): Promise<Response> {
           !branchAllowed(policy, ref.slice("refs/heads/".length))
       );
       if (refused.length > 0) {
-        await forwarded.cancel().catch(() => undefined);
+        void forwarded.cancel().catch(() => undefined);
         return githubError(
           `this sandbox may not push ${refused.join(", ")}; it may push ${policy.branches.join(", ")}`,
           403

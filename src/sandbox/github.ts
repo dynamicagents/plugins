@@ -194,6 +194,9 @@ export async function receivePackRefs(
       buffer = next;
     }
   } finally {
-    await reader.cancel().catch(() => undefined);
+    // Not awaited: a tee branch's cancel settles only once the other branch is
+    // cancelled or read to its end, and the caller does neither until this
+    // returns.
+    void reader.cancel().catch(() => undefined);
   }
 }

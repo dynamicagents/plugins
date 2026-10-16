@@ -19,13 +19,7 @@ import {
   type DirectoryBackupGatewayBinding,
   type DirectoryBackupRecord
 } from "@cloudflare/sandbox";
-import {
-  agentEnv,
-  asAgent,
-  AGENT_GID,
-  AGENT_UID,
-  shellQuote
-} from "./agent-exec.js";
+import { asAgent, AGENT_GID, AGENT_UID, shellQuote } from "./agent-exec.js";
 import { deriveAdvisories, type WorkspaceAdvisory } from "./advisory.js";
 import { humanMs } from "./format.js";
 import { TRUST_CA_COMMAND } from "./ca-trust.js";
@@ -373,7 +367,10 @@ export abstract class SandboxObjectBase<
     } = {}
   ): Promise<ExecResult> {
     await this.ensureRunning();
-    return this.#run(asAgent(argv), { ...options, env: agentEnv(options.env) });
+    return this.#run(asAgent(argv, options.env), {
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {})
+    });
   }
 
   /** `work`, counted as running, so no stop starts under it. */
@@ -429,21 +426,21 @@ export abstract class SandboxObjectBase<
    * writes a path the agent controls goes through here, never as root.
    */
   async #agentExec(argv: readonly string[]): Promise<ExecResult> {
-    return this.#run(asAgent(argv), { env: agentEnv() });
+    return this.#run(asAgent(argv), {});
   }
 
+  /**
+   * `argv` as the container's exec starts it, which is as root. No environment
+   * is passed here: an agent's travels in its argv, after the drop
+   * (`./agent-exec.ts`).
+   */
   async #run(
     argv: readonly string[],
-    options: {
-      cwd?: string;
-      env?: Readonly<Record<string, string>>;
-      timeoutMs?: number;
-    }
+    options: { cwd?: string; timeoutMs?: number }
   ): Promise<ExecResult> {
     return this.#hold(async () => {
       const process = await this.#container.exec([...argv], {
         ...(options.cwd ? { cwd: options.cwd } : {}),
-        ...(options.env ? { env: { ...options.env } } : {}),
         ...(options.timeoutMs
           ? { signal: AbortSignal.timeout(options.timeoutMs) }
           : {}),
@@ -986,7 +983,6 @@ export abstract class SandboxObjectBase<
       `{ timeout --kill-after=10 ${Math.ceil(timeoutMs / 1000)} sh -c ${shellQuote(resolution.command)}; } > ${log} 2>&1; ` +
       `echo $? > ${exit}`;
     await this.#container.exec(asAgent(["sh", "-c", script]), {
-      env: agentEnv(),
       stdout: "ignore",
       stderr: "ignore"
     });

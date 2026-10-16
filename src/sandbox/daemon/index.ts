@@ -23,6 +23,7 @@ import {
   type CliTurn,
   type DaemonServer
 } from "agents/harness/container/runtime";
+import { readFileSync } from "node:fs";
 import { AGENT_HOME, AGENT_UID } from "../agent-exec.js";
 import { EGRESS_READY, EGRESS_WAIT_MS } from "../constants.js";
 import { readRunHeader, SANDBOX_ROOT, type RunHeader } from "../header.js";
@@ -50,6 +51,25 @@ export interface SandboxDaemonOptions {
   /** The environment the daemon was started with. Default `process.env`. */
   readonly env?: NodeJS.ProcessEnv;
 }
+
+/**
+ * The one capability the daemon holds, `CAP_NET_BIND_SERVICE`, which grants
+ * nothing here. It is held so the daemon's capabilities are not a subset of
+ * an agent process's: Linux then refuses same-uid processes its
+ * `/proc/<pid>/environ` and `mem`, where the harness token is. Measured: a CLI
+ * launched this way reads neither, and one that kept the capability reads the
+ * token. A same-uid process can still signal the daemon, which ends the
+ * container, as a crash would.
+ */
+const DAEMON_CAPABILITY = 10;
+
+/** How the daemon launches the CLI: without the capability it holds. */
+const DROP_DAEMON_CAPABILITY = [
+  "/usr/bin/setpriv",
+  "--ambient-caps=-all",
+  "--inh-caps=-all",
+  "--"
+];
 
 /**
  * Wait for this container's egress, then run the CLI in the run's directory.
@@ -93,6 +113,7 @@ export function sandboxAdapter(
       return {
         ...inner,
         argv: [
+          ...DROP_DAEMON_CAPABILITY,
           "sh",
           "-c",
           LAUNCH,
@@ -109,16 +130,18 @@ export function sandboxAdapter(
 
 /**
  * Serve the daemon with the identity, secret and port the object started the
- * container with — as the agent, never root: the image starts it through
- * `setpriv` (see the README), and this refuses any other user.
+ * container with — as the agent, never root, holding {@link DAEMON_CAPABILITY}:
+ * the image starts it through `setpriv` (see the README), and this refuses to
+ * start otherwise.
  */
 export function serveSandboxDaemon(
   options: SandboxDaemonOptions
 ): Promise<DaemonServer> {
   const uid = process.getuid?.();
-  if (uid !== AGENT_UID)
+  if (uid !== AGENT_UID || !holdsCapability(DAEMON_CAPABILITY))
     throw new Error(
-      `the sandbox daemon runs as the agent (uid ${AGENT_UID}), and this is uid ${uid}: start it through setpriv`
+      `the sandbox daemon runs as the agent (uid ${AGENT_UID}) holding net_bind_service, ` +
+        `and this is uid ${uid}: start it through setpriv, as the README's ENTRYPOINT does`
     );
   const env = options.env ?? process.env;
   // `serveFromEnv` deletes it from the env it is given, and the CLI inherits
@@ -130,4 +153,15 @@ export function serveSandboxDaemon(
       `${CONTAINER_ENV.runtimeId} is not set: the sandbox object starts this image`
     );
   return serveFromEnv(sandboxAdapter(options, runtimeId), env);
+}
+
+/** Whether this process's permitted set holds capability `bit`. */
+function holdsCapability(bit: number): boolean {
+  const permitted = /^CapPrm:\s*([0-9a-f]+)$/m.exec(
+    readFileSync("/proc/self/status", "utf8")
+  )?.[1];
+  return (
+    permitted !== undefined &&
+    ((BigInt(`0x${permitted}`) >> BigInt(bit)) & 1n) === 1n
+  );
 }

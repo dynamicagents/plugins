@@ -139,6 +139,7 @@ export class TestSandboxDO extends SandboxObjectBase {
       lastStart: fake.lastStart,
       snapshots: fake.snapshots,
       execs: fake.execs.map((call) => call.cmd),
+      execEnvs: fake.execs.map((call) => call.env ?? null),
       httpsHosts: [...fake.httpsIntercepts.keys()],
       inactivityTimeoutMs: fake.inactivityTimeoutMs
     };

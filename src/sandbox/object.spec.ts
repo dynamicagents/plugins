@@ -238,6 +238,20 @@ describe("the harness behaviour a sandbox is built on", () => {
   });
 });
 
+describe("commands", () => {
+  it("starts an agent's command with no environment of its own, so root's setpriv honours none of it", async () => {
+    const sandbox = freshSandbox("env");
+    await sandbox.ensureRunning();
+    await sandbox.exec(["true"], { env: { LD_PRELOAD: "/workspace/evil.so" } });
+    const fake = await sandbox.fake();
+    const at = fake.execs.findIndex((cmd) =>
+      cmd.includes("LD_PRELOAD=/workspace/evil.so")
+    );
+    expect(fake.execs[at]?.[0]).toBe("/usr/bin/setpriv");
+    expect(fake.execEnvs[at]).toBeNull();
+  });
+});
+
 describe("checkouts and installs", () => {
   it("marks a checkout once it is on the disk, so an image's own directory is never taken for it", async () => {
     const sandbox = freshSandbox("mark");
@@ -269,7 +283,7 @@ describe("checkouts and installs", () => {
       cmd.includes("cat ")
     );
     expect(reads.length).toBeGreaterThan(0);
-    for (const read of reads) expect(read).toMatch(/^setpriv /);
+    for (const read of reads) expect(read).toMatch(/^\/usr\/bin\/setpriv /);
   });
 });
 

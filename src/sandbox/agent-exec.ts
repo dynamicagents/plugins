@@ -3,12 +3,15 @@
  *
  * `ctx.container.exec(argv, { user })` changes the uid and keeps root's
  * capability set: a process started that way as `10001:10001` was measured with
- * `CapEff 0xabac35fb`, `CAP_DAC_OVERRIDE` and `CAP_SYS_PTRACE` among it, and
- * read root's mode-400 `/proc/1/environ`, where the daemon's token is. The CLI
- * the daemon spawns is clean; only commands a host sends in this way are not.
- * So every host command goes through `setpriv`, which drops the inheritable and
+ * `CapEff 0xabac35fb`, `CAP_DAC_OVERRIDE` and `CAP_SYS_PTRACE` among it. So
+ * every host command goes through `setpriv`, which drops the inheritable and
  * bounding sets and changes identity in one step, and the image provides it
  * (util-linux).
+ *
+ * `setpriv` starts as root, so it is named by its absolute path and given no
+ * environment of the caller's: a `PATH` or `LD_PRELOAD` would otherwise be
+ * honoured as root before the drop. The command's environment is applied after
+ * it, by `env -i`, which also clears whatever the container's own carries.
  */
 
 /** The image's unprivileged user, which owns `/workspace` and runs the CLI. */
@@ -16,17 +19,29 @@ export const AGENT_UID = 10001;
 export const AGENT_GID = 10001;
 export const AGENT_HOME = "/home/agent";
 
-/** `argv`, run as the agent with no capabilities. */
-export function asAgent(argv: readonly string[]): string[] {
+const SETPRIV = "/usr/bin/setpriv";
+const ENV = "/usr/bin/env";
+/** Where the image's tools are. A command's own `env` may replace it. */
+const AGENT_PATH =
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/** `argv`, run as the agent with no capabilities, in exactly {@link agentEnv}`(env)`. */
+export function asAgent(
+  argv: readonly string[],
+  env: Readonly<Record<string, string>> = {}
+): string[] {
   if (argv.length === 0) throw new Error("asAgent: an empty command");
   return [
-    "setpriv",
+    SETPRIV,
     `--reuid=${AGENT_UID}`,
     `--regid=${AGENT_GID}`,
     "--init-groups",
     "--inh-caps=-all",
     "--bounding-set=-all",
     "--",
+    ENV,
+    "-i",
+    ...Object.entries(agentEnv(env)).map(([name, value]) => `${name}=${value}`),
     ...argv
   ];
 }
@@ -35,7 +50,13 @@ export function asAgent(argv: readonly string[]): string[] {
 export function agentEnv(
   extra: Readonly<Record<string, string>> = {}
 ): Record<string, string> {
-  return { HOME: AGENT_HOME, USER: "agent", LOGNAME: "agent", ...extra };
+  return {
+    HOME: AGENT_HOME,
+    USER: "agent",
+    LOGNAME: "agent",
+    PATH: AGENT_PATH,
+    ...extra
+  };
 }
 
 /** A shell string for `sh -c`, single-quoted so nothing in it is expanded. */

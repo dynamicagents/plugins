@@ -41,6 +41,9 @@ const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
 const failures = [];
 const fail = (msg) => failures.push(msg);
 
+/** Subpaths that are a container image's entrypoint, never a Worker's import. */
+const NODE_ONLY = new Set(["./sandbox/daemon"]);
+
 /** Bare specifiers that must never be reachable from a runtime subpath. */
 const TEST_ONLY = [/^node:/, /^undici$/, /^cloudflare:test$/, /^vitest$/];
 
@@ -141,7 +144,12 @@ const ownDir = (subpath) =>
 for (const [subpath, target] of subpathEntries) {
   const { files, bare } = reachableFrom(path.join(root, target));
 
-  const leaked = [...bare].filter((s) => TEST_ONLY.some((r) => r.test(s)));
+  // An image's entrypoint runs in Node, never in a Worker bundle: `node:*` is
+  // its realm, and only the test-only modules are not.
+  const realm = NODE_ONLY.has(subpath)
+    ? TEST_ONLY.filter((r) => !r.test("node:fs"))
+    : TEST_ONLY;
+  const leaked = [...bare].filter((s) => realm.some((r) => r.test(s)));
   if (leaked.length > 0) {
     fail(
       `runtime subpath "${subpath}" can reach test-only modules: ${leaked.join(", ")}`

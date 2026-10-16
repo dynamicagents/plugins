@@ -125,17 +125,21 @@ The image provides:
 - `/usr/local/bin/sandbox-shim`, from `cloudflare/sandbox`'s donor image, for `Files` and `DirectoryBackup`;
 - `/etc/da/skel`, root-owned, which every session's home starts as. It may be empty.
 
-The daemon runs as `agent`, and refuses to start as anything else:
+The daemon runs as `agent`, holding one capability, `net_bind_service`, and refuses to start
+otherwise:
 
 ```dockerfile
 ENTRYPOINT ["setpriv", "--reuid=10001", "--regid=10001", "--init-groups", \
-  "--inh-caps=-all", "--bounding-set=-all", "node", "/opt/da/daemon.mjs"]
+  "--inh-caps=-all,+net_bind_service", "--ambient-caps=+net_bind_service", \
+  "--bounding-set=-all,+net_bind_service", "node", "/opt/da/daemon.mjs"]
 ```
 
-The CLI then runs as `agent` with no root behind it. A daemon running as root would have the harness
-chown each session home, and chown follows a symlink the agent left there to the file it names.
-Each session's home lives under `/home/agent/.harness/sessions`, which the agent owns. A session
-writes its resume files there, so a lost container can resume it.
+It launches the CLI without that capability. The capability grants nothing here; it is there so
+Linux refuses agent processes the daemon's `/proc/<pid>/environ` and `mem`, where the harness's
+token is. As root, the daemon would instead have the harness chown each session home, and chown
+follows a symlink the agent left there to the file it names. Each session's home lives under
+`/home/agent/.harness/sessions`, which the agent owns. A session writes its resume files there, so a
+lost container can resume it.
 
 ## `wrangler.jsonc`
 

@@ -55,6 +55,28 @@ function receivePack(refs: string[]): ArrayBuffer {
 
 const streamOf = (text: string) => new Blob([text]).stream();
 
+/**
+ * A push as git streams it: the commands, then pack chunks produced only as
+ * they are read, so nothing is buffered ahead of the reader.
+ */
+function streamedPush(refs: string[], packChunks: number) {
+  const commands = new Uint8Array(receivePack(refs));
+  const chunk = new Uint8Array(4096).fill(0x50);
+  let pulled = 0;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (pulled === 0) controller.enqueue(commands);
+        else if (pulled <= packChunks) controller.enqueue(chunk);
+        else controller.close();
+        pulled += 1;
+      }
+    },
+    { highWaterMark: 0 }
+  );
+  return { stream, bytes: commands.byteLength + packChunks * chunk.byteLength };
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("sandboxEgress — GitHub", () => {
@@ -165,6 +187,37 @@ describe("sandboxEgress — GitHub", () => {
         null
       )
     ).toEqual(["refs/heads/claude-coordinator/é"]);
+  });
+
+  it("reads a streamed push's refs without waiting on the pack, and forwards all of it", async () => {
+    const { calls } = upstream();
+    const { stream, bytes } = streamedPush(
+      ["refs/heads/claude-coordinator/ab12c"],
+      64
+    );
+    const response = await sandboxEgress(
+      new Request(
+        `http://${GITHUB_PLACEHOLDER_HOST}/dynamicagents/plugins/git-receive-pack`,
+        {
+          method: "POST",
+          headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
+          body: stream
+        }
+      ),
+      [GIT],
+      ENV
+    );
+    expect(response.status).toBe(200);
+    expect((await calls[0]!.arrayBuffer()).byteLength).toBe(bytes);
+  });
+
+  it("refuses a streamed push's disallowed ref without waiting on the pack", async () => {
+    const { calls } = upstream();
+    const { stream } = streamedPush(["refs/heads/main"], 64);
+    const [inspected, rest] = stream.tee();
+    expect(await receivePackRefs(inspected, null)).toEqual(["refs/heads/main"]);
+    void rest.cancel();
+    expect(calls).toHaveLength(0);
   });
 
   it("refuses a command list git would not have written, rather than reading past it", async () => {
