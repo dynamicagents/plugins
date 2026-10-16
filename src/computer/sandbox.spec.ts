@@ -81,7 +81,7 @@ describe("sandboxClient", () => {
       }
     ]);
     const sent = await lastExec("--json");
-    expect(sent).toMatch(/^setpriv /);
+    expect(sent).toMatch(/^\/usr\/bin\/setpriv /);
     expect(sent).toContain("/workspace/repo **/*.ts");
     expect(sent).toContain("--fixed-strings");
     expect(sent).toContain("-g !**/node_modules -g !**/.git");
@@ -128,7 +128,7 @@ describe("sandboxClient", () => {
       status: "completed"
     });
     const sent = await lastExec("npm test");
-    expect(sent).toMatch(/^setpriv .* sh -c /);
+    expect(sent).toMatch(/^\/usr\/bin\/setpriv .* sh -c /);
     expect(sent).toContain('[ -e "/run/da/cancelled/$0" ] && exit 130');
     expect(sent).toMatch(
       /exec timeout --kill-after=5 "\$2" sh -c "\$1" "\$0" da-exec-[0-9a-f-]+ npm test 90$/
