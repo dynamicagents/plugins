@@ -72,11 +72,14 @@ function sandbox(script: (operationId: string, attempt: number) => Turn) {
   const runs_: SandboxRuns = {
     async createRun(runId, options) {
       runs.push({ runId, options });
+      return { sessionId: "h-1", created: runs.length === 1 };
     },
     async submit(_runId, text, operationId) {
       submits.push({ operationId, text });
-      if (!turns.has(operationId))
+      const accepted = !turns.has(operationId);
+      if (accepted)
         turns.set(operationId, script(operationId, submits.length - 1));
+      return { operationId, accepted };
     },
     async poll(_runId, operationId, _waitMs, from = 0): Promise<PollResult> {
       polls.push({ operationId, from });
@@ -96,6 +99,7 @@ function sandbox(script: (operationId: string, attempt: number) => Turn) {
     },
     async stopRun() {
       stops += 1;
+      return { stopped: true };
     }
   };
   return {

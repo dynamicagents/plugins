@@ -42,15 +42,19 @@ export interface SandboxRuns {
   createRun(
     runId: string,
     options: { cwd: string; forkOf?: string; continues?: string }
-  ): Promise<unknown>;
-  submit(runId: string, text: string, operationId: string): Promise<unknown>;
+  ): Promise<{ sessionId: string; created: boolean }>;
+  submit(
+    runId: string,
+    text: string,
+    operationId: string
+  ): Promise<{ operationId: string; accepted: boolean }>;
   poll(
     runId: string,
     operationId: string,
     waitMs?: number,
     from?: number
   ): Promise<PollResult>;
-  stopRun(runId: string): Promise<unknown>;
+  stopRun(runId: string): Promise<{ stopped: boolean }>;
 }
 
 export interface ClaudeCodeHarnessModelOptions {

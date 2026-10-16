@@ -1,6 +1,5 @@
 import type { WorkspaceLike } from "@cloudflare/think";
 import type { WorkspaceAdvisory } from "../workspace/advisory.js";
-import { workspaceNameFromRuntime } from "../workspace/open.js";
 import type {
   ComputerClient,
   ComputerFs,
@@ -9,6 +8,7 @@ import type {
   GrepOptions
 } from "./client.js";
 import { RUN_DIR } from "../sandbox/constants.js";
+import { sandboxNameFromRuntime } from "../sandbox/name.js";
 import { routedWorkspace } from "./proxy.js";
 
 /**
@@ -101,7 +101,7 @@ export function sandboxWorkspace(
   return routedWorkspace(
     {
       kind: "sandbox",
-      name: () => workspaceNameFromRuntime(runtime?.()) ?? config.sandboxName(),
+      name: () => sandboxNameFromRuntime(runtime?.()) ?? config.sandboxName(),
       open: async (name) => sandboxClient(host(name)),
       // The same: there is no copy of the files outside the container.
       openFs: async (name) => sandboxClient(host(name)),

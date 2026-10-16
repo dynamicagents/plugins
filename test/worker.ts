@@ -114,6 +114,7 @@ export class TestSandboxDO extends SandboxObjectBase {
       label: "test-sandbox",
       adapter: echoAdapter.id,
       instance: "lite",
+      env: { HOST_ENV: "host" },
       egress: {
         // This package declares no ambient `Env`, so `ctx.exports` is untyped here.
         entrypoint: (

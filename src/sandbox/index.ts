@@ -37,6 +37,17 @@ export {
   asAgent
 } from "./agent-exec.js";
 export {
+  sandboxName,
+  sandboxNameFromRuntime,
+  SANDBOX_RUNTIME_KEY
+} from "./name.js";
+export {
+  DEFAULT_EXEC_TIMEOUT_MS,
+  sandboxExec,
+  type SandboxExecConfig,
+  type SandboxExecHost
+} from "./exec.js";
+export {
   CREDENTIAL_HEADERS,
   egressPlan,
   forward,

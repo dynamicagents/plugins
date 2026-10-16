@@ -148,10 +148,13 @@ credential helpers.
 Over a `/sandbox` object the three do run in the container, as `sandboxRepoGit`, and
 the token still never enters it. The sandbox carries `githubSandboxEgress`: git is
 pointed at a placeholder host and presents a placeholder, and the egress — a Worker
-entrypoint, outside the container — swaps the token in. It holds every credentialed
-git request to the rule's push policy: its repositories, and for a push its branches,
-read from the request before GitHub sees it. A planted hook reads only the
-placeholder, and can do with it only what that policy allows.
+entrypoint, outside the container — swaps the token in. Every process in the
+container can present the placeholder, so the egress holds every credentialed push to
+what `repo_push` would: no tag, no protected name, and never the repository's default
+branch, which it reads from GitHub with the token. The refs are read from the request
+before GitHub sees it. A `push` policy narrows that further, to named repositories
+and branches, for a sandbox that knows them. A planted hook reads only the
+placeholder, and can do with it only what those rules allow.
 
 Everything else still runs in the container through `exec`, because none of it needs
 to authenticate: `status`, `diff`, `add`, `commit`, `checkout`. That is the whole

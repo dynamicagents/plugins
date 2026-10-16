@@ -69,8 +69,20 @@ The RPCs:
   RPCs over `@cloudflare/sandbox`'s `Files`, confined to `/workspace`;
 - `createRun`, `submit`, `poll` (stored messages of one operation, each with a digest), `stopRun`;
 - `checkpoint`, `snapshotRecord`, `seedFrom`, `release`;
-- `noteCheckout`, `checkoutDir`, `startInstall`, `advisories`, `reclaimIfIdle`;
+- `noteCheckout`, `checkoutDir` (which starts no container and marks no use), `startInstall`,
+  `advisories`, `reclaimIfIdle`;
 - `debug`, which exists only when `debugSecretBinding` names a secret.
+
+An install that finishes leaves the fingerprint of what it installed beside the checkout's mark, on
+the container's disk. `startInstall` on a checkout whose `node_modules` that fingerprint still
+describes installs nothing — a fetch that moved no dependency, or a tree a snapshot or a seed
+brought.
+
+A caller's sandbox for a repository is `sandboxName(callerKey, repo)`. A parent hands a sub-agent
+its sandbox under `SANDBOX_RUNTIME_KEY` in what its `prepare` returns, and everything that reaches
+a sandbox for a sub-agent reads it from there. `sandboxExec` is the shell other plugins take —
+`/repo-github`'s `exec`, `/scratch`'s — and runs each command as the agent, under `bash` and
+`timeout`.
 
 ## Egress
 
