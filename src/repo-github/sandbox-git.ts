@@ -11,8 +11,10 @@ import type { RepoGit, RepoGitResult } from "./index.js";
  * holds a push to its policy. So the container still never holds the token, and
  * a push the policy refuses is refused before GitHub sees it.
  *
- * A host passes this as `RepoConfig.git`. A clone is noted on the sandbox, so
- * an image change brings it back from its backup.
+ * A host passes this as `RepoConfig.git`, and records the checkouts that are
+ * its own on the sandbox — `afterCheckout` is the place for the one `repo_clone`
+ * makes. This notes none: a clone may be a superproject's submodule, which is
+ * that superproject's checkout and not one of its own.
  */
 
 /** The sandbox RPCs this uses. */
@@ -25,11 +27,6 @@ export interface SandboxGitHost {
       timeoutMs?: number;
     }
   ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
-  noteCheckout(record: {
-    dir: string;
-    kind: "repo" | "scratch";
-    repo?: string;
-  }): Promise<unknown>;
 }
 
 const LIMIT_MS = { clone: 10 * 60_000, fetch: 5 * 60_000, push: 5 * 60_000 };
@@ -100,12 +97,6 @@ export function sandboxRepoGit(sandbox: () => SandboxGitHost): RepoGit {
         LIMIT_MS.clone
       );
       if (!cloned.ok) return cloned;
-      const repo = githubRepo(req.url);
-      await sandbox().noteCheckout({
-        dir: req.dir,
-        kind: "repo",
-        ...(repo ? { repo } : {})
-      });
       // The branch's name, unborn too — an empty repository's — and `HEAD`
       // for a checkout that landed detached, as one of a tag does.
       const branch = await git(
@@ -182,12 +173,4 @@ function refuse(
     };
   }
   return undefined;
-}
-
-/** `owner/repo` of a github.com URL, as the sandbox records a checkout's repository. */
-function githubRepo(url: string): string | undefined {
-  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(
-    url
-  );
-  return match ? `${match[1]}/${match[2]}`.toLowerCase() : undefined;
 }

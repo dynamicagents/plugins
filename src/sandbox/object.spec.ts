@@ -3,6 +3,44 @@ import { runInDurableObject } from "cloudflare:test";
 import { ROOT_SESSION } from "agents/harness/container";
 import { CONTROL_SESSION, EGRESS_READY } from "./constants.js";
 import {
+  DEFAULT_INSTALL_PLAN,
+  installFingerprint,
+  resolveInstallCommand,
+  type InstallProbe
+} from "./install-plan.js";
+
+/**
+ * What an install into `dir` would mark itself as, in a test sandbox whose
+ * files all read `{}`: its files' fingerprint and the environment's digest.
+ */
+async function installKey(
+  dir: string,
+  env: Record<string, string>
+): Promise<string> {
+  const files: InstallProbe = {
+    exists: async () => true,
+    readFile: async () => "{}"
+  };
+  const resolution = await resolveInstallCommand(
+    files,
+    dir,
+    DEFAULT_INSTALL_PLAN
+  );
+  const fingerprint = await installFingerprint(files, dir, resolution);
+  const sorted = Object.entries(env).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0
+  );
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(sorted))
+  );
+  const hex = [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 16);
+  return `${fingerprint}:${hex}`;
+}
+import {
   eventually,
   freshHttpsSandbox,
   freshSandbox,
@@ -383,6 +421,113 @@ describe("checkouts and installs", () => {
     ).toBe(true);
   });
 
+  it("answers a stopped sandbox's checkout from its record, starting nothing", async () => {
+    const sandbox = freshSandbox("record");
+    expect(
+      await sandbox.noteCheckout({ dir: "/workspace/repo", kind: "repo" })
+    ).toEqual({ dir: "/workspace/repo", present: false });
+    expect(await sandbox.checkoutDir()).toBe("/workspace/repo");
+    expect((await sandbox.fake()).starts).toBe(0);
+    // A scratchpad is a checkout like any other.
+    await sandbox.noteCheckout({ dir: "/workspace/scratch", kind: "scratch" });
+    expect(await sandbox.checkoutDir()).toBe("/workspace/scratch");
+    await sandbox.noteCheckout({ dir: "/workspace/repo", kind: "repo" });
+    // A running one is asked once it is prepared: a `.git` gone is no checkout.
+    await sandbox.ensureRunning();
+    await sandbox.answer("test -d /workspace/repo/.git", "", 1);
+    expect(await sandbox.checkoutDir()).toBeUndefined();
+    // Before then, a start may still be restoring it: the record answers.
+    await runInDurableObject(sandbox, async (_, state) => {
+      await state.storage.delete("sandbox:runtime-ready");
+    });
+    expect(await sandbox.checkoutDir()).toBe("/workspace/repo");
+  });
+
+  it("installs nothing a finished install already put on this disk", async () => {
+    const sandbox = freshSandbox("current");
+    await sandbox.answer("cat ", "{}");
+    const key = await installKey("/workspace/a", { HOST_ENV: "host" });
+    // The mark names the tree it was made for, and this one is that tree.
+    await sandbox.answer(
+      "/var/lib/da/installs/%2Fworkspace%2Fa",
+      `11\n11 ${key}`
+    );
+    expect(await sandbox.startInstall({ dir: "/workspace/a" })).toMatchObject({
+      state: "done",
+      ms: 0
+    });
+    expect(
+      joined((await sandbox.fake()).execs).some((cmd) =>
+        cmd.includes("timeout --kill-after=10 ")
+      )
+    ).toBe(false);
+    // Changed files install again, unmarked until the install finishes.
+    await sandbox.answer(
+      "/var/lib/da/installs/%2Fworkspace%2Fa",
+      "11\n11 stale"
+    );
+    expect((await sandbox.startInstall({ dir: "/workspace/a" })).state).toBe(
+      "running"
+    );
+    const execs = joined((await sandbox.fake()).execs);
+    const unmarked = execs.findIndex(
+      (cmd) =>
+        cmd.startsWith("rm -f ") &&
+        cmd.includes("/var/lib/da/installs/%2Fworkspace%2Fa")
+    );
+    const launched = execs.findIndex((cmd) =>
+      cmd.includes("timeout --kill-after=10 ")
+    );
+    expect(unmarked).toBeGreaterThanOrEqual(0);
+    expect(launched).toBeGreaterThan(unmarked);
+  });
+
+  it.each([
+    // Removed and made again, by an install that failed part-way: another tree.
+    ["a tree the mark was not made for", "12\n11 {key}", { HOST_ENV: "host" }],
+    // `NODE_ENV` and its like change what an install installs.
+    ["a tree installed under another environment", "11\n11 {key}", {}]
+  ])("installs again over %s", async (_what, mark, markedEnv) => {
+    const sandbox = freshSandbox("replaced");
+    await sandbox.answer("cat ", "{}");
+    const key = await installKey("/workspace/a", markedEnv);
+    await sandbox.answer(
+      "/var/lib/da/installs/%2Fworkspace%2Fa",
+      mark.replace("{key}", key)
+    );
+    expect((await sandbox.startInstall({ dir: "/workspace/a" })).state).toBe(
+      "running"
+    );
+  });
+
+  it(
+    "checkpoints an install that finished, when the next in the queue finds its tree current",
+    { timeout: 45_000 },
+    async () => {
+      const sandbox = freshSandbox("owed");
+      await sandbox.answer("cat ", "{}");
+      const key = await installKey("/workspace/b", { HOST_ENV: "host" });
+      await sandbox.answer(
+        "/var/lib/da/installs/%2Fworkspace%2Fb",
+        `22\n22 ${key}`
+      );
+      expect((await sandbox.startInstall({ dir: "/workspace/a" })).state).toBe(
+        "running"
+      );
+      await sandbox.startInstall({ dir: "/workspace/b" });
+      // The first install exits 0 when its poll next reads it.
+      await sandbox.answer(".exit 2>/dev/null; echo", "0\n");
+      await sandbox.answer("stat -c %i /workspace/a/node_modules", "11");
+      const fake = await eventually(
+        () => sandbox.fake(),
+        (state) => state.snapshots > 0,
+        40_000
+      );
+      expect(fake.snapshots).toBe(1);
+      expect(await sandbox.snapshotRecord()).toBeDefined();
+    }
+  );
+
   it("installs one checkout at a time, under the plan's limit", async () => {
     const sandbox = freshSandbox("installs");
     await sandbox.answer("cat ", "{}");
@@ -395,6 +540,8 @@ describe("checkouts and installs", () => {
     );
     expect(installs).toHaveLength(1);
     expect(installs[0]).toContain("/workspace/a");
+    // The host's environment, and no egress rule's.
+    expect(installs[0]).toContain("HOST_ENV=host");
     // A checkout's files may be the agent's symlinks: never read as root.
     const reads = joined((await sandbox.fake()).execs).filter((cmd) =>
       cmd.includes("cat ")
@@ -427,6 +574,7 @@ describe("egress", () => {
     expect(command).toContain("PROBE_TOKEN=placeholder");
     expect(command).not.toContain("PROBE_TOKEN=mine");
     expect(command).toContain("OTHER=1");
+    expect(command).toContain("HOST_ENV=host");
   });
 
   it("registers HTTPS hosts per container, with the CA trusted before the marker is written", async () => {

@@ -247,7 +247,7 @@ function computerPlugin(
             `${WORKSPACE_SETTER[kind]}.`
         );
       // Resolved per call, not memoized: the name belongs to the turn — a
-      // sub-agent's comes from `runtime()`, see `/workspace`'s `WORKSPACE_RUNTIME_KEY` —
+      // sub-agent's comes from `runtime()`, see `/workspace`'s `WORKSPACE_RUNTIME_KEY` and `/sandbox`'s `SANDBOX_RUNTIME_KEY` —
       // and a stale one would silently route a second caller's commands into
       // the first caller's files.
       return buildComputerTools(

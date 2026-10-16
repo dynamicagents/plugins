@@ -27,13 +27,29 @@ const ROUTES = [...PLAN.http, ...PLAN.https];
 const send = (request: Request, env: Record<string, unknown> = ENV) =>
   sandboxEgress(request, ROUTES, env, [RULE]);
 
-function upstream(): { calls: Request[] } {
+/**
+ * GitHub, as the egress meets it: `lookups` are its reads of a repository's
+ * default branch, which `defaultBranch` answers, and `calls` everything it
+ * forwarded.
+ */
+function upstream(defaultBranch: string | null = "trunk-line"): {
+  calls: Request[];
+  lookups: Request[];
+} {
   const calls: Request[] = [];
+  const lookups: Request[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    calls.push(new Request(input as RequestInfo, init));
+    const request = new Request(input as RequestInfo, init);
+    if (/^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+$/.test(request.url)) {
+      lookups.push(request);
+      return defaultBranch === null
+        ? new Response("{}", { status: 502 })
+        : Response.json({ default_branch: defaultBranch });
+    }
+    calls.push(request);
     return new Response("upstream", { status: 200 });
   });
-  return { calls };
+  return { calls, lookups };
 }
 
 const basic = (password: string) =>
@@ -173,6 +189,55 @@ describe("githubSandboxEgress", () => {
     );
     expect((await push(receivePack([]))).status).toBe(400);
     expect(calls).toHaveLength(1);
+  });
+
+  it("holds every push, with no policy, to what repo_push may update", async () => {
+    const { calls, lookups } = upstream();
+    const open = githubSandboxEgress({ tokenBinding: "GITHUB_TOKEN" });
+    const routes = egressPlan([open], "SANDBOX/caller").http;
+    const pushTo = (repo: string, refs: string[]) =>
+      sandboxEgress(
+        new Request(
+          `http://${GITHUB_PLACEHOLDER_HOST}/${repo}/git-receive-pack`,
+          {
+            method: "POST",
+            headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
+            body: receivePack(refs)
+          }
+        ),
+        routes,
+        ENV,
+        [open]
+      );
+    // Any repository, and any work branch.
+    expect((await pushTo("someone/else", ["refs/heads/fix/x"])).status).toBe(
+      200
+    );
+    // The default branch, read with the real token, whatever it is called.
+    const toDefault = await pushTo("someone/else", ["refs/heads/trunk-line"]);
+    expect(toDefault.status).toBe(403);
+    expect(await toDefault.text()).toMatch(/default branch/);
+    expect(lookups.at(-1)?.url).toBe(
+      "https://api.github.com/repos/someone/else"
+    );
+    expect(lookups.at(-1)?.headers.get("authorization")).toBe(
+      `Bearer ${TOKEN}`
+    );
+    // A protected name, and a tag.
+    expect((await pushTo("someone/else", ["refs/heads/main"])).status).toBe(
+      403
+    );
+    expect((await pushTo("someone/else", ["refs/tags/v1"])).status).toBe(403);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("pushes nothing when the default branch cannot be read", async () => {
+    const { calls } = upstream(null);
+    const response = await push(
+      receivePack(["refs/heads/claude-coordinator/ab12c"])
+    );
+    expect(response.status).toBe(503);
+    expect(calls).toHaveLength(0);
   });
 
   it("names the missing token rather than sending the placeholder on", async () => {

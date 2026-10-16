@@ -42,6 +42,7 @@ import {
 } from "./header.js";
 import {
   DEFAULT_INSTALL_PLAN,
+  installFingerprint,
   resolveInstallCommand,
   type InstallPlan,
   type InstallProbe,
@@ -67,6 +68,8 @@ const CHECKPOINT_KEY = "sandbox:checkpoint";
 const INSTALL_KEY = "sandbox:install";
 const INSTALL_ARMED_KEY = "sandbox:install-armed";
 const INSTALL_QUEUE_KEY = "sandbox:install-queue";
+/** An install has finished since the last checkpoint, which the queue's end owes it. */
+const CHECKPOINT_OWED_KEY = "sandbox:checkpoint-owed";
 const LAST_USED_KEY = "sandbox:last-used";
 
 const IDLE_STOP_MS = 5 * 60_000;
@@ -81,6 +84,12 @@ const INSTALL_GRACE_MS = 60_000;
  * a snapshot keeps. A directory proves nothing: `/workspace` is in every image.
  */
 const CHECKOUT_MARKS = "/var/lib/da/checkouts";
+/**
+ * Per checkout, what its last finished install was for and which
+ * `node_modules` it made, on the same disk: it goes with that disk into a
+ * snapshot, and into another sandbox seeded from one.
+ */
+const INSTALL_MARKS = "/var/lib/da/installs";
 /** The harness sends SIGKILL this long after SIGINT, then syncs once more. */
 const CLI_KILL_MS = 5_000;
 const CLI_SYNC_MS = 5_000;
@@ -94,7 +103,10 @@ export interface SandboxObjectConfig {
   /** The image to start: a key of `ctx.container.images`. Default `app`. */
   image?: string;
   instance: ContainerInstance;
-  /** Non-secret environment for the daemon and the CLI. No key a rule's `env` sets. */
+  /**
+   * Non-secret environment for every command the agent runs — an `exec`, an
+   * install, a CLI turn — under its own. No key a rule's `env` sets.
+   */
   env?: Readonly<Record<string, string>>;
   egress: {
     /** `ctx.exports.<Entrypoint>`: the consumer's entrypoint, calling `sandboxEgress` with {@link rules}. */
@@ -387,7 +399,7 @@ export abstract class SandboxObjectBase<
     await this.#egressWatch.set(new Date(Date.now() + EGRESS_WATCH_MS));
   }
 
-  /** A command as the agent, with no capabilities, and every egress rule's `env` over its own. */
+  /** A command as the agent, with no capabilities: the host's `env`, its own over that, and every egress rule's over both. */
   async exec(
     argv: readonly string[],
     options: {
@@ -397,10 +409,17 @@ export abstract class SandboxObjectBase<
     } = {}
   ): Promise<ExecResult> {
     await this.ensureRunning();
-    return this.#run(asAgent(argv, { ...options.env, ...this.#egress.env }), {
-      ...(options.cwd ? { cwd: options.cwd } : {}),
-      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {})
-    });
+    return this.#run(
+      asAgent(argv, {
+        ...this.#cfg.env,
+        ...options.env,
+        ...this.#egress.env
+      }),
+      {
+        ...(options.cwd ? { cwd: options.cwd } : {}),
+        ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {})
+      }
+    );
   }
 
   /** `work`, counted as running, so no stop starts under it. */
@@ -957,6 +976,38 @@ export abstract class SandboxObjectBase<
   }
 
   /**
+   * What `dir`'s last finished install was for, while the `node_modules` it
+   * made is the one there: a tree removed and made again — by an install that
+   * failed part-way, say — is another directory, and its mark is not its own.
+   * Asked as the agent, who can read the mark and not write it:
+   * `node_modules` is the agent's, and may be a symlink.
+   */
+  async #installedAs(dir: string): Promise<string | undefined> {
+    const read = await this.#agentExec([
+      "sh",
+      "-c",
+      `stat -c %i ${shellQuote(`${dir}/node_modules`)} && cat ${shellQuote(installMarkOf(dir))}`
+    ]);
+    if (read.exitCode !== 0) return undefined;
+    const [tree = "", mark = ""] = read.stdout.split("\n");
+    const space = mark.indexOf(" ");
+    return space > 0 && mark.slice(0, space) === tree.trim()
+      ? mark.slice(space + 1).trim()
+      : undefined;
+  }
+
+  /** The `node_modules` an install left in `dir`, by its inode. */
+  async #treeOf(dir: string): Promise<string | undefined> {
+    const read = await this.#agentExec([
+      "stat",
+      "-c",
+      "%i",
+      `${dir}/node_modules`
+    ]);
+    return read.exitCode === 0 ? read.stdout.trim() : undefined;
+  }
+
+  /**
    * Back up and stop the container. Its disk is the next start, as a snapshot.
    *
    * Refused while anything is working — an open run, a command, an install:
@@ -1019,15 +1070,30 @@ export abstract class SandboxObjectBase<
     return { dir: record.dir, present };
   }
 
-  /** The newest recorded repository checkout, if its `.git` is there. */
+  /**
+   * The newest recorded checkout, a repository's or a scratchpad's. Starts no
+   * container and marks no use, so a sweep asking every sandbox does not keep
+   * them alive: a sandbox answers from its record, since a start restores what
+   * its disk lost, until a running container is prepared — then only if its
+   * `.git` is there.
+   */
   async checkoutDir(): Promise<string | undefined> {
     const row = this.ctx.storage.sql
       .exec<{ dir: string }>(
-        "SELECT dir FROM sandbox_checkouts WHERE kind = 'repo' ORDER BY noted_at DESC LIMIT 1"
+        "SELECT dir FROM sandbox_checkouts ORDER BY noted_at DESC LIMIT 1"
       )
       .toArray()[0];
     if (!row) return undefined;
-    const present = await this.exec(["test", "-d", `${row.dir}/.git`]);
+    // Until this container is prepared, a start may still be restoring what
+    // its disk lost: the record is the answer then too.
+    if (!this.#container.running) return row.dir;
+    const { runtimeId } = await this.#harness.container();
+    if (
+      !runtimeId ||
+      (await this.ctx.storage.get<string>(RUNTIME_READY_KEY)) !== runtimeId
+    )
+      return row.dir;
+    const present = await this.#agentExec(["test", "-d", `${row.dir}/.git`]);
     return present.exitCode === 0 ? row.dir : undefined;
   }
 
@@ -1094,6 +1160,32 @@ export abstract class SandboxObjectBase<
       await this.#nextInstall(false);
       return skipped;
     }
+    // What this disk already holds needs no install: a fetch that moved no
+    // dependency, or a tree a seed brought.
+    const files = await installFingerprint(probe, target.dir, resolution);
+    // The environment the install runs under shapes what it installs —
+    // `NODE_ENV` drops the dev dependencies — so it is part of what a tree is for.
+    const fingerprint =
+      files === null ? null : `${files}:${await digestEnv(this.#cfg.env)}`;
+    if (
+      fingerprint !== null &&
+      (await this.#installedAs(target.dir)) === fingerprint
+    ) {
+      const now = Date.now();
+      const current: InstallState = {
+        state: "done",
+        command: resolution.command,
+        exitCode: 0,
+        finishedAt: now,
+        ms: 0
+      };
+      await this.ctx.storage.put(INSTALL_KEY, current);
+      await this.#nextInstall(false);
+      return current;
+    }
+    // Unmarked while it runs, so an install cut short leaves no tree that
+    // passes for a finished one.
+    await this.#rootExec(["rm", "-f", installMarkOf(target.dir)]);
     const timeoutMs =
       this.#cfg.installPlan.timeoutMs ?? DEFAULT_INSTALL_PLAN.timeoutMs!;
     const job = `${Date.now().toString(36)}`;
@@ -1104,7 +1196,9 @@ export abstract class SandboxObjectBase<
       `cd ${shellQuote(target.dir)} && ` +
       `{ timeout --kill-after=10 ${Math.ceil(timeoutMs / 1000)} sh -c ${shellQuote(resolution.command)}; } > ${log} 2>&1; ` +
       `echo $? > ${exit}`;
-    await this.#container.exec(asAgent(["sh", "-c", script]), {
+    // The host's environment and no rule's: an install reaches what it reaches
+    // anonymously, as it would anywhere else.
+    await this.#container.exec(asAgent(["sh", "-c", script], this.#cfg.env), {
       stdout: "ignore",
       stderr: "ignore"
     });
@@ -1117,6 +1211,7 @@ export abstract class SandboxObjectBase<
     await this.ctx.storage.put(INSTALL_ARMED_KEY, {
       ...target,
       job,
+      fingerprint,
       limitMs: timeoutMs,
       runtimeId: (await this.#harness.container()).runtimeId ?? ""
     } satisfies ArmedInstall);
@@ -1126,6 +1221,9 @@ export abstract class SandboxObjectBase<
 
   /** Start the next queued install, or — the queue empty after a good one — checkpoint. */
   async #nextInstall(succeeded: boolean): Promise<void> {
+    // Owed until the queue's end, whatever the installs after this one do: one
+    // that finds its tree current installs nothing, and must not drop it.
+    if (succeeded) await this.ctx.storage.put(CHECKPOINT_OWED_KEY, true);
     const [next, ...rest] =
       (await this.ctx.storage.get<InstallTarget[]>(INSTALL_QUEUE_KEY)) ?? [];
     if (next) {
@@ -1134,7 +1232,10 @@ export abstract class SandboxObjectBase<
       return;
     }
     // What a later start begins from, node_modules included.
-    if (succeeded) await this.checkpoint();
+    if (await this.ctx.storage.get<boolean>(CHECKPOINT_OWED_KEY)) {
+      await this.checkpoint();
+      await this.ctx.storage.delete(CHECKPOINT_OWED_KEY);
+    }
   }
 
   async #onInstallPoll(): Promise<void> {
@@ -1206,6 +1307,14 @@ export abstract class SandboxObjectBase<
         tail.join("\n").trim()
       );
       return;
+    }
+    const tree = armed.fingerprint ? await this.#treeOf(armed.dir) : undefined;
+    if (armed.fingerprint && tree) {
+      await this.#rootExec([
+        "sh",
+        "-c",
+        `mkdir -p ${INSTALL_MARKS} && printf '%s %s' ${shellQuote(tree)} ${shellQuote(armed.fingerprint)} > ${shellQuote(installMarkOf(armed.dir))}`
+      ]);
     }
     await this.ctx.storage.put(INSTALL_KEY, {
       state: "done",
@@ -1321,6 +1430,8 @@ interface InstallTarget {
 /** The running install: its checkout, the job its files are named for, its limit, and the container it runs in. */
 interface ArmedInstall extends InstallTarget {
   job: string;
+  /** What the install is for: written to {@link INSTALL_MARKS} once it succeeds. */
+  fingerprint: string | null;
   limitMs: number;
   runtimeId: string;
 }
@@ -1334,6 +1445,27 @@ function installFiles(job: string): { exit: string; log: string } {
 
 function markOf(dir: string): string {
   return `${CHECKOUT_MARKS}/${encodeURIComponent(dir)}`;
+}
+
+function installMarkOf(dir: string): string {
+  return `${INSTALL_MARKS}/${encodeURIComponent(dir)}`;
+}
+
+/** `env`, in key order, as a digest a fingerprint can carry. */
+async function digestEnv(
+  env: Readonly<Record<string, string>> | undefined
+): Promise<string> {
+  const sorted = Object.entries(env ?? {}).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0
+  );
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(sorted))
+  );
+  return [...new Uint8Array(bytes)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 16);
 }
 
 function isNotFound(err: unknown): boolean {

@@ -25,7 +25,7 @@ async function setup(name: string) {
 }
 
 describe("sandboxRepoGit", () => {
-  it("clones as the agent, under a limit, notes the checkout, and says where it landed", async () => {
+  it("clones as the agent, under a limit, recording nothing, and says where it landed", async () => {
     const { sandbox, git, sent } = await setup("clone");
     await sandbox.answer("symbolic-ref --short -q HEAD", "main\n");
     expect(
@@ -41,9 +41,8 @@ describe("sandboxRepoGit", () => {
     expect(clone).toMatch(
       /^\/usr\/bin\/setpriv .* timeout --kill-after=5 600 git clone --depth 1 --branch main -- https:\/\/github\.com\/dynamicagents\/plugins\.git \/workspace\/plugins$/
     );
-    expect(
-      await sent("/var/lib/da/checkouts/%2Fworkspace%2Fplugins")
-    ).not.toHaveLength(0);
+    // What is a checkout is the host's to record: this one may be a submodule.
+    expect(await sent("/var/lib/da/checkouts/")).toHaveLength(0);
   });
 
   it("reaches GitHub through the rule's placeholder host, and never waits on a prompt", async () => {

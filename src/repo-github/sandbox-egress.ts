@@ -4,6 +4,7 @@ import {
   type EgressCall,
   type SandboxEgressRule
 } from "../sandbox/egress.js";
+import { PROTECTED_BRANCHES } from "./url.js";
 
 /**
  * GitHub from inside a sandbox, with the token on the Worker side: the
@@ -20,6 +21,11 @@ import {
  * GitHub as the deployment's account and never *read* the token. A request
  * that presents no placeholder goes out anonymous, as it would anywhere else.
  *
+ * Any process in the container can present the placeholder, a model's own
+ * shell included, so what `repo_push` refuses is refused here too, for every
+ * credentialed push: a ref that is not a branch, a protected name, and the
+ * repository's own default branch, which work reaches through a pull request.
+ *
  * The same rules as `../claude-code/github.ts`, which goes when its gateway does.
  */
 
@@ -35,7 +41,7 @@ const GIT_USER = "x-access-token";
 const API_HOST = "api.github.com";
 
 /**
- * Where a credentialed git request may go.
+ * Where a credentialed git request may go, beyond what every push is held to.
  *
  * Checked on git's own requests only: anonymous traffic to GitHub is whatever
  * GitHub allows anyone. `repos` are `owner/repo`; `branches` are branch names,
@@ -50,7 +56,8 @@ export interface GitPushPolicy {
 export interface GitHubSandboxEgressOptions {
   /** The `env` binding holding the token, read at the moment it is used and never carried. */
   tokenBinding: string;
-  push: GitPushPolicy;
+  /** Absent: any repository and any work branch the token reaches. */
+  push?: GitPushPolicy;
   /** Intercept `api.github.com` as well, so `gh` works as the deployment's account. */
   api?: boolean;
 }
@@ -91,7 +98,7 @@ function githubEnv(api: boolean): Record<string, string> {
   };
 }
 
-/** Anonymous unless the placeholder is presented; then the real token, and for git, the push policy. */
+/** Anonymous unless the placeholder is presented; then the real token, and for a push, what it may update. */
 async function githubEgress(
   call: EgressCall,
   options: GitHubSandboxEgressOptions
@@ -119,7 +126,10 @@ async function githubEgress(
       : undefined;
   let body: ReadableStream | undefined;
   if (git) {
-    if (!policy.repos.some((repo) => repo.toLowerCase() === git.repo)) {
+    if (
+      policy &&
+      !policy.repos.some((repo) => repo.toLowerCase() === git.repo)
+    ) {
       return githubError(
         `this sandbox may not use ${git.repo} as the deployment's account`,
         403
@@ -129,25 +139,30 @@ async function githubEgress(
       const [inspected, forwarded] = (
         call.request.body ?? new Blob().stream()
       ).tee();
+      const refuse = (message: string, status: number) => {
+        void forwarded.cancel().catch(() => undefined);
+        return githubError(message, status);
+      };
       const refs = await receivePackRefs(
         inspected,
         call.request.headers.get("content-encoding")
       ).catch(() => undefined);
       if (!refs || refs.length === 0) {
-        void forwarded.cancel().catch(() => undefined);
-        return githubError("this push names no ref this egress can read", 400);
+        return refuse("this push names no ref this egress can read", 400);
       }
-      const refused = refs.filter(
-        (ref) =>
-          !ref.startsWith("refs/heads/") ||
-          !branchAllowed(policy, ref.slice("refs/heads/".length))
-      );
-      if (refused.length > 0) {
-        void forwarded.cancel().catch(() => undefined);
-        return githubError(
-          `this sandbox may not push ${refused.join(", ")}; it may push ${policy.branches.join(", ")}`,
-          403
+      const defaultBranch = await defaultBranchOf(git.repo, token);
+      if (defaultBranch === undefined) {
+        return refuse(
+          `could not read ${git.repo}'s default branch, so nothing was pushed: retry`,
+          503
         );
+      }
+      const refused = refs.flatMap((ref) => {
+        const why = refusal(ref, defaultBranch, policy);
+        return why ? [`${ref} (${why})`] : [];
+      });
+      if (refused.length > 0) {
+        return refuse(`this sandbox may not push ${refused.join(", ")}`, 403);
       }
       body = forwarded;
     }
@@ -160,6 +175,46 @@ async function githubEgress(
     },
     body
   );
+}
+
+/** Why a push may not update `ref`, if it may not. */
+function refusal(
+  ref: string,
+  defaultBranch: string,
+  policy: GitPushPolicy | undefined
+): string | undefined {
+  if (!ref.startsWith("refs/heads/")) return "not a branch";
+  const branch = ref.slice("refs/heads/".length);
+  if (branch === defaultBranch)
+    return "the repository's default branch: work reaches it through a pull request";
+  if (PROTECTED_BRANCHES.has(branch)) return "a protected branch";
+  if (policy && !branchAllowed(policy, branch))
+    return `this sandbox may push ${policy.branches.join(", ")}`;
+  return undefined;
+}
+
+/** `repo`'s default branch, as the token sees it; `undefined` when it cannot be read. */
+async function defaultBranchOf(
+  repo: string,
+  token: string
+): Promise<string | undefined> {
+  try {
+    const response = await fetch(`https://${API_HOST}/repos/${repo}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        // GitHub refuses a request with none.
+        "user-agent": "dynamicagents-sandbox-egress"
+      }
+    });
+    if (!response.ok) return undefined;
+    const found = (await response.json()) as { default_branch?: unknown };
+    return typeof found.default_branch === "string" && found.default_branch
+      ? found.default_branch
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** How an authorization header carried the placeholder, if it did. */
