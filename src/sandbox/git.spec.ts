@@ -37,7 +37,7 @@ describe("sandboxRepoGit", () => {
     ).toEqual({ ok: true, detail: "main" });
     const [clone] = await sent("git clone");
     expect(clone).toMatch(
-      /^setpriv .* timeout --kill-after=5 600 git clone --depth 1 --branch main -- https:\/\/github\.com\/dynamicagents\/plugins\.git \/workspace\/plugins$/
+      /^\/usr\/bin\/setpriv .* timeout --kill-after=5 600 git clone --depth 1 --branch main -- https:\/\/github\.com\/dynamicagents\/plugins\.git \/workspace\/plugins$/
     );
     expect(
       await sent("/var/lib/da/checkouts/%2Fworkspace%2Fplugins")
