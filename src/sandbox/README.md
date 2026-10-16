@@ -86,7 +86,8 @@ it, as a `SandboxEgressRule`:
 its egress entrypoint read that list:
 
 ```ts
-// egress.ts — each rule from the plugin that needs its hosts.
+// egress.ts — each rule from the plugin that needs its hosts:
+// `/repo-github`'s `githubSandboxEgress`, for one.
 export const CODING_EGRESS: readonly SandboxEgressRule[] = [/* … */];
 
 export class CodingEgress extends WorkerEntrypoint<

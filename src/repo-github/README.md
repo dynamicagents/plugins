@@ -145,6 +145,14 @@ Object that owns the workspace filesystem: the same files the container mounts,
 reached without a shell. No hooks, no `ext::` transport, no template directory, no
 credential helpers.
 
+Over a `/sandbox` object the three do run in the container, as `sandboxRepoGit`, and
+the token still never enters it. The sandbox carries `githubSandboxEgress`: git is
+pointed at a placeholder host and presents a placeholder, and the egress — a Worker
+entrypoint, outside the container — swaps the token in. It holds every credentialed
+git request to the rule's push policy: its repositories, and for a push its branches,
+read from the request before GitHub sees it. A planted hook reads only the
+placeholder, and can do with it only what that policy allows.
+
 Everything else still runs in the container through `exec`, because none of it needs
 to authenticate: `status`, `diff`, `add`, `commit`, `checkout`. That is the whole
 rule for changing this plugin — an operation that talks to GitHub does not belong
@@ -201,7 +209,8 @@ What remains is not zero, and is worth naming precisely:
   what the agent is actually for, because nothing below it will narrow it further.
 - **The host is trusted with the credential**, which is the point, but it moves the
   question rather than deleting it. A host that implements `git` by shelling out
-  inside the container has undone all of the above, and this plugin cannot tell.
+  inside the container with the real token has undone all of the above, and this
+  plugin cannot tell.
 
 ## Guardrails are in the tool, not the prompt
 

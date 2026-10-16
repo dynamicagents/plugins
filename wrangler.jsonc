@@ -29,7 +29,8 @@
       // `runtime.exec` fails the way it fails when a container is unreachable.
       { "name": "TEST_WORKSPACE", "class_name": "TestWorkspaceDO" },
       { "name": "TEST_SANDBOX", "class_name": "TestSandboxDO" },
-      { "name": "TEST_SANDBOX_HTTPS", "class_name": "TestSandboxHttpsDO" }
+      { "name": "TEST_SANDBOX_HTTPS", "class_name": "TestSandboxHttpsDO" },
+      { "name": "TEST_SANDBOX_GIT", "class_name": "TestSandboxGitDO" }
     ]
   },
 
@@ -43,6 +44,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["TestSandboxDO", "TestSandboxHttpsDO"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["TestSandboxGitDO"]
     }
   ]
 }
