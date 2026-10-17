@@ -1,5 +1,5 @@
 import type { WorkspaceLike } from "@cloudflare/think";
-import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import type { SandboxAdvisory } from "../sandbox/advisory.js";
 import type {
   ComputerClient,
   ComputerFs,
@@ -20,10 +20,10 @@ import { routedWorkspace } from "./proxy.js";
  * the agent and refuse anything outside `/workspace`.
  *
  * ```ts
- * override workspace = sandboxWorkspace(config, () => this.pluginContext().runtime());
+ * override workspace = computerWorkspace(config, () => this.pluginContext().runtime());
  * ```
  *
- * `sandboxComputer(config)`'s tools then find the sandbox through it.
+ * `computer(config)`'s tools then find the sandbox through it.
  */
 
 /** The sandbox RPCs this uses. A `/sandbox` object answers all of them. */
@@ -44,7 +44,7 @@ export interface SandboxComputerHost extends Rpc.DurableObjectBranded {
   readDir(path: string): Promise<{ name: string; type: string }[]>;
   mkdir(path: string): Promise<void>;
   rm(path: string, options?: { recursive?: boolean }): Promise<void>;
-  advisories(): Promise<readonly WorkspaceAdvisory[]>;
+  advisories(): Promise<readonly SandboxAdvisory[]>;
 }
 
 export interface SandboxComputerConfig {
@@ -91,7 +91,7 @@ const CANCEL = [
 /** What one `find` or `grep` returns at most, with no `limit` of its own. */
 const MAX_FOUND = 10_000;
 
-export function sandboxWorkspace(
+export function computerWorkspace(
   config: SandboxComputerConfig,
   runtime?: () => unknown
 ): WorkspaceLike {

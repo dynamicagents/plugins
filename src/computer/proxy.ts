@@ -1,5 +1,5 @@
 import type { WorkspaceLike } from "@cloudflare/think";
-import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import type { SandboxAdvisory } from "../sandbox/advisory.js";
 import type { ComputerClient } from "./client.js";
 import { withFileLock } from "./file-lock.js";
 import { writeGate } from "./gate.js";
@@ -12,7 +12,7 @@ import { guardPath, WALK_SKIPS } from "./paths.js";
  * workspace is, and the computer tools replace only the ones they name. So an
  * agent with a container and Think's default workspace would run `bash` in the
  * container and `write` in its own SQLite, and nothing would say so. An agent
- * that installs the tools sets its workspace to `sandboxWorkspace`
+ * that installs the tools sets its workspace to `computerWorkspace`
  * (`./sandbox.ts`), and the plugin refuses to start without it — and reaches
  * the container through it, so the tools and Think's file tools cannot resolve
  * two different ones.
@@ -28,7 +28,7 @@ export interface WorkspaceRoute {
   /** The sandbox the running turn names. Read per call. */
   name(): string;
   open(name: string): Promise<ComputerClient>;
-  advisories(name: string): Promise<readonly WorkspaceAdvisory[]>;
+  advisories(name: string): Promise<readonly SandboxAdvisory[]>;
 }
 
 /**

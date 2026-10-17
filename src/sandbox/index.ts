@@ -63,7 +63,7 @@ export {
   shapeOf,
   type AdvisoryAudience,
   type AdvisoryShape,
-  type WorkspaceAdvisory
+  type SandboxAdvisory
 } from "./advisory.js";
 export {
   DEFAULT_INSTALL_PLAN,

@@ -38,7 +38,7 @@ const ROTATED_RETRY_AFTER = "1";
 /** How much of a refusal's body the log keeps. */
 const CAPTURE_BYTES = 2048;
 
-export interface ClaudeCodeSandboxEgressOptions {
+export interface ClaudeCodeEgressOptions {
   /** The pool `call` leases from. Default: the sandbox it came from, which holds one through {@link credentialHost}. */
   pool?: (call: EgressCall) => CredentialLease;
   label?: string;
@@ -46,8 +46,8 @@ export interface ClaudeCodeSandboxEgressOptions {
 }
 
 /** The egress rule of a sandbox that runs Claude Code. */
-export function claudeCodeSandboxEgress(
-  options: ClaudeCodeSandboxEgressOptions = {}
+export function claudeCodeEgress(
+  options: ClaudeCodeEgressOptions = {}
 ): SandboxEgressRule {
   const tag = options.label ?? "claude-code-egress";
   const now = options.now ?? Date.now;

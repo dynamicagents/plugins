@@ -22,7 +22,7 @@ Unusual for this package, and it is the whole design. Claude Code brings its own
 tools, its own loop and its own context management, so there is nothing for an
 agent loop to drive. So this package exports no plugin: it exports a writer's
 `SubAgentSpec` — `CLAUDE_CODE_AGENT` (`claude_code`) — and
-`claudeCodeHarnessModel`, a language model whose one call runs a session. A host
+`claudeCodeModel`, a language model whose one call runs a session. A host
 binds the spec to a `SubAgent` whose `getModel()` returns one, and Think's
 recovery does the rest: a turn cut by an eviction or a deploy is continued, and
 the model picks the session up where it was.
@@ -57,7 +57,7 @@ repository's own build and test commands. So nothing secret goes in it.
 
 The session launches with `CREDENTIAL_PLACEHOLDER`, and the daemon points the CLI
 at `ANTHROPIC_PLACEHOLDER_HOST` over plain HTTP. The sandbox intercepts that host
-into its egress entrypoint on the **Worker** side, where `claudeCodeSandboxEgress`
+into its egress entrypoint on the **Worker** side, where `claudeCodeEgress`
 sets the pool's lead as the Bearer, on its way to `api.anthropic.com`, and rotates
 to the next credential when Anthropic says the current one's bucket is spent (see
 below). Nothing in the container terminates TLS for Anthropic.
@@ -159,7 +159,7 @@ export class CoderSandbox
   admit() {
     return this.#pool.admit();
   }
-  // sandboxConfig(): its egress rules include `claudeCodeSandboxEgress()`.
+  // sandboxConfig(): its egress rules include `claudeCodeEgress()`.
 }
 ```
 
@@ -190,7 +190,7 @@ class Writer extends SubAgent<Env> {
       sandboxName: string;
       dir: string;
     };
-    return claudeCodeHarnessModel({
+    return claudeCodeModel({
       // A new stub per call: a call that failed may have been its stub's last.
       sandbox: () => this.env.CODER_SANDBOX.getByName(sandboxName),
       storage: this.ctx.storage,

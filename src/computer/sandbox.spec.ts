@@ -4,8 +4,8 @@ import { freshSandbox } from "../../test/sandbox/do.js";
 import { testPluginContext } from "../../test/helpers.js";
 import {
   sandboxClient,
-  sandboxComputer,
-  sandboxWorkspace,
+  computer,
+  computerWorkspace,
   type SandboxComputerHost
 } from "./index.js";
 
@@ -170,13 +170,13 @@ describe("sandboxClient", () => {
   });
 });
 
-describe("sandboxComputer()", () => {
+describe("computer()", () => {
   const onWorkspace = (workspace: unknown) =>
     testPluginContext({ workspace: () => workspace as never });
   const binding = {
     getByName: () => ({})
   } as unknown as DurableObjectNamespace<SandboxComputerHost>;
-  const sandboxed = sandboxWorkspace({ binding, sandboxName: () => "s" });
+  const sandboxed = computerWorkspace({ binding, sandboxName: () => "s" });
 
   /**
    * Think's own workspace is the one an agent has unless it says otherwise,
@@ -184,18 +184,18 @@ describe("sandboxComputer()", () => {
    */
   it("runs on a sandbox's workspace, and refuses any other", () => {
     expect(
-      Object.keys(sandboxComputer({}).tools!(onWorkspace(sandboxed))).sort()
+      Object.keys(computer({}).tools!(onWorkspace(sandboxed))).sort()
     ).toEqual(["bash", "edit", "grep"]);
-    expect(() => sandboxComputer({}).tools!(onWorkspace({}))).toThrow(
+    expect(() => computer({}).tools!(onWorkspace({}))).toThrow(
       PluginSetupError
     );
-    expect(() => sandboxComputer({}).tools!(onWorkspace({}))).toThrow(
-      /sandboxWorkspace\(config/
+    expect(() => computer({}).tools!(onWorkspace({}))).toThrow(
+      /computerWorkspace\(config/
     );
   });
 
   it("tells the model the checkout is the container's disk, and nothing of a mount", async () => {
-    const said = await sandboxComputer({}).context![0]!.provider!.get();
+    const said = await computer({}).context![0]!.provider!.get();
     expect(said).toContain("container's own disk");
     expect(said).not.toMatch(/mount point|while the container is restarting/);
   });

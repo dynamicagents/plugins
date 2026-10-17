@@ -133,7 +133,7 @@ it as an override and only the shape tests read from the file.
 
 ## Updating Claude Code
 
-The `claude-code` plugin's sandbox egress (`src/claude-code/harness-egress.ts`) and
+The `claude-code` plugin's sandbox egress (`src/claude-code/egress.ts`) and
 stream parser (`src/claude-code/events.ts`) are written against one CLI version's traffic:
 its auth header, its `anthropic-beta` list, the endpoints it calls, the fields of its
 `stream-json` lines. A newer CLI can move any of it, and a deployment would find out
@@ -156,7 +156,7 @@ command, stdin and environment the daemon's `claudeCodeDaemonCli` gives a turn, 
 read by that adapter's own parser. Its traffic goes to the placeholder host the
 daemon points it at, over plain HTTP, through a local proxy standing in for the
 harness's interception. Every request then goes through the real `sandboxEgress` and
-`claudeCodeSandboxEgress`, leasing from a `credentialHost` pool, and on to a fake
+`claudeCodeEgress`, leasing from a `credentialHost` pool, and on to a fake
 Anthropic, or with `--live` to the real API. A session is run once and resumed; a
 planning run — a named schema under `plan`, as a run header asks — is then forked
 under the default mode, the way a plan is carried out, so every flag the daemon
@@ -188,7 +188,7 @@ That is what a reviewer reads before taking the bump, so it goes in the PR.
 **The capture** is `test/fixtures/claude-code-probe-capture.json`: the verified
 version's requests and its runs' lines, and what the fake answered them with. Header
 values that vary by machine or run are recorded as `*`, and temporary paths are taken
-out of the lines. `harness-egress.spec.ts` and `events.spec.ts` read it, so `npm test`
+out of the lines. `egress.spec.ts` and `events.spec.ts` read it, so `npm test`
 checks the egress and the parser against what the verified version actually sends and
 prints. The probe writes it and prettier skips it; do not edit it by hand. It is not a
 VCR cassette: a cassette holds what a Worker's `fetch` gets back, and this holds what a

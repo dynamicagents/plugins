@@ -5,13 +5,13 @@ import { readRunHeader } from "../sandbox/header.js";
 import type { PolledMessage, PollResult } from "../sandbox/object.js";
 import type { ClaudeCodeResult } from "./events.js";
 import {
-  claudeCodeHarnessModel,
+  claudeCodeModel,
   CONTAINER_LOST_PROMPT,
-  type ClaudeCodeHarnessModelOptions,
+  type ClaudeCodeModelOptions,
   type SandboxRuns,
   type SessionOutcome,
   type SessionRecord
-} from "./harness-model.js";
+} from "./model.js";
 import { encodeNote, encodeRunEnd, encodeSessionId } from "./harness-wire.js";
 
 /**
@@ -134,13 +134,13 @@ function memoryStorage() {
 
 function harness(
   box: ReturnType<typeof sandbox>,
-  over: Partial<ClaudeCodeHarnessModelOptions> = {}
+  over: Partial<ClaudeCodeModelOptions> = {}
 ) {
   const notes: { key: string; text: string; at?: number }[] = [];
   const reports: SessionOutcome[] = [];
   const sessions: SessionRecord[] = [];
   const { map, storage } = memoryStorage();
-  const options: ClaudeCodeHarnessModelOptions = {
+  const options: ClaudeCodeModelOptions = {
     sandbox: () => box.runs,
     storage,
     runId: RUN,
@@ -159,7 +159,7 @@ function harness(
     ...over
   };
   return {
-    model: claudeCodeHarnessModel(options),
+    model: claudeCodeModel(options),
     notes,
     reports,
     sessions,
@@ -179,7 +179,7 @@ const call = (abortSignal?: AbortSignal) => ({
 });
 
 const textOf = async (
-  model: ReturnType<typeof claudeCodeHarnessModel>,
+  model: ReturnType<typeof claudeCodeModel>,
   abort?: AbortSignal
 ) => {
   const result = await model.doGenerate(call(abort));
@@ -187,7 +187,7 @@ const textOf = async (
   return part?.type === "text" ? part.text : undefined;
 };
 
-describe("claudeCodeHarnessModel", () => {
+describe("claudeCodeModel", () => {
   it("runs the brief as one operation in the run's directory, files its notes, and reports once", async () => {
     const box = sandbox((op) => ({
       messages: [

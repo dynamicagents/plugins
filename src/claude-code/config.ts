@@ -117,7 +117,7 @@ export interface ClaudeCodeConfig {
   /**
    * How long a session may run before its sub-agent stops it — a ceiling on a
    * session that has stopped making progress. See
-   * {@link file://./harness-model.ts DEFAULT_HARNESS_TIMEOUT_MS}.
+   * {@link file://./model.ts DEFAULT_TIMEOUT_MS}.
    */
   timeoutMs?: number;
 }

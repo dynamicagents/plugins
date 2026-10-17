@@ -25,24 +25,21 @@ An agent installs plugins by listing them in `getPlugins()`, on a `StepAgent` fr
 // src/agents/coder/agent.ts
 import { StepAgent } from "@dynamicagents/core/agent";
 import { browser } from "@dynamicagents/plugins/browser";
-import {
-  sandboxComputer,
-  sandboxWorkspace
-} from "@dynamicagents/plugins/computer";
+import { computer, computerWorkspace } from "@dynamicagents/plugins/computer";
 // `sandboxConfig` names the `/sandbox` object this agent works in.
 import { repo } from "@dynamicagents/plugins/repo-github";
 
 export class Coder extends StepAgent<Env> {
   // The tools run commands in a container, so the agent's own workspace —
   // what Think's `read` and `write` work on — has to be that container's.
-  override workspace = sandboxWorkspace(sandboxConfig(this.env), () =>
+  override workspace = computerWorkspace(sandboxConfig(this.env), () =>
     this.pluginContext().runtime()
   );
 
   override getPlugins() {
     return [
       browser({ binding: this.env.BROWSER }),
-      sandboxComputer({ shell: "bash" }),
+      computer({ shell: "bash" }),
       repo(repoConfig(this.env))
     ];
   }
