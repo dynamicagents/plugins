@@ -9,15 +9,17 @@
  *   npm run probe:claude-code -- --live         the real API, not a fake one
  *   npm run probe:claude-code -- --keep         keep the temporary directory
  *
- * It stands in for the container. The CLI is installed into a temporary
- * directory, launched with the command and environment `buildLaunch` gives a
- * session, and pointed at an HTTPS proxy that terminates TLS for
- * `api.anthropic.com` with a throwaway CA — the interception `http-gateway`
- * egress does, done locally. Every request goes through the real
- * `claudeCodeEgress`, and on to a fake Anthropic that streams a canned reply,
- * or with `--live` to the real API on `CLAUDE_CODE_OAUTH_TOKEN`. A session is
+ * It stands in for the sandbox. The CLI is installed into a temporary
+ * directory and launched with the command, stdin and environment the daemon's
+ * `claudeCodeDaemonCli` gives a turn, and its lines are read by that same
+ * adapter's parser. Its traffic goes to the placeholder host the daemon points
+ * it at, over plain HTTP, through a local proxy standing in for the harness's
+ * interception: every request goes through the real `sandboxEgress` and
+ * `claudeCodeSandboxEgress`, leasing from a `credentialHost` pool, and on to a
+ * fake Anthropic that streams a canned reply, or with `--live` to the real API
+ * on `CLAUDE_CODE_OAUTH_TOKEN`. A session is
  * run once and resumed as a writer's warning turn is; a planning run — a
- * `jsonSchema` under `--permission-mode plan` — is forked under the default
+ * named schema under `plan`, as a run header asks — is forked under the default
  * mode, the way a plan is carried out; and finally a resume is asked for a
  * conversation that does not exist — which is what a host hits when the
  * container that held one is gone, and which must cost nothing.
@@ -27,12 +29,11 @@
  * `--record` writes the capture and the verified version, and only a passing,
  * offline run may: a live run's traffic depends on the account it ran on.
  *
- * What this cannot see is the container itself — root with `IS_SANDBOX`, the
- * interception CA in the image, a real 429's rotation.
+ * What this cannot see is the container itself — the agent user, the
+ * platform's interception of the placeholder host, a real 429's rotation.
  * AGENTS.md's "Updating Claude Code" says what covers those.
  *
- * Needs `npm` and `openssl` on the PATH, and reads `dist/`, so the npm script
- * builds first.
+ * Needs `npm` on the PATH, and reads `dist/`, so the npm script builds first.
  */
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -49,7 +50,6 @@ import http from "node:http";
 import { register } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import tls from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -136,7 +136,7 @@ if (!credential)
 
 /**
  * The environment of every command the probe runs but the CLI: `npm`, whose
- * install runs the candidate's lifecycle scripts, and `openssl`. The gateway
+ * install runs the candidate's lifecycle scripts. The egress
  * holds the credential and nothing else here should — the CLI itself is given
  * only the placeholder, as in the container.
  */
@@ -146,7 +146,7 @@ delete TOOL_ENV.CLAUDE_CODE_OAUTH_TOKEN;
 // --- the package under test, from dist/ ---------------------------------------
 
 /**
- * `run.js` imports `@cloudflare/computer`, whose modules import
+ * The daemon's cards reach core's `/artifacts`, whose other modules import
  * `cloudflare:workers` for classes nothing here constructs. Node cannot resolve
  * that scheme, so it resolves to empty classes. A name missing from this stub
  * fails the import loudly, naming the export.
@@ -166,11 +166,21 @@ register(
     )
 );
 const dist = (file) =>
-  import(pathToFileURL(path.join(root, "dist/claude-code", file)).href);
-const { claudeCodeEgress } = await dist("egress.js");
-const { parseStream } = await dist("events.js");
-const { buildLaunch, CREDENTIAL_PLACEHOLDER } = await dist("run.js");
-const { VERIFIED_CLAUDE_CODE_VERSION } = await dist("verified.js");
+  import(pathToFileURL(path.join(root, "dist", file)).href);
+const { egressPlan, sandboxEgress } = await dist("sandbox/egress.js");
+const { claudeCodeDaemonCli } = await dist("claude-code/daemon/index.js");
+const { claudeCodeSandboxEgress, credentialHost } = await dist(
+  "claude-code/harness-egress.js"
+);
+const { ANTHROPIC_PLACEHOLDER_HOST, decodeRunEnd } = await dist(
+  "claude-code/harness-wire.js"
+);
+const { parseStream } = await dist("claude-code/events.js");
+const { CREDENTIAL_PLACEHOLDER } = await dist("claude-code/placeholder.js");
+const { VERIFIED_CLAUDE_CODE_VERSION } = await dist("claude-code/verified.js");
+
+/** The daemon's adapter, which names the planning run's schema as a run header does. */
+const cli = claudeCodeDaemonCli({ id: "probe", schemas: { probe: SCHEMA } });
 
 // --- which version ------------------------------------------------------------
 
@@ -197,16 +207,17 @@ const check = (name, ok, detail) => checks.push({ name, ok, detail });
 
 try {
   const bin = install(version);
-  const certs = makeCerts();
 
   const requests = [];
   const refused = [];
   const unanswered = [];
   const realFetch = globalThis.fetch;
-  // The gateway's upstream is the global `fetch`, as it is in a Worker. The
-  // CLI's requests overlap, so each carries its index through the gateway.
+  // The egress's upstream is the global `fetch`, as it is in a Worker. The
+  // CLI's requests overlap, so each carries its index through the egress.
   globalThis.fetch = async (input, init) => {
-    const request = new Request(input, init);
+    // The egress forwards the body as the stream it arrived as, which a Worker
+    // sends as it is and Node sends only when told it is half-duplex.
+    const request = new Request(input, { ...init, duplex: "half" });
     const id = Number(request.headers.get(PROBE_ID));
     request.headers.delete(PROBE_ID);
     requests[id].upstream = Object.fromEntries(request.headers);
@@ -216,43 +227,46 @@ try {
     return answer;
   };
 
-  let state = [];
-  const gateway = claudeCodeEgress({
-    credentials: () => [credential],
-    store: {
-      read: async () => state,
-      write: async (next) => {
-        state = next;
-      }
+  // The pool a sandbox holds, reached as the egress reaches it: by the name on
+  // the route, through the binding it names.
+  const stored = new Map();
+  const pool = credentialHost({
+    storage: {
+      get: async (key) => stored.get(key),
+      put: async (key, value) => void stored.set(key, value)
     },
-    label: "probe"
+    credentials: () => [credential]
   });
+  const rule = claudeCodeSandboxEgress({ label: "probe" });
+  const plan = egressPlan([rule], "PROBE_SANDBOX/probe");
+  const egress = (request) =>
+    sandboxEgress(
+      request,
+      [...plan.http, ...plan.https],
+      { PROBE_SANDBOX: { getByName: () => pool } },
+      [rule]
+    );
 
-  const proxy = await listen(gateway, certs, requests, refused);
+  const proxy = await listen(egress, requests, refused);
   const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
 
-  const first = await runSession(bin, proxyUrl, certs.ca);
-  const second = first.result?.sessionId
-    ? await runSession(bin, proxyUrl, certs.ca, {
-        resume: first.result.sessionId
-      })
+  const first = await runSession(bin, proxyUrl);
+  const second = first.sessionId
+    ? await runSession(bin, proxyUrl, { resume: first.sessionId })
     : undefined;
   // A planning run, as a host launches one: an answer as data, under `plan`.
-  const structured = await runSession(bin, proxyUrl, certs.ca, {
-    jsonSchema: SCHEMA,
-    permissionMode: "plan"
-  });
+  const structured = await runSession(bin, proxyUrl, { plan: true });
   // And the plan carried out: forked, under the mode that writes.
-  const forked = structured.result?.sessionId
-    ? await runSession(bin, proxyUrl, certs.ca, {
-        resume: structured.result.sessionId,
+  const forked = structured.sessionId
+    ? await runSession(bin, proxyUrl, {
+        resume: structured.sessionId,
         fork: true
       })
     : undefined;
   // Last, and the count is taken before it: this one must make no model call,
   // and a request made after it could only be its own.
   const calledBefore = requests.length;
-  const unresumable = await runSession(bin, proxyUrl, certs.ca, {
+  const unresumable = await runSession(bin, proxyUrl, {
     resume: UNKNOWN_SESSION
   });
   proxy.close();
@@ -262,8 +276,9 @@ try {
     checkRun("resumed run", second);
     check(
       "the resumed run continues the same session",
-      second.result?.sessionId === first.result.sessionId,
-      `${first.result.sessionId} → ${second.result?.sessionId}`
+      second.sessionId === first.sessionId &&
+        second.result?.sessionId === first.sessionId,
+      `${first.sessionId} → ${second.sessionId}`
     );
   } else {
     check("the resumed run ran", false, "the first run reported no session id");
@@ -290,9 +305,10 @@ try {
      */
     check(
       "the forked run starts a session of its own",
-      Boolean(forked.result?.sessionId) &&
-        forked.result.sessionId !== structured.result.sessionId,
-      `${structured.result.sessionId} → ${forked.result?.sessionId}`
+      Boolean(forked.sessionId) &&
+        forked.sessionId !== structured.sessionId &&
+        forked.result?.sessionId === forked.sessionId,
+      `${structured.sessionId} → ${forked.sessionId}`
     );
     check(
       "and leaves plan mode for the mode that writes",
@@ -339,7 +355,7 @@ try {
   );
 
   // Every intercepted request, not the ones that got through: a request the
-  // gateway refused never reaches upstream, and would otherwise go unseen.
+  // egress refused never reaches upstream, and would otherwise go unseen.
   check(
     "every request reached Anthropic with the real credential",
     requests.length > 0 &&
@@ -470,103 +486,48 @@ function install(target) {
   return bin;
 }
 
-/** A CA the CLI is told to trust, and a certificate for Anthropic signed by it. */
-function makeCerts() {
-  const dir = path.join(tmp, "certs");
-  mkdirSync(dir);
-  const at = (name) => path.join(dir, name);
-  const openssl = (...opts) =>
-    execFileSync("openssl", opts, {
-      stdio: ["ignore", "ignore", "pipe"],
-      env: TOOL_ENV
-    });
-  openssl(
-    "req",
-    "-x509",
-    "-newkey",
-    "rsa:2048",
-    "-nodes",
-    "-days",
-    "1",
-    "-keyout",
-    at("ca.key"),
-    "-out",
-    at("ca.pem"),
-    "-subj",
-    "/CN=claude-code probe",
-    "-addext",
-    "basicConstraints=critical,CA:TRUE",
-    "-addext",
-    "keyUsage=critical,keyCertSign,cRLSign"
-  );
-  openssl(
-    "req",
-    "-newkey",
-    "rsa:2048",
-    "-nodes",
-    "-keyout",
-    at("leaf.key"),
-    "-out",
-    at("leaf.csr"),
-    "-subj",
-    `/CN=${HOST}`
-  );
-  writeFileSync(
-    at("leaf.ext"),
-    `subjectAltName=DNS:${HOST}\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n`
-  );
-  openssl(
-    "x509",
-    "-req",
-    "-days",
-    "1",
-    "-in",
-    at("leaf.csr"),
-    "-CA",
-    at("ca.pem"),
-    "-CAkey",
-    at("ca.key"),
-    "-CAcreateserial",
-    "-out",
-    at("leaf.pem"),
-    "-extfile",
-    at("leaf.ext")
-  );
-  return {
-    ca: at("ca.pem"),
-    key: readFileSync(at("leaf.key")),
-    cert: readFileSync(at("leaf.pem"))
-  };
-}
-
 /**
- * The container's interception, as a proxy. A `CONNECT` to Anthropic is
- * terminated here and each request inside it handed to the gateway at its
- * original URL; anything else is refused and named in the report, so the probe
- * never reaches a host it does not know about.
+ * The harness's interception, as a proxy. The CLI sends the placeholder host's
+ * requests here in absolute form, plain HTTP as in the container, and each is
+ * handed to the egress at that URL; anything else, a `CONNECT` included, is
+ * refused and named in the report, so the probe never reaches a host it does
+ * not know about.
  */
-function listen(gateway, certs, requests, refused) {
-  const inner = http.createServer(async (req, res) => {
+function listen(egress, requests, refused) {
+  const proxy = http.createServer(async (req, res) => {
+    const url = URL.canParse(req.url) ? new URL(req.url) : undefined;
+    if (url?.host !== ANTHROPIC_PLACEHOLDER_HOST) {
+      refused.push(`${req.method} ${req.url}`);
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = Buffer.concat(chunks);
-    const id =
-      requests.push({
-        method: req.method,
-        path: req.url,
-        headers: req.headers
-      }) - 1;
+    const path = `${url.pathname}${url.search}`;
+    // `proxy-connection` is this proxy's framing, which the container's
+    // interception never sees.
+    const { "proxy-connection": _, ...sent } = req.headers;
+    const id = requests.push({ method: req.method, path, headers: sent }) - 1;
     const headers = new Headers({ [PROBE_ID]: String(id) });
     for (const [name, value] of Object.entries(req.headers)) {
-      if (["connection", "host", "content-length"].includes(name)) continue;
+      if (
+        ["connection", "proxy-connection", "host", "content-length"].includes(
+          name
+        )
+      )
+        continue;
       headers.set(name, Array.isArray(value) ? value.join(", ") : value);
     }
     try {
-      const response = await gateway.fetch(`https://${HOST}${req.url}`, {
-        method: req.method,
-        headers,
-        ...(body.length > 0 ? { body } : {})
-      });
+      const response = await egress(
+        new Request(url, {
+          method: req.method,
+          headers,
+          ...(body.length > 0 ? { body } : {})
+        })
+      );
       const out = {};
       response.headers.forEach((value, name) => {
         // Node's fetch has already decoded the body and framed it itself.
@@ -587,81 +548,65 @@ function listen(gateway, certs, requests, refused) {
       res.end();
     } catch (err) {
       res.writeHead(502, { "content-type": "text/plain" });
-      res.end(`probe: the gateway threw: ${err}`);
+      res.end(`probe: the egress threw: ${err}`);
     }
-  });
-
-  const proxy = http.createServer((req, res) => {
-    refused.push(`${req.method} ${req.url}`);
-    res.writeHead(403);
-    res.end();
   });
   proxy.on("connect", (req, socket) => {
-    const [host] = req.url.split(":");
-    if (host !== HOST) {
-      refused.push(`CONNECT ${req.url}`);
-      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
-      return;
-    }
-    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-    inner.emit(
-      "connection",
-      new tls.TLSSocket(socket, {
-        isServer: true,
-        key: certs.key,
-        cert: certs.cert
-      })
-    );
+    refused.push(`CONNECT ${req.url}`);
+    socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
   });
-  proxy.on("close", () => inner.close());
   return new Promise((resolve) =>
     proxy.listen(0, "127.0.0.1", () => resolve(proxy))
   );
 }
 
-/** One session, launched as `buildLaunch` launches it, and its stream parsed. */
-function runSession(
-  bin,
-  proxyUrl,
-  ca,
-  { resume, fork, jsonSchema, permissionMode } = {}
-) {
-  const launch = buildLaunch({
+/**
+ * One turn, launched as the daemon launches it, and its lines read by the
+ * daemon's parser — the session id it hands the next turn, and the outcome the
+ * host decodes — as well as parsed whole, for what a line-by-line read hides.
+ */
+function runSession(bin, proxyUrl, { resume, fork, plan } = {}) {
+  const turn = {
+    operationId: `probe:${randomUUID()}`,
     prompt: `Reply with exactly: ${REPLY}`,
-    dir: work,
-    ...(resume ? { resume } : {}),
-    ...(fork ? { fork: true } : {}),
-    ...(jsonSchema ? { jsonSchema } : {}),
-    ...(permissionMode ? { permissionMode } : {})
-  });
-  if (!launch.command.startsWith("claude ")) {
+    settings: {},
+    state: resume ? { sessionId: resume } : {},
+    header: {
+      cwd: work,
+      ...(plan ? { mode: "plan", schema: "probe" } : {}),
+      ...(fork ? { fork: true } : {})
+    }
+  };
+  const launch = cli.command(turn);
+  if (launch.argv[0] !== "claude") {
     throw new Error(
-      `buildLaunch's command no longer starts with \`claude\`: ${launch.command}`
+      `the daemon's command no longer starts with \`claude\`: ${launch.argv.join(" ")}`
     );
   }
-  const command = `'${bin}' ${launch.command.slice("claude ".length)}`;
+  // HOME is the session's own, as in the sandbox: every run shares it, so the
+  // resume and the fork find the conversations under it.
   const env = {
     PATH: process.env.PATH,
     HOME: home,
     TMPDIR: tmp,
     ...launch.env,
-    // The workspace mount, stood in for: `buildLaunch` names `/workspace`, which
-    // only the container has. Every run shares it, as every session in one
-    // workspace does, so the resume and the fork find the transcripts there.
-    CLAUDE_CONFIG_DIR: path.join(home, ".claude-sessions"),
+    // HTTPS too, though nothing should use it: a client that does reaches the
+    // proxy's `CONNECT` refusal and the report, rather than the network.
+    HTTP_PROXY: proxyUrl,
+    http_proxy: proxyUrl,
     HTTPS_PROXY: proxyUrl,
-    https_proxy: proxyUrl,
-    NODE_EXTRA_CA_CERTS: ca
+    https_proxy: proxyUrl
   };
   return new Promise((resolve) => {
-    // A process group of its own, so a timeout reaches the CLI and not only the
-    // shell in front of it.
-    const child = spawn("sh", ["-c", command], {
+    // A process group of its own, so a timeout reaches the CLI and whatever it
+    // started.
+    const child = spawn(bin, launch.argv.slice(1), {
       cwd: work,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       detached: true
     });
+    child.stdin.end(launch.stdin ?? "");
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -685,18 +630,24 @@ function runSession(
     });
     child.on("close", (code) => {
       for (const timer of timers) clearTimeout(timer);
-      const parsed = parseStream(
-        stdout.endsWith("\n") ? stdout : `${stdout}\n`
+      const lines = stdout.split("\n").filter(Boolean);
+      const parser = cli.parser(turn);
+      let sessionId;
+      for (const line of lines) {
+        const update = parser.line(line);
+        if (update.state?.sessionId) sessionId = update.state.sessionId;
+      }
+      const outcome = parser.end({ code, stderr });
+      const end = decodeRunEnd(
+        outcome.status === "done" ? outcome.text : outcome.reason
       );
-      const result = parsed.events.find(
-        (event) => event.kind === "result"
-      )?.result;
       resolve({
         code,
         stderr,
-        parsed,
-        result,
-        lines: stdout.split("\n").filter(Boolean)
+        parsed: parseStream(`${lines.join("\n")}\n`),
+        result: end?.result,
+        sessionId,
+        lines
       });
     });
   });

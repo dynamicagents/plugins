@@ -133,8 +133,8 @@ it as an override and only the shape tests read from the file.
 
 ## Updating Claude Code
 
-The `claude-code` plugin's egress gateway (`src/claude-code/egress.ts`) and stream
-parser (`src/claude-code/events.ts`) are written against one CLI version's traffic:
+The `claude-code` plugin's sandbox egress (`src/claude-code/harness-egress.ts`) and
+stream parser (`src/claude-code/events.ts`) are written against one CLI version's traffic:
 its auth header, its `anthropic-beta` list, the endpoints it calls, the fields of its
 `stream-json` lines. A newer CLI can move any of it, and a deployment would find out
 only in a running container. So the version is pinned. `VERIFIED_CLAUDE_CODE_VERSION`
@@ -150,17 +150,19 @@ npm run probe:claude-code -- --live        # the real API, on CLAUDE_CODE_OAUTH_
 npm run probe:claude-code -- --keep        # keep the temporary directory
 ```
 
-**What it runs.** It stands in for the container. The CLI is installed into a
-temporary directory, never over the machine's own `claude`, and launched with the
-command and environment `buildLaunch` gives a session. Its HTTPS goes through a proxy
-that terminates TLS for Anthropic with a throwaway CA, the way `http-gateway` egress
-does. Every request then goes through the real `claudeCodeEgress`, and on to a fake
+**What it runs.** It stands in for the sandbox. The CLI is installed into a
+temporary directory, never over the machine's own `claude`, launched with the
+command, stdin and environment the daemon's `claudeCodeDaemonCli` gives a turn, and
+read by that adapter's own parser. Its traffic goes to the placeholder host the
+daemon points it at, over plain HTTP, through a local proxy standing in for the
+harness's interception. Every request then goes through the real `sandboxEgress` and
+`claudeCodeSandboxEgress`, leasing from a `credentialHost` pool, and on to a fake
 Anthropic, or with `--live` to the real API. A session is run once and resumed; a
-planning run — a `jsonSchema` under `--permission-mode plan` — is then forked under
-the default mode, the way a plan is carried out, so every flag the plugin passes is
-exercised — then asked to resume a conversation that does not exist, which is the
-one run that must make no model call. Its client's own startup requests are
-expected; `/v1/messages` is what it must not reach.
+planning run — a named schema under `plan`, as a run header asks — is then forked
+under the default mode, the way a plan is carried out, so every flag the daemon
+passes is exercised — then asked to resume a conversation that does not exist,
+which is the one run that must make no model call. Its client's own startup
+requests are expected; `/v1/messages` is what it must not reach.
 
 **It fails when:**
 
@@ -186,8 +188,8 @@ That is what a reviewer reads before taking the bump, so it goes in the PR.
 **The capture** is `test/fixtures/claude-code-probe-capture.json`: the verified
 version's requests and its runs' lines, and what the fake answered them with. Header
 values that vary by machine or run are recorded as `*`, and temporary paths are taken
-out of the lines. `egress.spec.ts` and `events.spec.ts` read it, so `npm test` checks
-the gateway and the parser against what the verified version actually sends and
+out of the lines. `harness-egress.spec.ts` and `events.spec.ts` read it, so `npm test`
+checks the egress and the parser against what the verified version actually sends and
 prints. The probe writes it and prettier skips it; do not edit it by hand. It is not a
 VCR cassette: a cassette holds what a Worker's `fetch` gets back, and this holds what a
 CLI we do not write sends and prints.
@@ -206,8 +208,9 @@ depends on the account it ran on.
 
 If the probe fails, the pin stays where it is and the round says which check failed.
 
-**What it cannot see** is the container itself: root with `IS_SANDBOX`, the
-interception CA in the image, and rotating to another credential after a real `429`. A deployment's smoke test covers those after it ships.
+**What it cannot see** is the container itself: the agent user, the platform's
+interception of the placeholder host, and rotating to another credential after a
+real `429`. A deployment's smoke test covers those after it ships.
 
-It needs `npm` and `openssl` on the PATH, and no credential unless `--live`. It
-imports the package from `dist/`, so the npm script builds first.
+It needs `npm` on the PATH, and no credential unless `--live`. It imports the package
+from `dist/`, so the npm script builds first.

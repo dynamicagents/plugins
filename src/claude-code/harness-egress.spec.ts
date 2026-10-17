@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import capture from "../../test/fixtures/claude-code-probe-capture.json";
 import { egressPlan, sandboxEgress } from "../sandbox/egress.js";
 import {
   claudeCodeSandboxEgress,
@@ -120,6 +121,98 @@ describe("claudeCodeSandboxEgress", () => {
     const response = await serve([])();
     expect(response.status).toBe(500);
     expect(await response.text()).toMatch(/none will recover/);
+  });
+});
+
+/**
+ * A request's headers as the verified version sent them, from the probe's
+ * capture in `test/fixtures/`. The probe records a value that varies by
+ * machine or run as `*`, and those are left out along with the connection's
+ * own framing.
+ */
+function recordedHeaders(headers: Partial<Record<string, string>>): Headers {
+  const out = new Headers();
+  for (const [name, value] of Object.entries(headers)) {
+    if (value !== undefined && value !== "*" && name !== "connection") {
+      out.set(name, value);
+    }
+  }
+  return out;
+}
+
+/** A request the verified version made, as the egress meets it. */
+function recorded(
+  request: (typeof capture.requests)[number],
+  body?: string
+): Request {
+  return new Request(`http://${ANTHROPIC_PLACEHOLDER_HOST}${request.path}`, {
+    method: request.method,
+    headers: recordedHeaders(request.headers),
+    ...(body === undefined ? {} : { body })
+  });
+}
+
+/** Through the routes a sandbox registers, leasing from a pool of one. */
+function sendRecorded(request: Request) {
+  const pool = credentialHost({
+    storage: memoryStorage(),
+    credentials: () => ["sk-ant-oat01-A"]
+  });
+  const rule = claudeCodeSandboxEgress({ pool: () => pool, now: () => NOW });
+  return sandboxEgress(request, egressPlan([rule], SANDBOX).http, {}, [rule]);
+}
+
+/** The verified version's model call. */
+const RECORDED_CALL = capture.requests.find(
+  (request) =>
+    request.method === "POST" && request.path.startsWith("/v1/messages")
+)!;
+
+describe("claudeCodeSandboxEgress, on what the verified version sends", () => {
+  /**
+   * Every request, not only the model call: a request shape the swap missed
+   * would send the placeholder upstream.
+   */
+  it("swaps the credential on every request the verified version makes", async () => {
+    for (const request of capture.requests) {
+      const { calls } = upstream([]);
+      await sendRecorded(recorded(request));
+
+      expect(calls[0]?.headers.get("authorization")).toBe(
+        "Bearer sk-ant-oat01-A"
+      );
+      expect([...(calls[0]?.headers.values() ?? [])].join(" ")).not.toContain(
+        CREDENTIAL_PLACEHOLDER
+      );
+      vi.restoreAllMocks();
+    }
+  });
+
+  /**
+   * `claude-code-20250219` and `oauth-2025-04-20` are almost certainly part of
+   * what marks this as the sanctioned client — the same subscription credential
+   * 429s at zero tokens against the raw Messages API. Normalising or reordering
+   * these headers is the kind of helpfulness that would break the whole premise.
+   */
+  it("forwards the beta list and user-agent untouched", async () => {
+    const { calls } = upstream([]);
+    await sendRecorded(recorded(RECORDED_CALL, "{}"));
+
+    expect(calls[0]?.headers.get("anthropic-beta")).toBe(
+      RECORDED_CALL.headers["anthropic-beta"]
+    );
+    expect(calls[0]?.headers.get("user-agent")).toBe(
+      RECORDED_CALL.headers["user-agent"]
+    );
+  });
+
+  it("keeps the method, the query string and the body", async () => {
+    const { calls } = upstream([]);
+    await sendRecorded(recorded(RECORDED_CALL, '{"model":"claude-opus-5"}'));
+
+    expect(calls[0]?.method).toBe("POST");
+    expect(new URL(calls[0]!.url).search).toBe("?beta=true");
+    expect(await calls[0]?.text()).toBe('{"model":"claude-opus-5"}');
   });
 });
 
