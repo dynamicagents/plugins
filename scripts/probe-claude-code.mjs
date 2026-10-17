@@ -590,8 +590,12 @@ function runSession(bin, proxyUrl, { resume, fork, plan } = {}) {
     HOME: home,
     TMPDIR: tmp,
     ...launch.env,
+    // HTTPS too, though nothing should use it: a client that does reaches the
+    // proxy's `CONNECT` refusal and the report, rather than the network.
     HTTP_PROXY: proxyUrl,
-    http_proxy: proxyUrl
+    http_proxy: proxyUrl,
+    HTTPS_PROXY: proxyUrl,
+    https_proxy: proxyUrl
   };
   return new Promise((resolve) => {
     // A process group of its own, so a timeout reaches the CLI and whatever it
