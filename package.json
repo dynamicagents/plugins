@@ -99,7 +99,7 @@
   "devDependencies": {
     "@cloudflare/sandbox": "^1.0.1",
     "@cloudflare/think": "^0.20.2",
-    "@cloudflare/vitest-plugin": "^1.1.9",
+    "@cloudflare/vitest-plugin": "^1.4.4",
     "@dynamicagents/core": "^0.15.0",
     "@types/node": "^26.5.1",
     "agents": "^0.28.0",
@@ -112,7 +112,7 @@
     "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.11",
     "workers-ai-provider": "^4.0.0",
-    "wrangler": "^4.131.2",
+    "wrangler": "^4.151.1",
     "zod": "^4.6.5"
   },
   "engines": {

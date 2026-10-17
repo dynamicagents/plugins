@@ -131,6 +131,19 @@ it as an override and only the shape tests read from the file.
 
 ---
 
+## Why `vitest` stays a major behind
+
+**This suite passing on the newest vitest is not the test.** It runs through the
+Cloudflare Workers pool, as core's and starter's do, and on vitest 5 that pool
+crashes workerd mid-run and the test file it was running goes unreported — this
+package's test Worker is simply the smallest module graph of the three, which is a
+margin nobody has measured rather than immunity. core's `AGENTS.md` is the home of
+that ceiling and of what to re-check before lifting it, and core's `vitest` peer
+range bounds it for whatever release carries that range. Lift it here only in the
+round that lifts it there.
+
+---
+
 ## Updating Claude Code
 
 The `claude-code` plugin's sandbox egress (`src/claude-code/egress.ts`) and
