@@ -827,12 +827,10 @@ describe("guardrails", () => {
     }
   });
 
-  it("names a lost container rather than the comparison when nothing ran", async () => {
+  it("names the plumbing rather than the comparison when nothing ran", async () => {
     const { exec } = recorder({
       "rev-parse --verify --quiet": { success: true },
-      "rev-list --count": {
-        throws: Object.assign(new Error("gone"), { code: "EEXEC_LOST" })
-      }
+      "rev-list --count": { throws: new Error("gone") }
     });
     const { git, gitCalls } = gitRecorder();
     const result = await run(tools(exec, { git }), "repo_push", {
@@ -842,7 +840,7 @@ describe("guardrails", () => {
 
     // The same distinction the probes around it draw: a container that
     // vanished is not an answer about the branch.
-    expect(result).toMatch(/container was replaced/i);
+    expect(result).toContain("could not be run");
     expect(gitCalls).toHaveLength(0);
   });
 
@@ -1686,30 +1684,20 @@ describe("what the credential can reach", () => {
 });
 
 describe("a container that is not there", () => {
-  /** The shape `@cloudflare/computer` throws; `code` is what it sets deliberately. */
-  const lost = Object.assign(
-    new Error(
-      'Execution "e1" was lost when its container runtime was replaced'
-    ),
-    { code: "EEXEC_LOST" }
-  );
+  /** A call that never reached the container: the RPC itself failed. */
+  const lost = new Error("the container is unreachable");
 
-  it("explains a replaced container in git's terms, not the runtime's", async () => {
+  it("says the plumbing failed, and whether running it again is safe", async () => {
     const { exec } = recorder({ [ANY]: { throws: lost } });
     const result = await run(tools(exec), "repo_push", {
       dir: "/w/r",
       branch: "coder/x"
     });
 
-    expect(result).toContain("container was replaced");
-    // The checkout is a Durable Object's, so it survived — the model's most
-    // expensive wrong guess is that its work is gone.
-    expect(result).toMatch(/durable/i);
-    // And the fact the computer plugin's version of this note cannot give,
-    // because it does not know the lost command was git: whether running it
-    // again is safe.
+    expect(result).toContain("could not be run");
+    // What only this plugin knows: the lost command was git, so whether
+    // running it again is safe.
     expect(result).toMatch(/never force/);
-    expect(result).not.toContain("was lost when its container runtime");
   });
 
   it("returns the failure from every tool rather than throwing it", async () => {
@@ -1741,11 +1729,11 @@ describe("a container that is not there", () => {
       url: "https://github.com/o/r"
     });
 
-    expect(result).toContain("container was replaced");
+    expect(result).toContain("could not be run");
     // The dangerous reading. A failed probe means "nothing here, clone it" — and
-    // a replaced container is precisely when the *next* command lands on a
-    // working replacement, so the clone would get as far as a directory that
-    // already holds the checkout and fail on that instead.
+    // an unreachable container is precisely when the *next* command lands on a
+    // working one, so the clone would get as far as a directory that already
+    // holds the checkout and fail on that instead.
     expect(calls.some((c) => c.command.includes("clone"))).toBe(false);
   });
 
@@ -1774,7 +1762,7 @@ describe("a container that is not there", () => {
     // distinction `run` draws for the container, drawn again for the host. A
     // rejected push is data and reads as git's answer; only this reads as
     // infrastructure.
-    expect(result).toContain("container was replaced");
+    expect(result).toContain("could not be run");
   });
 
   it("survives a token the host cannot resolve while reporting a failure", async () => {

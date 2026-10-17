@@ -1,24 +1,22 @@
 # `@dynamicagents/plugins/computer`
 
-An agent's tools over a container workspace. The workspace itself — the Durable
-Object, its container, its git and its install — is
-[`/workspace`](../workspace/).
+An agent's tools over a container. The container itself — the Durable Object,
+its git and its install — is [`/sandbox`](../sandbox/), whose checkout is the
+container's own disk.
 
 ```ts
-import { computer, computerWorkspace } from "@dynamicagents/plugins/computer";
-
-const config = {
-  binding: env.WORKSPACE,
-  workspaceName: () => `${callerKey()}|${owner}/${repo}`,
-  shell: "bash"
-};
+import {
+  sandboxComputer,
+  sandboxWorkspace
+} from "@dynamicagents/plugins/computer";
 
 class Coder extends StepAgent<Env> {
-  override workspace = computerWorkspace(config, () =>
-    this.pluginContext().runtime()
+  override workspace = sandboxWorkspace(
+    { binding: this.env.CODING_SANDBOX, sandboxName: () => this.name },
+    () => this.pluginContext().runtime()
   );
   override getPlugins() {
-    return [computer(config)];
+    return [sandboxComputer({ shell: "bash" })];
   }
 }
 ```
@@ -27,27 +25,26 @@ Tools: `bash`, `grep`, `edit` — under Think's own names, so they replace Think
 built-ins. Think's `read`, `write`, `delete`, `find` and `list` stay Think's, and
 reach the container's tree through the agent's workspace.
 
-The tools reach the object only through `/workspace`'s client modules, never the
-object itself, so an agent holding them carries no container backend and no
-isomorphic-git.
+The tools reach the sandbox over RPC, never through its object, so an agent
+holding them carries no container backend.
 
 ## The agent's workspace is the container's
 
 Think's `read`, `write`, `edit` and `delete` work on whatever the agent's
 `this.workspace` is. An agent that installed this plugin but kept Think's own
 workspace would run `bash` in the container and `write` in its own SQLite, and
-nothing would say so. So the agent sets `workspace = computerWorkspace(config, …)`,
+nothing would say so. So the agent sets `workspace = sandboxWorkspace(config, …)`,
 and the plugin **refuses to start** on any other — a `PluginSetupError` naming what
 to set. Its tools then reach the container through that workspace rather than
 through their own config, so `bash` and Think's `write` always resolve the same one.
 
-`computerWorkspace` reads the workspace object's filesystem directly, without
-starting a container. Every call resolves the workspace the running turn names, so a
-sub-agent's reaches the checkout its parent prepared. It holds this plugin's rules:
-`.git` and `node_modules` are refused for reads and writes alike, a write is refused
-while the workspace cannot keep it, walks prune the skipped directories, and a read
-is never truncated — Think's `edit` writes back what it read. It offers no byte
-writes, so Think's evicted media and projected skills never land in a checkout.
+Every call resolves the sandbox the running turn names, so a sub-agent's reaches the
+checkout its parent prepared, and every call reaches the container: a file read
+wakes a stopped one. The workspace holds this plugin's rules: `.git` and
+`node_modules` are refused for reads and writes alike, walks prune the skipped
+directories, and a read is never truncated — Think's `edit` writes back what it
+read. It offers no byte writes, so Think's evicted media and projected skills never
+land in a checkout.
 
 `edit` is this plugin's rather than Think's because Think's is two calls — a read,
 then a write — and a lock inside the workspace cannot span them. The AI SDK runs one
@@ -55,33 +52,30 @@ step's tool calls concurrently, so two edits to one file would lose one. This `e
 holds the file's lock across both, and a `write` through the workspace takes the
 same lock.
 
-## `node_modules` is not in the workspace
+## `node_modules` and `.git` are left out
 
-It is a bind mount of the container's disk — see [`/workspace`](../workspace/).
-The file tools read the workspace, so they refuse `node_modules` paths and route to
-`bash`. Walks skip it with `.git`, and both skips are the store's: the workspace's
-`glob`, which Think's `find` walks with, and `grep`, which passes
-`["**/.git", "**/node_modules"]` to the store's `fs.grep`, hand it the two as
-exclusions, so an excluded directory is never descended into at all.
-
-## `.git` is off limits
-
-Present in the workspace, refused by the file tools anyway, and skipped by walks.
-Reading it tells the model less than [`/repo-github`](../repo-github/) does, and writing it
-corrupts the checkout. Repository work goes through the repo tools.
+`node_modules` is installed output, not source: the file tools refuse its paths and
+route to `bash`. `.git` is refused as policy: reading it tells the model less than
+[`/repo-github`](../repo-github/) does, and writing it corrupts the checkout. Walks
+skip both — `grep` and `find` are `ripgrep` in the container, as the agent, with the
+two pruned — so an excluded directory is never descended into at all. Hidden and
+ignored files are read.
 
 ## Searching
 
-`grep`, `find` and `list` read the durable workspace rather than the container, so
-they keep answering while it restarts or while an install runs — which is exactly
-when an agent would otherwise be blocked. `grep` is this plugin's: it searches inside
-the workspace object in one call, bounds its matches at the source and reports the
-`offset` that continues a cut result, where Think's own `grep` reads every file under
-the root through the workspace, one call per file. `find` and `list` are Think's.
+`grep` is this plugin's: one `ripgrep` in the container, its matches bounded at the
+source, and the `offset` that continues a cut result — where Think's own `grep`
+reads every file under the root through the workspace, one call per file. `find`
+and `list` are Think's. Searching a checkout's root needs no narrowing of its own:
+the walk prunes `.git` and `node_modules` before it reaches them, so a `path` or an
+`include` only narrows what you want to _see_.
 
-Searching a checkout's root needs no narrowing of its own: the store prunes `.git`
-and `node_modules` before the walk reaches them (above), so a `path` or an `include`
-only narrows what you want to _see_.
+## Commands
+
+A command runs as the agent under `timeout` at its limit, and a cancel marks it
+before signalling it, so one still starting the container never runs. While an
+install is in flight, a command that reads `node_modules` waits for it, up to
+`installGateMs`; anything else runs at once.
 
 ## The container is the trust boundary
 
@@ -90,47 +84,14 @@ repository it was asked to clone. `npm ci` executes that repository's lifecycle
 scripts, so "we only ran the install" is still running a stranger's code. Treat
 anything inside the container as reachable by both.
 
-Consequences worth stating outright:
-
-- **No secret belongs in `ComputerConfig.env`.** It is merged into every command
-  these tools run, and `bash`'s command is model-authored — `bash("printenv")` prints the lot,
-  and so does a `postinstall`. Use it for a registry host or a `CI` flag, not a key.
-  When an agent needs to _act_ with a credential, keep the credential on the Worker
-  and give the agent one tool that makes the call:
-  [`/repo-github`](../repo-github/)'s `repo_open_pr` is the worked example, and its token never
-  enters the container at all.
-- **`grep`'s `regex` compiles a model-authored pattern** and runs it over every
-  file under `path`, inside the Durable Object. A catastrophic-backtracking pattern
-  therefore spends that object's CPU budget rather than the container's. The
-  runtime's own limits bound it, and it costs the agent its own turn, but it is the
-  one value a model supplies here that reaches a compiler.
-
-## Over a sandbox
-
-The same tools run over a [`/sandbox`](../sandbox/) object, whose checkout is the container's own
-disk:
-
-```ts
-import { sandboxComputer, sandboxWorkspace } from "@dynamicagents/plugins/computer";
-
-override workspace = sandboxWorkspace(
-  { binding: this.env.CODING_SANDBOX, sandboxName: () => this.name },
-  () => this.pluginContext().runtime()
-);
-// …
-sandboxComputer(config)
-```
-
-What changes is where everything happens. Every call reaches the container, and a file read wakes
-a stopped one. `grep` and `find` are `ripgrep` there, as the agent: hidden and ignored files are
-read, and `.git` and `node_modules` are pruned, as the workspace's walk does. A command runs under
-`timeout` at its limit, and a cancel marks it before signalling it, so one still starting the
-container never runs. The model is told the checkout is the
-container's disk, and nothing about a mount. `computer` refuses a sandbox's workspace and
-`sandboxComputer` a workspace's, so the agent's two halves cannot disagree.
+**No secret belongs in `ComputerToolsConfig.env`.** It is merged into every command
+these tools run, and `bash`'s command is model-authored — `bash("printenv")` prints
+the lot, and so does a `postinstall`. Use it for a registry host or a `CI` flag, not
+a key. When an agent needs to _act_ with a credential, keep the credential on the
+Worker and give the agent one tool that makes the call:
+[`/repo-github`](../repo-github/)'s `repo_open_pr` is the worked example, and its
+token never enters the container at all.
 
 ## Requirements
 
-[`/workspace`](../workspace/)'s: a workspace object, the Workers **Paid** plan, and
-`@cloudflare/computer`. Over a sandbox, [`/sandbox`](../sandbox/)'s, with `ripgrep`, `timeout` and
-`pkill` in the image.
+[`/sandbox`](../sandbox/)'s, with `ripgrep`, `timeout` and `pkill` in the image.

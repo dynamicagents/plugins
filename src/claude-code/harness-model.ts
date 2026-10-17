@@ -12,21 +12,70 @@ import {
   decodeSessionId,
   type RunEnd
 } from "./harness-wire.js";
+import type { ClaudeCodeResult, RateLimitInfo } from "./events.js";
 import {
   lastUserText,
   reportingModel,
   type CallOptions,
   type LanguageModelV3
 } from "./language-model.js";
-import type { SessionEnd, SessionOutcome, SessionRecord } from "./model.js";
+
+/** How one turn of a session ended. */
+export interface SessionEnd {
+  exitCode: number;
+  /** Absent when the process died without ever emitting a `result` line. */
+  result?: ClaudeCodeResult;
+  /** Bounded, and only when there is no `result` to explain the exit. */
+  stderr?: string;
+  /** The subscription bucket as the client last reported it, if it did. */
+  rateLimit?: RateLimitInfo;
+  /**
+   * The Claude Code session id, from the `init` line by way of the daemon's
+   * parser.
+   *
+   * Here as well as on `result` because the sessions worth continuing are often
+   * the ones with no result: a session ended by its time limit or a cancel
+   * reports none, and this is then the only handle to the conversation it got
+   * half-way through.
+   */
+  sessionId?: string;
+}
+
+/**
+ * A session's handle, as the host is told it.
+ *
+ * Told **twice**: once with the id alone, as soon as the session's `init` line
+ * names it, and once with the session's end. The first call is what makes a
+ * session that is about to be killed resumable at all; the second says how the
+ * conversation it left stands.
+ *
+ * So a host keys its record on `sessionId` and keeps an `end` once it has one: a
+ * recovered turn can report the same id again without an end, and a record that
+ * let that erase the end would forget how the session finished.
+ */
+export interface SessionRecord {
+  sessionId: string;
+  /** Absent on the first call; the session's end on the second. */
+  end?: SessionEnd;
+}
+
+/** What a run amounted to, handed to `report`. */
+export interface SessionOutcome {
+  /** The session's own end. */
+  session: SessionEnd;
+  /** The follow-up's end, when `followUp` asked for one. */
+  followUp?: SessionEnd;
+}
 
 /**
  * A Claude Code session in a sandbox, as a sub-agent's model.
  *
- * The shape of `./model.ts` `claudeCodeModel` — the session is the model, the
- * report is its only text, every step's outcome is kept in the sub-agent's
- * storage under the same keys — over a sandbox rather than a workspace. What
- * that changes is what can be lost:
+ * Claude Code brings its own tools, its own loop and its own context, so there
+ * is nothing for Think to drive but the one call that runs it — and making that
+ * call the model is what puts the session under Think's recovery. The report
+ * is its only text: what the session says as it works goes to the parent as
+ * notes, through `note`. Every step's outcome is kept in the sub-agent's
+ * storage, so a recovered turn picks up where it was. What can be lost:
  *
  * - **Nothing streams.** The session runs as a harness operation the sandbox
  *   keeps, and this polls it. A poll is short, so a reset of either object
@@ -98,12 +147,29 @@ export interface ClaudeCodeHarnessModelOptions {
     detail?: ArtifactEntryDetail,
     at?: number
   ) => Promise<void>;
-  /** As `./model.ts` `ClaudeCodeModelOptions.onSession`. */
+  /**
+   * The session's handle, as soon as there is one and again when the session
+   * ends — see {@link SessionRecord}.
+   *
+   * Best-effort, like `note`: a throw is logged and the run goes on. Recording a
+   * handle is what makes a later run able to continue this conversation, and
+   * losing that is not worth losing the session over.
+   */
   onSession?: (record: SessionRecord) => Promise<void>;
-  /** As `./model.ts` `ClaudeCodeModelOptions.brief`. */
+  /**
+   * The session's prompt, from the task the parent sent. Defaults to the task.
+   *
+   * Runs once per run, before the session starts, and its answer is kept. A
+   * throw fails the run with its message — how a host refuses a run it cannot
+   * pay for, or has nothing to work in.
+   */
   brief?: (task: string) => Promise<string>;
-  /** As `./model.ts` `ClaudeCodeModelOptions.followUp`. */
+  /**
+   * One more turn for a session that ended, or `undefined`. Asked once; its
+   * answer is kept, so a resumed run does not ask again.
+   */
   followUp?: (session: SessionEnd) => Promise<string | undefined>;
+  /** The text the parent receives. Run once, and kept. */
   report: (outcome: SessionOutcome) => Promise<string>;
 }
 
@@ -167,7 +233,11 @@ export function claudeCodeHarnessModel(
     followUpEnd: key("follow-up-end"),
     report: key("report"),
     turn: (step: Step) => key(`turn:${step}`),
-    /** `./model.ts`'s, which marks a run that started on a workspace. */
+    /**
+     * Where a run that started in a workspace container kept its place. Such a
+     * run can still be resumed by a task waiting on input, and the guard below
+     * is what stops it being briefed again.
+     */
     cursor: key("cursor")
   };
 
@@ -185,7 +255,7 @@ export function claudeCodeHarnessModel(
     }
     const signal = call.abortSignal;
 
-    /** As `./model.ts`: set only once the host has taken the handle. */
+    /** Set only once the host has taken the handle, so a failed record is tried again. */
     let announced = "";
     const announce = async (record: SessionRecord): Promise<void> => {
       const sink = options.onSession;
@@ -396,7 +466,7 @@ export function claudeCodeHarnessModel(
               `claude-code: the sandbox settled the session with no end it could read: ${String(result.text).slice(0, 200)}`
             );
           }
-          // No code is a process a signal ended, as the workspace path has it.
+          // No code is a process a signal ended.
           return sessionEnd(end, end.exitCode ?? -1, state.sessionId);
         }
         const reason = result.reason ?? "";

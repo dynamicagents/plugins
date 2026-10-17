@@ -1,29 +1,26 @@
 import { describe, it, expect, vi } from "vitest";
-import type { WorkspaceClient } from "@cloudflare/computer";
+import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import { SANDBOX_RUNTIME_KEY } from "../sandbox/name.js";
+import { testPluginContext } from "../../test/helpers.js";
+import type { ComputerClient } from "./client.js";
 import {
   buildComputerTools,
-  computer,
-  computerWorkspace,
-  isComputerWorkspace,
-  type ComputerConfig
+  sandboxComputer,
+  sandboxWorkspace,
+  type SandboxComputerHost
 } from "./index.js";
-import {
-  WORKSPACE_RUNTIME_KEY,
-  type WorkspaceAdvisory
-} from "../workspace/index.js";
-import { testPluginContext } from "../../test/helpers.js";
+import { routedWorkspace, workspaceRoute } from "./proxy.js";
 
 /**
- * The container's workspace as Think's `read`, `write` and `delete` see it.
+ * The container's checkout as Think's `read`, `write` and `delete` see it.
  *
- * A fake binding stands in for the Durable Object: what is this plugin's own is
- * which workspace a call reaches, what it refuses, and what it hands back — not
- * the filesystem, which is Cloudflare's. The workspace-object spec runs the same
- * calls against a real one.
+ * A fake route stands in for the sandbox: what is this plugin's own is which
+ * sandbox a call reaches, what it refuses, and what it hands back — not the
+ * filesystem. `./sandbox.spec.ts` runs the client against a fake container.
  */
 
 interface Seen {
-  /** Every workspace name a call opened, in order. */
+  /** Every sandbox name a call opened, in order. */
   opened: string[];
   finds: Array<{
     dir: string;
@@ -103,44 +100,25 @@ function fake(
     }
   };
 
-  const binding = {
-    idFromName: (name: string) => name,
-    get: (name: string) => ({
-      __getWorkspaceFsStub: async () => {
-        seen.opened.push(name);
-        return {
-          fs,
-          // `getWorkspace` reads the backend list and whether there are assets
-          // once, when it opens the stub, rather than per query — so a stub
-          // owes both even on a path that never runs a command. No backend
-          // connects on the filesystem path, which is what makes it cheap
-          // enough to front every file tool, so the empty list is the real
-          // answer here and not a stand-in. See `WorkspaceObjectBase`'s
-          // `__getWorkspaceFsStub` in `../workspace/object.ts`.
-          runtime: { backends: async () => [] },
-          hasAssets: false,
-          useThink: false,
-          [Symbol.dispose]: () => {}
-        };
-      },
-      advisories: async () => advisories
-    })
-  } as unknown as ComputerConfig["binding"];
-
-  const config: ComputerConfig = {
-    binding,
-    workspaceName: () => "caller|owner/repo"
+  const name = () => "caller|owner/repo";
+  const route = {
+    name,
+    open: async (opened: string) => {
+      seen.opened.push(opened);
+      return { fs, [Symbol.dispose]: () => {} } as unknown as ComputerClient;
+    },
+    advisories: async () => advisories
   };
-  return { config, files, seen, fs, writes };
+  const workspace = routedWorkspace(route, "/workspace");
+  return { route, workspace, files, seen, fs, writes };
 }
 
-describe("computerWorkspace", () => {
+describe("routedWorkspace", () => {
   it("reads a file whole, however large", async () => {
     // Think's `edit` writes back what it read, so a truncated read is a
     // truncated file.
     const body = "HEAD" + "x".repeat(200_000) + "TAIL";
-    const { config } = fake({ "/workspace/repo/big.js": body });
-    const ws = computerWorkspace(config);
+    const { workspace: ws } = fake({ "/workspace/repo/big.js": body });
 
     expect(await ws.readFile("/workspace/repo/big.js")).toBe(body);
     expect(
@@ -151,8 +129,7 @@ describe("computerWorkspace", () => {
   });
 
   it("answers null for a file that is not there, as Think's tools expect", async () => {
-    const { config } = fake();
-    const ws = computerWorkspace(config);
+    const { workspace: ws } = fake();
 
     expect(await ws.readFile("/workspace/repo/nope.ts")).toBeNull();
     expect(await ws.readFileBytes("/workspace/repo/nope.ts")).toBeNull();
@@ -160,8 +137,8 @@ describe("computerWorkspace", () => {
   });
 
   it("describes a file the way Think's tools read one", async () => {
-    const { config } = fake({ "/workspace/repo/a.ts": "const a = 1;" });
-    const stat = await computerWorkspace(config).stat("/workspace/repo/a.ts");
+    const { workspace } = fake({ "/workspace/repo/a.ts": "const a = 1;" });
+    const stat = await workspace.stat("/workspace/repo/a.ts");
 
     expect(stat).toMatchObject({
       path: "/workspace/repo/a.ts",
@@ -172,9 +149,8 @@ describe("computerWorkspace", () => {
   });
 
   /**
-   * Reads as well as writes. `.git` is policy and `node_modules` is a fact —
-   * see `./paths.ts` — and Think's tools reach the workspace without passing
-   * through this plugin's own.
+   * Reads as well as writes — see `./paths.ts` — since Think's tools reach the
+   * workspace without passing through this plugin's own.
    */
   it.each([
     ["/workspace/repo/.git/config", "repo_diff"],
@@ -182,8 +158,7 @@ describe("computerWorkspace", () => {
   ])(
     "refuses %s for every call, without opening anything",
     async (path, route) => {
-      const { config, seen, files } = fake({ [path]: "x" });
-      const ws = computerWorkspace(config);
+      const { workspace: ws, seen, files } = fake({ [path]: "x" });
 
       for (const call of [
         () => ws.readFile(path),
@@ -201,28 +176,8 @@ describe("computerWorkspace", () => {
     }
   );
 
-  /**
-   * Thrown, not returned: Think's `write` reports a thrown error to the model,
-   * and a write that returned would read as one that landed.
-   */
-  it("refuses a write the workspace cannot keep", async () => {
-    const { config, files } = fake({}, [
-      { kind: "storage-exhausted", bytes: 8.6e9, capBytes: 8e9 }
-    ]);
-    const ws = computerWorkspace(config);
-
-    for (const call of [
-      () => ws.writeFile("/workspace/repo/a.ts", "x"),
-      () => ws.mkdir("/workspace/repo/src", { recursive: true }),
-      () => ws.rm("/workspace/repo/a.ts")
-    ]) {
-      await expect(call()).rejects.toThrow("Nothing was written");
-    }
-    expect(files.has("/workspace/repo/a.ts")).toBe(false);
-  });
-
   it("still writes while an install is broken, which does not lose writes", async () => {
-    const { config, files } = fake({}, [
+    const { workspace, files } = fake({}, [
       {
         kind: "deps-broken",
         command: "npm ci",
@@ -231,13 +186,13 @@ describe("computerWorkspace", () => {
       }
     ]);
 
-    await computerWorkspace(config).writeFile("/workspace/repo/a.ts", "x");
+    await workspace.writeFile("/workspace/repo/a.ts", "x");
     expect(files.get("/workspace/repo/a.ts")).toBe("x");
   });
 
   it("passes a listing's bounds through to the store", async () => {
-    const { config, seen } = fake();
-    const entries = await computerWorkspace(config).readDir("/workspace/repo", {
+    const { workspace, seen } = fake();
+    const entries = await workspace.readDir("/workspace/repo", {
       limit: 50,
       offset: 10
     });
@@ -253,8 +208,7 @@ describe("computerWorkspace", () => {
 
   /** Think's `find` cuts to 200 after `glob` returns; the walk stops at the source. */
   it("walks a glob from its fixed prefix, bounded, with .git and node_modules pruned", async () => {
-    const { config, seen } = fake();
-    const ws = computerWorkspace(config);
+    const { workspace: ws, seen } = fake();
 
     await ws.glob("/workspace/repo/src/**/*.ts");
     await ws.glob("*.md");
@@ -263,38 +217,21 @@ describe("computerWorkspace", () => {
       {
         dir: "/workspace/repo/src",
         pattern: "**/*.ts",
-        exclude: ["**/.git", "**/node_modules", "**/.claude-sessions"],
+        exclude: ["**/.git", "**/node_modules"],
         limit: 201
       },
       {
         dir: "/workspace",
         pattern: "*.md",
-        exclude: ["**/.git", "**/node_modules", "**/.claude-sessions"],
+        exclude: ["**/.git", "**/node_modules"],
         limit: 201
       }
     ]);
   });
 
   it("offers no byte writes, so Think writes nothing of its own into a checkout", () => {
-    const { config } = fake();
-    expect("writeFileBytes" in computerWorkspace(config)).toBe(false);
-  });
-
-  /**
-   * A parent names its workspace from config; a sub-agent reads the one its
-   * parent prepared out of `runtime()`. Read per call, because the runtime
-   * belongs to the turn.
-   */
-  it("reaches the workspace the running turn names", async () => {
-    const { config, seen } = fake({ "/workspace/repo/a.ts": "x" });
-    let runtime: Record<string, unknown> | undefined = undefined;
-    const ws = computerWorkspace(config, () => runtime);
-
-    await ws.readFile("/workspace/repo/a.ts");
-    runtime = { [WORKSPACE_RUNTIME_KEY]: "caller|owner/repo#w1" };
-    await ws.readFile("/workspace/repo/a.ts");
-
-    expect(seen.opened).toEqual(["caller|owner/repo", "caller|owner/repo#w1"]);
+    const { workspace } = fake();
+    expect("writeFileBytes" in workspace).toBe(false);
   });
 
   /**
@@ -307,27 +244,28 @@ describe("computerWorkspace", () => {
    * land: unlocked, it would, before the edit's write.
    */
   async function raceAnEdit(
-    other: (workspace: ReturnType<typeof computerWorkspace>) => Promise<void>
+    other: (workspace: ReturnType<typeof routedWorkspace>) => Promise<void>
   ) {
     const path = "/workspace/repo/a.ts";
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
-    const { config, files, fs, writes } = fake(
+    const { route, workspace, files, writes } = fake(
       { [path]: "const a = 1;\n" },
       [],
       held
     );
-    const client = async () =>
-      ({ fs, [Symbol.dispose]: () => {} }) as unknown as WorkspaceClient;
-    const tools = buildComputerTools(client, config, undefined, client, () =>
-      config.workspaceName()
+    const tools = buildComputerTools(
+      () => route.open(route.name()),
+      {},
+      undefined,
+      route.name
     );
 
     const editing = (
       tools.edit!.execute as (i: unknown, o: unknown) => Promise<string>
     )({ path, old_string: "1", new_string: "2" }, {});
     await vi.waitFor(() => expect(writes.held).toBe(true));
-    const racing = other(computerWorkspace(config));
+    const racing = other(workspace);
     await new Promise((resolve) => setTimeout(resolve, 20));
     release();
     await Promise.all([editing, racing]);
@@ -347,43 +285,84 @@ describe("computerWorkspace", () => {
   });
 });
 
+/** A sandbox whose files are all `content`, recording each name it is reached by. */
+function sandboxHolding(content: string) {
+  const reached: string[] = [];
+  const binding = {
+    getByName: (name: string) => {
+      reached.push(name);
+      return {
+        readFile: async () => new TextEncoder().encode(content),
+        writeFile: async () => undefined,
+        stat: async () => ({
+          type: "file",
+          size: content.length,
+          modifiedAt: 1
+        }),
+        advisories: async () => []
+      };
+    }
+  } as unknown as DurableObjectNamespace<SandboxComputerHost>;
+  return { binding, reached };
+}
+
+describe("sandboxWorkspace", () => {
+  /**
+   * A parent names its sandbox from config; a sub-agent reads the one its
+   * parent prepared out of `runtime()`. Read per call, because the runtime
+   * belongs to the turn.
+   */
+  it("reaches the sandbox the running turn names", async () => {
+    const { binding, reached } = sandboxHolding("x");
+    let runtime: Record<string, unknown> | undefined = undefined;
+    const ws = sandboxWorkspace(
+      { binding, sandboxName: () => "caller|owner/repo" },
+      () => runtime
+    );
+
+    await ws.readFile("/workspace/repo/a.ts");
+    runtime = { [SANDBOX_RUNTIME_KEY]: "caller|owner/repo#w1" };
+    await ws.readFile("/workspace/repo/a.ts");
+
+    expect(reached).toEqual(["caller|owner/repo", "caller|owner/repo#w1"]);
+  });
+});
+
 /**
- * `computer()`'s tools reach the workspace through the agent's own, not their
- * own config. A workspace built from another config, or without the runtime a
- * sub-agent needs, is then the wrong workspace for both — never one tree for
- * `bash` and another for Think's `write`.
+ * The tools reach the sandbox through the agent's own workspace, not their own
+ * config. A workspace built without the runtime a sub-agent needs is then the
+ * wrong sandbox for both — never one tree for `bash` and another for Think's
+ * `write`.
  */
 describe("the tools and the workspace", () => {
-  it("reach the one workspace the agent's workspace names", async () => {
-    const theirs = fake({ "/workspace/repo/a.ts": "x" });
-    const ours = fake();
-    const runtime = { [WORKSPACE_RUNTIME_KEY]: "caller|owner/repo#w1" };
-    const workspace = computerWorkspace(theirs.config, () => runtime);
-    const tools = computer(ours.config).tools!(
+  it("reach the one sandbox the agent's workspace names", async () => {
+    const { binding, reached } = sandboxHolding("const a = 1;\n");
+    const runtime = { [SANDBOX_RUNTIME_KEY]: "caller|owner/repo#w1" };
+    const workspace = sandboxWorkspace(
+      { binding, sandboxName: () => "caller|owner/repo" },
+      () => runtime
+    );
+    const tools = sandboxComputer({}).tools!(
       testPluginContext({ workspace: () => workspace })
     );
 
-    await (tools.grep!.execute as (i: unknown, o: unknown) => Promise<string>)(
-      { query: "x", path: "/workspace/repo" },
+    await (tools.edit!.execute as (i: unknown, o: unknown) => Promise<string>)(
+      { path: "/workspace/repo/a.ts", old_string: "1", new_string: "2" },
       {}
     );
     await workspace.readFile("/workspace/repo/a.ts");
 
-    expect(theirs.seen.opened).toEqual([
-      "caller|owner/repo#w1",
-      "caller|owner/repo#w1"
-    ]);
-    expect(ours.seen.opened).toEqual([]);
+    expect(new Set(reached)).toEqual(new Set(["caller|owner/repo#w1"]));
   });
 });
 
-describe("isComputerWorkspace", () => {
+describe("workspaceRoute", () => {
   it("knows its own and nothing else", () => {
-    const { config } = fake();
-    expect(isComputerWorkspace(computerWorkspace(config))).toBe(true);
-    expect(isComputerWorkspace({})).toBe(false);
-    expect(isComputerWorkspace(undefined)).toBe(false);
+    const { workspace } = fake();
+    expect(workspaceRoute(workspace)).toBeDefined();
+    expect(workspaceRoute({})).toBeUndefined();
+    expect(workspaceRoute(undefined)).toBeUndefined();
     // A copy of the methods is not the workspace: the brand does not spread.
-    expect(isComputerWorkspace({ ...computerWorkspace(config) })).toBe(false);
+    expect(workspaceRoute({ ...workspace })).toBeUndefined();
   });
 });

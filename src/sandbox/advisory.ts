@@ -2,11 +2,7 @@ import type { InstallState } from "./install-plan.js";
 import { humanMs } from "./format.js";
 
 /**
- * What a caller must not assume about a workspace, and how to say it.
- *
- * The same module as `../workspace/advisory.ts` without its storage ceiling,
- * which a checkout on the container's own disk does not have; the workspace
- * copy goes with that subpath.
+ * What a caller must not assume about a sandbox's checkout, and how to say it.
  *
  * ## Why this is not `InstallState`
  *

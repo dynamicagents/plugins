@@ -24,30 +24,23 @@
 
   "durable_objects": {
     "bindings": [
-      // No `containers` entry paired with it: the pool cannot start a container,
-      // and the workspace specs are written against exactly that — a host whose
-      // `runtime.exec` fails the way it fails when a container is unreachable.
-      { "name": "TEST_WORKSPACE", "class_name": "TestWorkspaceDO" },
       { "name": "TEST_SANDBOX", "class_name": "TestSandboxDO" },
       { "name": "TEST_SANDBOX_HTTPS", "class_name": "TestSandboxHttpsDO" },
       { "name": "TEST_SANDBOX_GIT", "class_name": "TestSandboxGitDO" }
     ]
   },
 
-  // `new_sqlite_classes`, not `new_classes`: the workspace keeps its files in
+  // `new_sqlite_classes`, not `new_classes`: the harness keeps its sessions in
   // `ctx.storage.sql`, which only exists on a SQLite-backed Durable Object.
+  // Never deployed, so one tag.
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TestWorkspaceDO"]
-    },
-    {
-      "tag": "v2",
-      "new_sqlite_classes": ["TestSandboxDO", "TestSandboxHttpsDO"]
-    },
-    {
-      "tag": "v3",
-      "new_sqlite_classes": ["TestSandboxGitDO"]
+      "new_sqlite_classes": [
+        "TestSandboxDO",
+        "TestSandboxHttpsDO",
+        "TestSandboxGitDO"
+      ]
     }
   ]
 }

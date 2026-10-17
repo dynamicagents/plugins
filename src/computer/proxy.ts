@@ -1,57 +1,33 @@
 import type { WorkspaceLike } from "@cloudflare/think";
-import type { WorkspaceAdvisory } from "../workspace/advisory.js";
+import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
 import type { ComputerClient } from "./client.js";
 import { withFileLock } from "./file-lock.js";
 import { writeGate } from "./gate.js";
-import {
-  openWorkspace,
-  openWorkspaceFs,
-  workspaceNameFromRuntime
-} from "../workspace/open.js";
-import type { WorkspaceHost } from "../workspace/open.js";
 import { guardPath, WALK_SKIPS } from "./paths.js";
-import type { ComputerConfig } from "./index.js";
 
 /**
- * The container's workspace, as the agent's own `this.workspace`.
+ * The container's checkout, as the agent's own `this.workspace`.
  *
  * Think's `read`, `write`, `edit` and `delete` run against whatever an agent's
- * workspace is, and `computer()`'s tools replace only the ones it names. So an
+ * workspace is, and the computer tools replace only the ones they name. So an
  * agent with a container and Think's default workspace would run `bash` in the
  * container and `write` in its own SQLite, and nothing would say so. An agent
- * that installs `computer` sets this instead:
- *
- * ```ts
- * override workspace = computerWorkspace(config, () => this.pluginContext().runtime());
- * ```
- *
- * and `computer(config).tools(ctx)` refuses to start without it — and reaches
- * the workspace through it, so the tools and Think's file tools cannot resolve
+ * that installs the tools sets its workspace to `sandboxWorkspace`
+ * (`./sandbox.ts`), and the plugin refuses to start without it — and reaches
+ * the container through it, so the tools and Think's file tools cannot resolve
  * two different ones.
- *
- * Built on the workspace's own filesystem, not on `@cloudflare/computer`'s
- * Think adapter: that one's `glob` and `readDir` read every entry, and its
- * `writeFile` knows nothing of the paths and the states this plugin refuses.
  */
 
 /**
- * Where a {@link computerWorkspace} sends each call, carried on it under
- * {@link ROUTE}. `computer()`'s tools route through this rather than through
- * their own config, which is what makes a workspace built from another config,
- * or without its runtime, a wrong workspace for both rather than a split.
- *
- * A sandbox's workspace carries one too — `./sandbox.ts` — so the tools reach
- * whichever kind the agent's workspace is.
+ * Where a workspace sends each call, carried on it under {@link ROUTE}. The
+ * tools route through this rather than through their own config, which is
+ * what makes a workspace built from another config, or without its runtime, a
+ * wrong workspace for both rather than a split.
  */
 export interface WorkspaceRoute {
-  /** Which plugin's tools and context this workspace is for. */
-  kind: "workspace" | "sandbox";
-  /** The workspace the running turn names. Read per call. */
+  /** The sandbox the running turn names. Read per call. */
   name(): string;
-  /** For a command: the container started. */
   open(name: string): Promise<ComputerClient>;
-  /** For the file tools, which a workspace may serve without its container. */
-  openFs(name: string): Promise<ComputerClient>;
   advisories(name: string): Promise<readonly WorkspaceAdvisory[]>;
 }
 
@@ -70,15 +46,10 @@ type FileInfo = Awaited<ReturnType<WorkspaceLike["glob"]>>[number];
  */
 const GLOB_LIMIT = 201;
 
-/** The route of a workspace {@link computerWorkspace} built, or `undefined`. */
+/** The route of a workspace {@link routedWorkspace} built, or `undefined`. */
 export function workspaceRoute(workspace: unknown): WorkspaceRoute | undefined {
   if (typeof workspace !== "object" || workspace === null) return undefined;
   return (workspace as Record<symbol, WorkspaceRoute | undefined>)[ROUTE];
-}
-
-/** Whether `workspace` is one {@link computerWorkspace} built. */
-export function isComputerWorkspace(workspace: unknown): boolean {
-  return workspaceRoute(workspace) !== undefined;
 }
 
 /**
@@ -100,25 +71,6 @@ async function orNull<T>(read: Promise<T>): Promise<T | null> {
     if (isMissing(err)) return null;
     throw err;
   }
-}
-
-/**
- * `stat`, with a missing path answered as `null`.
- *
- * Asked of the stub's own `statOrNull` where it has one, the way
- * {@link file://../workspace/read.ts pathExists} asks for `exists`: Think's
- * `read` stats before it reads, so a missing file is an ordinary answer here,
- * and a `stat` that throws across the boundary leaves the object an unhandled
- * rejection to log for it.
- */
-function statOrNull(fs: ComputerClient["fs"], path: string) {
-  // Called as a method, never through `.call`: on an RPC stub `.call` is read
-  // as a remote method.
-  const remote = fs as {
-    statOrNull?: (p: string) => ReturnType<ComputerClient["fs"]["stat"]>;
-  };
-  if (typeof remote.statOrNull === "function") return remote.statOrNull(path);
-  return orNull(fs.stat(path));
 }
 
 async function drain(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
@@ -163,35 +115,7 @@ function splitGlob(
   };
 }
 
-/**
- * @param runtime The running sub-agent's `runtime()`, read per call — how a
- *   sub-agent's file tools reach the workspace its parent prepared. A parent's
- *   is `undefined`, and {@link ComputerConfig.workspaceName} names it.
- */
-export function computerWorkspace(
-  config: ComputerConfig,
-  runtime?: () => unknown
-): WorkspaceLike {
-  const host = (name: string): DurableObjectStub<WorkspaceHost> =>
-    config.binding.get(config.binding.idFromName(name));
-  return routedWorkspace(
-    {
-      kind: "workspace",
-      // Resolved per call, never memoized: the name belongs to the turn, and a
-      // stale one would route this caller's writes into another's files.
-      name: () =>
-        workspaceNameFromRuntime(runtime?.()) ?? config.workspaceName(),
-      open: (name) => openWorkspace(host(name)),
-      // Opened without starting a container — see
-      // `WorkspaceHost.__getWorkspaceFsStub`.
-      openFs: (name) => openWorkspaceFs(host(name)),
-      advisories: (name) => host(name).advisories()
-    },
-    config.cwd ?? "/workspace"
-  );
-}
-
-/** Think's file tools over `route`, carrying it for `computer()` to find. */
+/** Think's file tools over `route`, carrying it for the computer tools to find. */
 export function routedWorkspace(
   route: WorkspaceRoute,
   cwd: string
@@ -205,7 +129,7 @@ export function routedWorkspace(
     const refusal = guardPath(path, verb);
     if (refusal) throw new Error(refusal);
     const name = route.name();
-    using ws = await route.openFs(name);
+    using ws = await route.open(name);
     return await body(ws.fs, name);
   };
 
@@ -242,7 +166,7 @@ export function routedWorkspace(
 
     stat: (path: string) =>
       withFs(path, "read", async (fs) => {
-        const stat = await statOrNull(fs, path);
+        const stat = await orNull(fs.stat(path));
         return stat === null ? null : fileInfo({ ...stat, path });
       }),
 

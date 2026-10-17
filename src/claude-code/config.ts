@@ -1,10 +1,6 @@
 /**
- * Everything one deployment of this plugin tunes, in one shape.
- *
- * Config at instantiation rather than an `env` argument, for the reason the
- * whole package works this way: `Env` is the ambient interface `wrangler types`
- * generates into a *consumer's* app and does not exist here, and on Workers
- * there is no module-scope `env` to read anyway.
+ * What one deployment tunes about its sessions, in one shape: the daemon reads
+ * the CLI's half, and the sub-agent's model the ceiling.
  */
 /**
  * The permission modes `claude --permission-mode` accepts.
@@ -59,27 +55,6 @@ export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ClaudeCodeConfig {
-  /**
-   * The credential pool, in priority order — index 0 is tried first.
-   *
-   * A thunk so a rotated secret is picked up without rebuilding the plugin list.
-   * **These values never enter the container** — one is read on the Worker side
-   * by the egress gateway and swapped into the outbound request. The container
-   * gets {@link file://./placeholder.ts CREDENTIAL_PLACEHOLDER}.
-   *
-   * `claude setup-token` OAuth credentials. There is deliberately no API-key
-   * path: the subscription credential is the one that reaches frontier models
-   * through this client, and a second path would be a second thing to get wrong.
-   *
-   * **Why a pool.** A subscription has a rolling 5-hour bucket and a weekly one,
-   * neither readable. Rather than estimate spend against them, the gateway uses
-   * the first usable entry and moves on when Anthropic says that one is done —
-   * see {@link file://./credentials.ts}. An array of one is valid and behaves
-   * exactly as a single credential did: used until its bucket empties, then
-   * refused with the reset time.
-   */
-  credentials: () => readonly string[];
-
   /** Which model the session runs. Unset, Claude Code picks its own default. */
   model?: string;
 
@@ -104,8 +79,7 @@ export interface ClaudeCodeConfig {
    * Advisory, and the distinction is the reason there is no turn ceiling beside
    * them — see the README on what this package deliberately does not do. That
    * tree is invisible to the agent running the session, so it multiplies
-   * whatever these say; {@link timeoutMs} is the ceiling that actually holds, because the
-   * container runtime enforces it.
+   * whatever these say; {@link timeoutMs} is the ceiling that actually holds.
    */
   maxSubagentDepth?: number;
   maxConcurrentSubagents?: number;
@@ -130,70 +104,20 @@ export interface ClaudeCodeConfig {
    *
    * What makes bypassing acceptable is not this flag being careful. It is that
    * the container has nothing to protect: it holds no credential — the real one
-   * is swapped in by the egress gateway on the Worker side — and it already runs
-   * a cloned repository's `postinstall` and its test suite, which is arbitrary
+   * is swapped in by the egress on the Worker side — and it already runs a
+   * cloned repository's `postinstall` and its test suite, which is arbitrary
    * code execution by design. Gating the agent's own edits while that stands
    * open buys nothing. Containment is the credential swap.
    *
-   * See {@link file://./run.ts buildLaunch} for the root guard this mode trips,
-   * which is the other half of making it work.
-   *
-   * A run may set its own, over this one: a planning run's is `plan` — see
-   * {@link file://./model.ts ClaudeCodeModelOptions.permissionMode}.
+   * A run may set its own, over this one: a planning run's is `plan`, as its run
+   * header says — see `../sandbox/header.ts`.
    */
   permissionMode?: PermissionMode;
 
   /**
-   * Restrict the container's egress to these hosts, plus `api.anthropic.com`.
-   *
-   * **Omit it and egress is unrestricted, which is the default.** An empty array
-   * is not the same thing — it means Anthropic only. See
-   * {@link file://./egress.ts EgressConfig.restrictToHosts} for the full table
-   * and for why open is the default.
-   *
-   * A restriction that leaves out `github.com` and `api.github.com` leaves out
-   * {@link githubToken} with them.
-   */
-  restrictToHosts?: readonly string[];
-
-  /**
-   * GitHub as the deployment's account, for a session that pushes its branch,
-   * opens its pull request and answers its review. Read per request, on the
-   * Worker side.
-   *
-   * The session gets a placeholder as `GH_TOKEN` and as git's credential, and
-   * the egress gateway swaps in this token for GitHub's hosts only — see
-   * {@link file://./github.ts}. Unset, `gh` and git reach GitHub anonymously.
-   */
-  githubToken?: () => string | undefined;
-
-  /**
-   * Ceiling on the whole session, enforced by the container runtime.
-   *
-   * **Must stay below the workspace's container-idle timer**, which is the
-   * invariant that has already caused one outage in this repository: two timers
-   * of similar length started moments apart, and whichever fired first destroyed
-   * the container the other depended on.
+   * How long a session may run before its sub-agent stops it — a ceiling on a
+   * session that has stopped making progress. See
+   * {@link file://./harness-model.ts DEFAULT_HARNESS_TIMEOUT_MS}.
    */
   timeoutMs?: number;
-
-  /** Extra environment for the session. Never secrets — see the README. */
-  env?: Record<string, string>;
-
-  /**
-   * Who the session's own git commits are attributed to.
-   *
-   * A session has a shell and a checkout, so it commits — and it amends,
-   * rebases and cherry-picks, none of which a host can intercept the way it
-   * names an identity on a commit it makes itself. Left unset, every one of
-   * those falls through to whatever config the checkout happens to carry, which
-   * is a value frozen whenever that checkout was created.
-   *
-   * See {@link file://./run.ts buildLaunch} for why this becomes an environment
-   * rather than a `git config`.
-   */
-  author?: { name: string; email: string };
 }
-
-/** Fifteen minutes, well under the coder workspace's 20-minute idle timer. */
-export const DEFAULT_TIMEOUT_MS = 15 * 60_000;

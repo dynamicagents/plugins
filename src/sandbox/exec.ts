@@ -4,17 +4,18 @@ import { sandboxNameFromRuntime } from "./name.js";
 
 /**
  * A shell in a sandbox, for a plugin that needs one but does not own the
- * container: `/repo-github`'s git, `/scratch`, a host's own scripts. The
- * counterpart of `/workspace`'s `workspaceExec`, and the same contract —
- * `success`, `stdout`, `stderr` and `exitCode` — so the plugins that take one
- * take either.
+ * container: `/repo-github`'s git, `/scratch`, a host's own scripts. It answers
+ * the contract those plugins take — `success`, `stdout`, `stderr` and
+ * `exitCode`.
  *
  * Every command runs as the agent, with every egress rule's `env`, and under
  * `timeout` at its limit: the sandbox's own `exec` can only stop waiting, and a
  * command it stopped waiting for would go on running.
  *
- * Like `workspaceExec`, it merges no environment of its own. What a host merges
- * into a plugin's commands it composes where the merge is visible.
+ * It merges no host environment of its own: this is a raw shell for another
+ * plugin's commands, and a host environment underneath would let through what
+ * git honours — `GIT_PROXY_COMMAND`, `GIT_CONFIG_GLOBAL`, `http_proxy`. What a
+ * host merges into a plugin's commands it composes where the merge is visible.
  */
 
 /** The sandbox RPC this uses. */

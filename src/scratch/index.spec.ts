@@ -181,7 +181,9 @@ describe("opening a scratchpad", () => {
    * be undone.
    */
   it("does not re-init over a scratchpad it could not reach", async () => {
-    const { exec, commands } = fakeExec(() => new Error("EEXEC_LOST"));
+    const { exec, commands } = fakeExec(
+      () => new Error("the container is unreachable")
+    );
 
     const said = await open({ exec });
 

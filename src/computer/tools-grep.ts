@@ -9,7 +9,7 @@ import type { ComputerContext } from "./context.js";
  * Searching file contents, under Think's name so it replaces Think's `grep` —
  * which lists every file under the root and reads each one through the
  * workspace, one round trip per file. Think's `find` and `list` stay Think's:
- * over `computerWorkspace` they walk with `.git` and `node_modules` pruned.
+ * over `sandboxWorkspace` they walk with `.git` and `node_modules` pruned.
  */
 
 /**

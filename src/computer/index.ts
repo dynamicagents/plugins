@@ -1,9 +1,8 @@
 import type { ToolSet } from "ai";
 import { definePlugin, PluginSetupError } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
+import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
 import type { ComputerClient } from "./client.js";
-import type { WorkspaceAdvisory } from "../workspace/advisory.js";
-import type { WorkspaceClientConfig } from "../workspace/exec.js";
 import { workspaceRoute } from "./proxy.js";
 import { computerContext } from "./context.js";
 import { execTools } from "./tools-exec.js";
@@ -11,30 +10,20 @@ import { fileTools } from "./tools-file.js";
 import { grepTools } from "./tools-grep.js";
 
 /**
- * `@dynamicagents/plugins/computer` — an agent's tools over a container
- * workspace: `bash`, `grep` and `edit`, and `computerWorkspace`, the agent's own
+ * `@dynamicagents/plugins/computer` — an agent's tools over a `/sandbox`
+ * container: `bash`, `grep` and `edit`, and `sandboxWorkspace`, the agent's own
  * `this.workspace`, which Think's `read`, `write`, `delete`, `find` and `list`
  * go through.
  *
- * The workspace itself — the Durable Object, its container, its git, its
- * install — is `@dynamicagents/plugins/workspace`. This plugin reaches it only
- * through that subpath's client modules, never its object, so an agent that
- * holds the tools carries no container backend and no isomorphic-git.
+ * The container itself — the Durable Object, its git, its install — is
+ * `@dynamicagents/plugins/sandbox`. This plugin reaches it over RPC, never
+ * through its object, so an agent that holds the tools carries no container
+ * backend.
  *
- * The agent's own workspace has to be this one — `computerWorkspace` — or
+ * The agent's own workspace has to be the sandbox's — `sandboxWorkspace` — or
  * Think's `read` and `write` would work on a different tree from `bash`. The
- * plugin refuses to start otherwise; see `./proxy.ts`.
- *
- * Over a `/sandbox` object instead, the plugin is `sandboxComputer` and the
- * workspace `sandboxWorkspace` (`./sandbox.ts`); the tools are the same.
- *
- * ## The dependency tree is not in the workspace
- *
- * The one thing to internalise before reading further. A package root's
- * `node_modules` is a bind mount of the container's disk, so installs never
- * sync, and a new container reinstalls — see `/workspace`'s
- * `container-deps.ts`. The file tools read the workspace, so they refuse it;
- * `bash` reaches it. `paths.ts` owns what a path may be and what walks drop.
+ * plugin refuses to start otherwise; see `./proxy.ts`. `paths.ts` owns what a
+ * path may be and what walks drop.
  */
 
 /**
@@ -42,20 +31,14 @@ import { grepTools } from "./tools-grep.js";
  * entry point. `verify:exports` treats `./computer` as one realm, so what it
  * exports must not move when the files behind it do.
  */
-export { isGitInternal, SESSION_STATE_DIR, WALK_SKIPS } from "./paths.js";
-export {
-  packBlocks,
-  renderGrepMatches,
-  renderResult,
-  syncPendingNote
-} from "./render.js";
+export { isGitInternal, WALK_SKIPS } from "./paths.js";
+export { packBlocks, renderGrepMatches, renderResult } from "./render.js";
 export {
   execGate,
   needsDependencies,
   writeGate,
   type ExecGate
 } from "./gate.js";
-export { computerWorkspace, isComputerWorkspace } from "./proxy.js";
 export {
   sandboxClient,
   sandboxWorkspace,
@@ -64,13 +47,24 @@ export {
 } from "./sandbox.js";
 export type { ComputerClient } from "./client.js";
 
-/** What the tools read of a config: everything but where the workspace is. */
-export type ComputerToolsConfig = Omit<
-  ComputerConfig,
-  "binding" | "workspaceName"
->;
-
-export interface ComputerConfig extends WorkspaceClientConfig {
+/** How the tools run: the shell, the limits, the environment. */
+export interface ComputerToolsConfig {
+  /** Working directory for every command. Defaults to `/workspace`. */
+  cwd?: string;
+  /**
+   * Run every command through this shell, e.g. `"bash"`. Unset, the command
+   * string goes to the runtime as-is and lands on whatever `/bin/sh` is.
+   *
+   * Worth setting, because "whatever `/bin/sh` is" is **dash** on Debian and
+   * Ubuntu, and a model writing shell writes *bash*. `${PIPESTATUS[0]}` is the
+   * one that costs most — a bash builtin a model reaches for to read a piped exit
+   * code, which dash fails with exit 2, after the command it wrapped has already
+   * run. Set it only if the image actually has that shell: a missing one fails
+   * *every* command rather than the bash-flavoured ones.
+   */
+  shell?: string;
+  /** Per-command timeout. Defaults to ten minutes. */
+  timeoutMs?: number;
   /**
    * Output ceiling per command, in **characters**. Defaults to 16,000.
    *
@@ -101,11 +95,6 @@ export interface ComputerConfig extends WorkspaceClientConfig {
    * Environment merged into every command **these tools** run — a registry host,
    * a `CI` flag, proxy settings. Host-supplied and never model input.
    *
-   * "These tools" is exact: `/workspace`'s `workspaceExec` deliberately does not
-   * merge it, so a proxy set here does not reach the git that
-   * `@dynamicagents/plugins/repo-github` runs through that export. The reasoning, and
-   * how a host opts in explicitly, is written up there.
-   *
    * ## Put no secret here
    *
    * *Every* command gets this environment, and `bash`'s command is written by
@@ -124,35 +113,24 @@ export interface ComputerConfig extends WorkspaceClientConfig {
    * Do not hand the agent the credential; hand it the *action*. Keep the secret
    * on the Worker and expose one tool that makes the call it is for.
    * `@dynamicagents/plugins/repo-github` is the worked example: it holds a GitHub token, calls
-   * the API from the Worker, and runs clone, fetch and push on the host's side of
-   * the boundary. **No command in its container is ever given that token.**
+   * the API from the Worker, and its container's git holds a placeholder the
+   * egress swaps. **No command in its container is ever given that token.**
    */
   env?: () => Record<string, string | undefined>;
 }
 
 /**
- * @param workspace Opens the workspace for a command: container started, CA
- *   installed.
- * @param fsWorkspace Opens it for the file tools, which touch nothing but the
- *   host's SQLite. Defaults to {@link workspace}, so a host with one way in
- *   behaves as before. See {@link openWorkspaceFs}.
- * @param lockScope Names the workspace a write locks within — see
+ * @param workspace Opens the sandbox for a call.
+ * @param lockScope Names the sandbox a write locks within — see
  *   {@link file://./file-lock.ts}. Defaults to this tool set alone.
  */
 export function buildComputerTools(
   workspace: () => Promise<ComputerClient>,
-  config: ComputerConfig | ComputerToolsConfig,
+  config: ComputerToolsConfig,
   advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
-  fsWorkspace: () => Promise<ComputerClient> = workspace,
   lockScope?: () => string
 ): ToolSet {
-  const ctx = computerContext(
-    workspace,
-    config,
-    advisories,
-    fsWorkspace,
-    lockScope
-  );
+  const ctx = computerContext(workspace, config, advisories, lockScope);
 
   return {
     ...execTools(ctx),
@@ -161,33 +139,8 @@ export function buildComputerTools(
   };
 }
 
+/** What the model is told about the container, once per turn. */
 const CONTEXT = [
-  "You have a Linux container with a shell, a package manager and network access:",
-  "- `bash` runs any shell command — builds, tests, installs, git.",
-  "- `read` / `write` / `edit` / `delete` work on files; `edit` replaces an exact unique string and is the right tool for a small change.",
-  "- `grep` searches file contents; `list` lists a directory; `find` finds files by glob.",
-  // The reason to prefer them is the one thing the model cannot infer from a
-  // tool description: these read the durable workspace directly, so they are
-  // the only tools that still answer while the container is unavailable.
-  "Search with `grep` and `find` rather than running them through `bash`. They read the workspace directly, so they keep working while the container is restarting or an install is still running, and they come back with line numbers and a bounded result instead of a wall of text.",
-  "Command output is truncated from the middle when large, so run targeted commands and read specific files rather than printing everything.",
-  // Both halves of this matter and they pull in opposite directions, which
-  // is why they are stated together rather than left for the model to work
-  // out from a confusing result.
-  "The checkout is durable: it survives between tasks and is still there after the container restarts, so it may already contain work from an earlier task — check before assuming it is empty.",
-  "`node_modules` is not durable: it lives on the container's disk, so a new container reinstalls it, and the file tools cannot see inside it — use `bash` there. It is a mount point, so `rm -rf node_modules` fails; `npm ci` clears it itself.",
-  // Stated up front rather than left to a refusal, so the model does not spend
-  // a turn discovering it. The destination matters as much as the rule: a
-  // prohibition with nowhere to go gets worked around.
-  "`.git` is off limits to these tools, and searches and recursive listings skip it. It is git's internal state — reading it tells you less than the repository tools do, and writing it corrupts the checkout. Repository work goes through the repo tools (`repo_status`, `repo_diff`, `repo_commit`, `repo_push`); if a task needs git state you cannot get that way, say so in your result rather than reaching into `.git` yourself."
-].join("\n");
-
-/**
- * The same, for a sandbox. What differs is where the files are: the container's
- * own disk, so nothing answers without it, and `node_modules` sits beside the
- * checkout rather than under a mount.
- */
-const SANDBOX_CONTEXT = [
   "You have a Linux container with a shell, a package manager and network access:",
   "- `bash` runs any shell command — builds, tests, installs, git.",
   "- `read` / `write` / `edit` / `delete` work on files; `edit` replaces an exact unique string and is the right tool for a small change.",
@@ -200,38 +153,12 @@ const SANDBOX_CONTEXT = [
 ].join("\n");
 
 /**
- * The container plugin. Its tools reach the workspace through the agent's own
- * `computerWorkspace` — the one Think's `read` and `write` use — so the two can
- * never resolve different ones. `config` answers everything else: the shell,
- * the limits, the environment.
- */
-export function computer(
-  config: ComputerConfig | ComputerToolsConfig
-): AgentPlugin {
-  return computerPlugin(config, "workspace", CONTEXT);
-}
-
-/**
- * The container plugin over a `/sandbox` object: the agent's workspace is
- * `sandboxWorkspace` (`./sandbox.ts`), and the model is told the checkout is
- * the container's disk.
+ * The container plugin over a `/sandbox` object. Its tools reach the sandbox
+ * through the agent's own `sandboxWorkspace` — the one Think's `read` and
+ * `write` use — so the two can never resolve different ones. `config` answers
+ * everything else.
  */
 export function sandboxComputer(config: ComputerToolsConfig): AgentPlugin {
-  return computerPlugin(config, "sandbox", SANDBOX_CONTEXT);
-}
-
-const WORKSPACE_SETTER = {
-  workspace:
-    "`override workspace = computerWorkspace(config, () => this.pluginContext().runtime())`",
-  sandbox:
-    "`override workspace = sandboxWorkspace(config, () => this.pluginContext().runtime())`"
-} as const;
-
-function computerPlugin(
-  config: ComputerToolsConfig,
-  kind: "workspace" | "sandbox",
-  context: string
-): AgentPlugin {
   return definePlugin({
     name: "computer",
 
@@ -239,17 +166,17 @@ function computerPlugin(
       // Here, not in `execute`: the start check builds every plugin's tools,
       // so a missing workspace fails the start rather than a turn.
       const route = workspaceRoute(ctx.workspace());
-      if (route?.kind !== kind)
+      if (!route)
         throw new PluginSetupError(
           `plugin "computer" runs \`bash\` in a container, but ${ctx.agentName}'s ` +
             "workspace is not that container's, so Think's `read` and `write` " +
             "would work on a different tree. Set it on the agent class: " +
-            `${WORKSPACE_SETTER[kind]}.`
+            "`override workspace = sandboxWorkspace(config, () => this.pluginContext().runtime())`."
         );
       // Resolved per call, not memoized: the name belongs to the turn — a
-      // sub-agent's comes from `runtime()`, see `/workspace`'s `WORKSPACE_RUNTIME_KEY` and `/sandbox`'s `SANDBOX_RUNTIME_KEY` —
-      // and a stale one would silently route a second caller's commands into
-      // the first caller's files.
+      // sub-agent's comes from `runtime()`, see `/sandbox`'s
+      // `SANDBOX_RUNTIME_KEY` — and a stale one would silently route a second
+      // caller's commands into the first caller's files.
       return buildComputerTools(
         () => route.open(route.name()),
         config,
@@ -257,11 +184,10 @@ function computerPlugin(
         // so wrapping again would only make it look like the guarantee lives in
         // two places.
         () => route.advisories(route.name()),
-        () => route.openFs(route.name()),
         route.name
       );
     },
 
-    context: [{ provider: { get: async () => context } }]
+    context: [{ provider: { get: async () => CONTEXT } }]
   });
 }

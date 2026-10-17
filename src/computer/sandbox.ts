@@ -1,5 +1,5 @@
 import type { WorkspaceLike } from "@cloudflare/think";
-import type { WorkspaceAdvisory } from "../workspace/advisory.js";
+import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
 import type {
   ComputerClient,
   ComputerFs,
@@ -12,7 +12,7 @@ import { sandboxNameFromRuntime } from "../sandbox/name.js";
 import { routedWorkspace } from "./proxy.js";
 
 /**
- * The computer tools over a `/sandbox` object instead of a workspace.
+ * The computer tools over a `/sandbox` object.
  *
  * The checkout is the container's own disk, so every call reaches the
  * container: a file read wakes a stopped one (measured at about two seconds,
@@ -23,8 +23,7 @@ import { routedWorkspace } from "./proxy.js";
  * override workspace = sandboxWorkspace(config, () => this.pluginContext().runtime());
  * ```
  *
- * `sandboxComputer(config)` then finds it the way `computer(config)` finds a
- * workspace's.
+ * `sandboxComputer(config)`'s tools then find the sandbox through it.
  */
 
 /** The sandbox RPCs this uses. A `/sandbox` object answers all of them. */
@@ -100,11 +99,8 @@ export function sandboxWorkspace(
     config.binding.getByName(name) as unknown as SandboxComputerHost;
   return routedWorkspace(
     {
-      kind: "sandbox",
       name: () => sandboxNameFromRuntime(runtime?.()) ?? config.sandboxName(),
       open: async (name) => sandboxClient(host(name)),
-      // The same: there is no copy of the files outside the container.
-      openFs: async (name) => sandboxClient(host(name)),
       advisories: (name) => host(name).advisories()
     },
     config.cwd ?? "/workspace"

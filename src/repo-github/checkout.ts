@@ -96,10 +96,9 @@ export async function resolveDefaultBranch(
  * It is the *nearest* answer, not the only one. `repo_commit` names the identity
  * on the commit itself, which is the one layer a stale config cannot outrank.
  * Underneath, a repository this plugin never cloned falls back to whatever the
- * shell's own git is configured with — which is an identity rather than nothing
- * only where `exec` is backed by `/workspace`, whose object writes one per
- * container; see {@link file://../workspace/git-identity.ts}. `exec` is an arbitrary
- * runner, so that is a property of a deployment, not of this plugin.
+ * shell's own git is configured with, or the environment a deployment gives
+ * its commands. `exec` is an arbitrary runner, so that is a property of a
+ * deployment, not of this plugin.
  *
  * Unchecked, like the config pins at the clone: git's identity is needed by the
  * first commit, and a failure to write it fails that commit with a sentence far

@@ -1,9 +1,6 @@
 /**
  * Working out how a repository installs its dependencies, mechanically.
  *
- * The same module as `../workspace/install.ts` while both subpaths ship; it
- * goes with that subpath.
- *
  * The *procedure* lives here because it is the same everywhere: look at what the
  * repository actually contains, in a fixed order, and never guess. The
  * **commands** live in the host, because they are a deployment's business — one

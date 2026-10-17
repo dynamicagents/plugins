@@ -1,5 +1,4 @@
 import type { EgressCall, SandboxEgressRule } from "../sandbox/egress.js";
-import { ANTHROPIC_HOST } from "./egress.js";
 import { ANTHROPIC_PLACEHOLDER_HOST } from "./harness-wire.js";
 import {
   readRefusal,
@@ -11,12 +10,11 @@ import {
 /**
  * The Anthropic credential, swapped in on the Worker side of a sandbox.
  *
- * The same rules as the workspace gateway in `./egress.ts`, which goes with
- * that subpath: the CLI holds a placeholder OAuth token, this sets the pool's
- * lead as the Bearer, and a refusal that spends or rejects the credential moves
- * the lead and tells the CLI to retry on the next one. What differs is where
- * the pool is. A sandbox's egress entrypoint is stateless, so the pool lives in
- * the sandbox the request came from, reached through `call.sandbox()` as a
+ * The CLI holds a placeholder OAuth token, this sets the pool's lead as the
+ * Bearer, and a refusal that spends or rejects the credential moves the lead
+ * and tells the CLI to retry on the next one — `./credentials.ts` reads the
+ * refusal. A sandbox's egress entrypoint is stateless, so the pool lives in the
+ * sandbox the request came from, reached through `call.sandbox()` as a
  * {@link CredentialLease}.
  *
  * The CLI reaches this over plain HTTP to a placeholder host the harness
@@ -24,6 +22,9 @@ import {
  * the CLI at it (`./daemon/index.ts`), after the deployment's own environment,
  * so the rule sets no `env`.
  */
+
+/** Anthropic's API host — the one destination that gets a credential. */
+export const ANTHROPIC_HOST = "api.anthropic.com";
 
 /** The pool, as the object holding it answers over RPC. */
 export interface CredentialLease {

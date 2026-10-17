@@ -792,9 +792,9 @@ function describe(event: ClaudeCodeEvent): Omit<NoteData, "key"> | undefined {
                 ? ""
                 : ` until ${new Date(event.info.resetsAt * 1000).toISOString()}`)
           };
-    // `init`'s session id is a handle as well as news: it reaches the host on
-    // the drain's cursor — see `DrainCursor.sessionId` in ./run.ts — where
-    // something can record it and resume with it.
+    // `init`'s session id is a handle as well as news: the daemon's parser
+    // hands it to the host — see `./daemon/index.ts` — where something can
+    // record it and resume with it.
     case "init":
       return initCard(event);
     case "result":

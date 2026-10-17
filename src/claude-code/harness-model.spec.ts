@@ -8,10 +8,11 @@ import {
   claudeCodeHarnessModel,
   CONTAINER_LOST_PROMPT,
   type ClaudeCodeHarnessModelOptions,
-  type SandboxRuns
+  type SandboxRuns,
+  type SessionOutcome,
+  type SessionRecord
 } from "./harness-model.js";
 import { encodeNote, encodeRunEnd, encodeSessionId } from "./harness-wire.js";
-import type { SessionOutcome, SessionRecord } from "./model.js";
 
 /**
  * The session as a sub-agent's model, over a scripted sandbox: what is this

@@ -50,10 +50,6 @@
       "types": "./dist/claude-code/daemon/index.d.ts",
       "import": "./dist/claude-code/daemon/index.js"
     },
-    "./workspace": {
-      "types": "./dist/workspace/index.d.ts",
-      "import": "./dist/workspace/index.js"
-    },
     "./computer": {
       "types": "./dist/computer/index.d.ts",
       "import": "./dist/computer/index.js"
@@ -88,33 +84,23 @@
     "prepare": "husky || true && npm run build"
   },
   "peerDependencies": {
-    "@cloudflare/computer": "^0.5.0",
     "@cloudflare/sandbox": "^1.0.1",
     "@cloudflare/think": ">=0.20.2 <0.21.0",
     "@dynamicagents/core": ">=0.14.0 <0.15.0",
-    "@platformatic/vfs": "^0.5.0",
     "agents": ">=0.28.0 <0.29.0",
     "ai": "^7.0.88",
     "zod": "^4.4.3"
   },
   "peerDependenciesMeta": {
-    "@cloudflare/computer": {
-      "optional": true
-    },
     "@cloudflare/sandbox": {
-      "optional": true
-    },
-    "@platformatic/vfs": {
       "optional": true
     }
   },
   "devDependencies": {
-    "@cloudflare/computer": "^0.5.0",
     "@cloudflare/sandbox": "^1.0.1",
     "@cloudflare/think": "^0.20.2",
     "@cloudflare/vitest-plugin": "^1.1.9",
     "@dynamicagents/core": "git+https://github.com/dynamicagents/core.git#main",
-    "@platformatic/vfs": "^0.5.0",
     "@types/node": "^26.5.1",
     "agents": "^0.28.0",
     "ai": "^7.0.101",

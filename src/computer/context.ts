@@ -1,8 +1,9 @@
-import { DEFAULT_CWD, DEFAULT_TIMEOUT_MS } from "../workspace/exec.js";
 import { withAbort } from "@dynamicagents/core";
+import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import { DEFAULT_EXEC_TIMEOUT_MS } from "../sandbox/exec.js";
+import { SANDBOX_ROOT } from "../sandbox/header.js";
 import type { ComputerClient } from "./client.js";
 import { execGate, writeGate, type ExecGate } from "./gate.js";
-import type { WorkspaceAdvisory } from "../workspace/advisory.js";
 import type { ComputerToolsConfig } from "./index.js";
 
 /**
@@ -53,11 +54,10 @@ export function computerContext(
   workspace: () => Promise<ComputerClient>,
   config: ComputerToolsConfig,
   advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
-  fsWorkspace: () => Promise<ComputerClient> = workspace,
   lockScope?: () => string
 ): ComputerContext {
-  const cwd = config.cwd ?? DEFAULT_CWD;
-  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const cwd = config.cwd ?? SANDBOX_ROOT;
+  const timeoutMs = config.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   const maxChars = config.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
   const gateMs = config.installGateMs ?? 90_000;
   const env = config.env;
@@ -72,11 +72,9 @@ export function computerContext(
    *
    * **Read for every command, including the ones that need no dependencies.**
    * The filter that spares `cat README.md` from queueing behind an `npm ci`
-   * lives in `execGate`, where it applies per advisory — because a dependency
-   * install and a full workspace are not relevant to the same commands, and one
-   * filter over both leaves a workspace at its ceiling silent for exactly the
-   * commands whose writes it is dropping. The cost is one same-colo RPC per
-   * command, against a class of silent data loss.
+   * lives in `execGate`, where it applies per advisory, so an advisory that
+   * reaches every command is never filtered out by the one that does not. The
+   * cost is one same-colo RPC per command.
    */
   const awaitAdvisories = async (
     command: string,
@@ -128,8 +126,8 @@ export function computerContext(
    *
    * Separate from {@link awaitAdvisories} because the question is different:
    * there is no command to classify and nothing worth waiting for. An install in
-   * flight does not stop a file being written, and the one thing that does —
-   * a workspace that no longer accepts writes — never resolves on its own.
+   * flight does not stop a file being written; only an advisory whose writes do
+   * not persist does, and that never resolves on its own.
    *
    * Fails **open** for the same reason the exec gate does: a read of another
    * Durable Object's state must not take out a working tool.
@@ -168,12 +166,9 @@ export function computerContext(
    * only recover from what it is told, so this returns the sentence rather than
    * throwing it.
    *
-   * `bash` deliberately does not use it. That one recognises `EEXEC_LOST`,
-   * logs, and carries an install warning through the failure path — a bespoke
-   * catch saying something this cannot.
-   *
-   * It opens through `fsWorkspace`, which is what makes the context block's
-   * sentence about these tools true: they answer while the container is down.
+   * `bash` deliberately does not use it: it logs, and carries an install
+   * warning through the failure path — a bespoke catch saying something this
+   * cannot.
    */
   const inWorkspace = async (
     gerund: string,
@@ -181,7 +176,7 @@ export function computerContext(
     body: (fs: ComputerClient["fs"]) => Promise<string>
   ): Promise<string> => {
     try {
-      using ws = await fsWorkspace();
+      using ws = await workspace();
       return await body(ws.fs);
     } catch (err) {
       return `error ${gerund} ${subject}: ${String(err)}`;

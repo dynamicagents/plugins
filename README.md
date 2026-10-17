@@ -25,21 +25,24 @@ An agent installs plugins by listing them in `getPlugins()`, on a `StepAgent` fr
 // src/agents/coder/agent.ts
 import { StepAgent } from "@dynamicagents/core/agent";
 import { browser } from "@dynamicagents/plugins/browser";
-import { computer, computerWorkspace } from "@dynamicagents/plugins/computer";
-// `workspaceConfig` names the `/workspace` object this agent works in.
+import {
+  sandboxComputer,
+  sandboxWorkspace
+} from "@dynamicagents/plugins/computer";
+// `sandboxConfig` names the `/sandbox` object this agent works in.
 import { repo } from "@dynamicagents/plugins/repo-github";
 
 export class Coder extends StepAgent<Env> {
-  // `computer` runs commands in a container, so the agent's own workspace —
+  // The tools run commands in a container, so the agent's own workspace —
   // what Think's `read` and `write` work on — has to be that container's.
-  override workspace = computerWorkspace(workspaceConfig(this.env), () =>
+  override workspace = sandboxWorkspace(sandboxConfig(this.env), () =>
     this.pluginContext().runtime()
   );
 
   override getPlugins() {
     return [
       browser({ binding: this.env.BROWSER }),
-      computer(workspaceConfig(this.env)),
+      sandboxComputer({ shell: "bash" }),
       repo(repoConfig(this.env))
     ];
   }
@@ -64,15 +67,14 @@ plugin to the tools an install names.
 
 ## The plugins
 
-| Subpath                            | What it adds                                                                                                     | Needs                                              |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                                               | `BROWSER` (paid plan)                              |
-| [`/claude-code`](src/claude-code/) | Sub-agents whose model is a Claude Code session in the workspace container                                       | one or more `claude setup-token` credentials       |
-| [`/computer`](src/computer/)       | An agent's tools over a workspace — `bash`, `grep`, `edit` — and the workspace Think's file tools use            | a `/workspace` object                              |
-| [`/repo-github`](src/repo-github/) | Clone, commit, push a branch, open a pull request on GitHub — over any container                                 | `GITHUB_TOKEN`                                     |
-| [`/sandbox`](src/sandbox/)         | A container whose disk is the checkout, driven from a Durable Object through `agents`' `ContainerHarness`        | `@cloudflare/sandbox`, an image running its daemon |
-| [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout                       | —                                                  |
-| [`/workspace`](src/workspace/)     | The Durable Object a container workspace lives in — its container, credentialed git, dependency install and sync | `@cloudflare/computer`, `@platformatic/vfs` (paid) |
+| Subpath                            | What it adds                                                                                              | Needs                                              |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                                        | `BROWSER` (paid plan)                              |
+| [`/claude-code`](src/claude-code/) | Sub-agents whose model is a Claude Code session in a sandbox                                              | one or more `claude setup-token` credentials       |
+| [`/computer`](src/computer/)       | An agent's tools over a sandbox — `bash`, `grep`, `edit` — and the workspace Think's file tools use       | a `/sandbox` object                                |
+| [`/repo-github`](src/repo-github/) | Clone, commit, push a branch, open a pull request on GitHub — over any container                          | `GITHUB_TOKEN`                                     |
+| [`/sandbox`](src/sandbox/)         | A container whose disk is the checkout, driven from a Durable Object through `agents`' `ContainerHarness` | `@cloudflare/sandbox`, an image running its daemon |
+| [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout                | —                                                  |
 
 Each directory has its own README with the config shape and a paste-ready `wrangler.jsonc`
 snippet — a plugin cannot add its own binding, which is why it declares what it needs.

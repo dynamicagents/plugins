@@ -3,8 +3,8 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import { withAbort } from "@dynamicagents/core";
 import { renderResult } from "./render.js";
-import { execLostNote, type ExecGate } from "./gate.js";
-import { withShellTranscript } from "../workspace/shell.js";
+import type { ExecGate } from "./gate.js";
+import { withShellTranscript } from "./shell.js";
 import type { ComputerContext } from "./context.js";
 
 /** Running one command in the container. */
@@ -65,7 +65,7 @@ export function execTools(ctx: ComputerContext): ToolSet {
        *
        * Two of these sentences are only true when a shell is configured, so the
        * description says whichever is. `withShellTranscript` is a no-op without
-       * {@link file://./index.ts ComputerConfig.shell}: no `2>&1`, so the
+       * {@link file://./index.ts ComputerToolsConfig.shell}: no `2>&1`, so the
        * streams arrive separate and {@link renderResult} labels them; no
        * `-o pipefail`, so `/bin/sh` reports a pipeline's *last* stage. Promising
        * a transcript and first-failure semantics there would be the lie
@@ -217,21 +217,16 @@ export function execTools(ctx: ComputerContext): ToolSet {
           return note(renderResult(result, maxChars));
         } catch (err) {
           if (abortSignal?.aborted) return note(stopped(gateMsWaited, started));
-          const lost = execLostNote(err);
           console.warn("[computer] bash failed", {
             command,
             gateMs: gateMsWaited,
             durationMs: Date.now() - startedAtMs - gateMsWaited,
             timeoutMs,
-            // Distinguished in the log for the same reason it is distinguished
-            // for the model: a container replacement and a broken command want
-            // different people looking at them.
-            ...(lost ? { lost: true } : {}),
             err: String(err)
           });
           // Returned, not thrown: a failed command is usually the model's to
           // recover from, and it can only recover from what it is told.
-          return note(lost ?? `error running command: ${String(err)}`);
+          return note(`error running command: ${String(err)}`);
         }
       }
     })

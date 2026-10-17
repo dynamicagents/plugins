@@ -15,21 +15,17 @@
  * **A writer's sub-agent spec, a model, and no plugin.** Claude Code brings its own
  * tools, its own loop and its own context management, so there is nothing for
  * an agent loop to drive: the session *is* the sub-agent's model —
- * {@link claudeCodeModel} — and Think's recovery drives that. A host binds
+ * {@link claudeCodeHarnessModel} — and Think's recovery drives that. A host binds
  * {@link CLAUDE_CODE_AGENT} to a `SubAgent` class whose `getModel()` returns
- * one, and adds the `prepare` and `settle` that claim and release a workspace.
+ * one, and adds the `prepare` and `settle` that claim and release a sandbox.
  *
  * ## The credential never enters the container
  *
- * The session is launched with a placeholder. Every request out of the container
- * is intercepted by `computerd` and handed to {@link claudeCodeEgress} on the
- * Worker side, which swaps in a real credential and strips credential headers
- * from every other destination.
- *
- * It can **also** restrict which hosts the container may reach, but that is
- * `restrictToHosts` and it is **off unless a deployment sets it** — so do not
- * read it as a boundary that exists by default. The containment that always
- * holds is the credential swap.
+ * The session is launched with a placeholder and a placeholder host. The
+ * sandbox's egress rule, {@link claudeCodeSandboxEgress}, swaps in a real
+ * credential on the Worker side, leased from the pool the sandbox object holds
+ * ({@link credentialHost}). The image's daemon runs
+ * `@dynamicagents/plugins/claude-code/daemon`'s CLI.
  *
  * ## The 5-hour and weekly limits are routed around, not predicted
  *
@@ -37,37 +33,18 @@
  * guess about a bucket nobody can read, and it only moves when a run *ends* — so
  * it caps nothing, it only refuses to start.
  *
- * The gateway sees Anthropic's actual response, which is the one place the
+ * The egress sees Anthropic's actual response, which is the one place the
  * bucket announces itself. So the credential is a **pool**: the first usable
  * entry is used, a refusal marks it spent until its reset and advances the lead,
  * and the client's own retry — prompted by a rewritten `retry-after` — lands on
- * the next one. When every entry is spent the upstream wait passes through
- * unchanged and the run fails cleanly with the reset time. See
- * {@link file://./credentials.ts}.
+ * the next one. When every entry is spent the run fails cleanly with the reset
+ * time. See {@link file://./credentials.ts}.
  *
  * ## Requires
  *
- * One or more `claude setup-token` credentials, a container image with the CLI
- * installed at a pinned version, and a workspace Durable Object whose egress
- * policy is `{ mode: "http-gateway" }` and which supplies a
- * {@link CredentialStore}. See the README.
- *
- * ## On a sandbox
- *
- * Over `/sandbox` instead, the model is {@link claudeCodeHarnessModel}, the
- * credential pool lives in the sandbox object ({@link credentialHost}) and is
- * leased by the sandbox's egress rule {@link claudeCodeSandboxEgress}, and the image's
- * daemon runs `@dynamicagents/plugins/claude-code/daemon`'s CLI.
+ * One or more `claude setup-token` credentials and a `/sandbox` image with the
+ * CLI installed at a pinned version. See the README.
  */
-
-export { claudeCodeModel } from "./model.js";
-export type {
-  ClaudeCodeModelOptions,
-  SessionEnd,
-  SessionOutcome,
-  SessionRecord,
-  SessionWorkspace
-} from "./model.js";
 export {
   claudeCodeHarnessModel,
   CONTAINER_LOST_PROMPT,
@@ -75,30 +52,28 @@ export {
 } from "./harness-model.js";
 export type {
   ClaudeCodeHarnessModelOptions,
-  SandboxRuns
+  SandboxRuns,
+  SessionEnd,
+  SessionOutcome,
+  SessionRecord
 } from "./harness-model.js";
-export { claudeCodeSandboxEgress, credentialHost } from "./harness-egress.js";
+export {
+  ANTHROPIC_HOST,
+  claudeCodeSandboxEgress,
+  credentialHost
+} from "./harness-egress.js";
 export type {
   ClaudeCodeSandboxEgressOptions,
   CredentialLease
 } from "./harness-egress.js";
 export { ANTHROPIC_PLACEHOLDER_HOST } from "./harness-wire.js";
-export { claudeCodeSession } from "./session.js";
-export type {
-  ClaudeCodeSession,
-  ResumeSession,
-  StartSession
-} from "./session.js";
+export { CREDENTIAL_PLACEHOLDER } from "./placeholder.js";
 export {
   CLAUDE_CODE_AGENT,
   CLAUDE_CODE_WRITE_INPUT,
   type ClaudeCodeInput
 } from "./spec.js";
-
-export { ANTHROPIC_HOST, claudeCodeEgress } from "./egress.js";
 export { VERIFIED_CLAUDE_CODE_VERSION } from "./verified.js";
-export type { EgressConfig } from "./egress.js";
-export { GITHUB_HOSTS, GITHUB_TOKEN_PLACEHOLDER } from "./github.js";
 export { credentialPool, readRefusal } from "./credentials.js";
 export type {
   CredentialPool,
@@ -108,22 +83,6 @@ export type {
   Lead,
   Refusal
 } from "./credentials.js";
-export {
-  buildLaunch,
-  CLAUDE_EXEC_PREFIX,
-  CREDENTIAL_PLACEHOLDER,
-  execIdFor,
-  followUpExecIdFor,
-  freshCursor
-} from "./run.js";
-export type {
-  DrainCursor,
-  DrainOptions,
-  DrainOutcome,
-  Launch,
-  LaunchOptions,
-  SessionRuntime
-} from "./run.js";
 export { parseStream, toProgress, RATE_LIMIT_OK } from "./events.js";
 export type {
   ClaudeCodeEvent,
@@ -131,7 +90,7 @@ export type {
   ClaudeCodeUsage,
   RateLimitInfo
 } from "./events.js";
-export { DEFAULT_PERMISSION_MODE, DEFAULT_TIMEOUT_MS } from "./config.js";
+export { DEFAULT_PERMISSION_MODE } from "./config.js";
 export type {
   ClaudeCodeConfig,
   EffortLevel,
