@@ -125,15 +125,13 @@ for (const file of walk(path.join(root, "dist"))) {
 /**
  * The subpaths a subpath may reach besides its own, by declaration.
  *
- * `/computer` is an agent's tools over a `/workspace` object and cannot run
+ * `/computer` is an agent's tools over a `/sandbox` object and cannot run
  * without one, so reaching it costs a consumer nothing it was not already
- * carrying. It reaches `/workspace`'s client modules, never its barrel, which is
- * what keeps the object — its container backend and its git — out of a bundle
- * that holds only the tools.
+ * carrying. It reaches `/sandbox`'s leaf modules, never its object, which is
+ * what keeps the container backend out of a bundle that holds only the tools.
  */
 const BUILDS_ON = {
-  // Over a sandbox, its markers' directory.
-  "./computer": ["./workspace", "./sandbox"],
+  "./computer": ["./sandbox"],
   // Its egress rule and its git are a sandbox's: the contract they meet is `/sandbox`'s.
   "./repo-github": ["./sandbox"],
   // The image's entrypoint shares the object's constants and run header.

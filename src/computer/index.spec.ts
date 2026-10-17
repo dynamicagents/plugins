@@ -1,18 +1,18 @@
 import { describe, it, expect } from "vitest";
 import type { ToolSet } from "ai";
-import type { WorkspaceClient } from "@cloudflare/computer";
 import { assemblePlugins, PluginSetupError } from "@dynamicagents/core";
+import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import type { ComputerClient } from "./client.js";
 import {
   buildComputerTools,
-  computer,
-  computerWorkspace,
-  type ComputerConfig
+  sandboxComputer,
+  sandboxWorkspace,
+  type ComputerToolsConfig,
+  type SandboxComputerHost
 } from "./index.js";
-import { withShell, type WorkspaceAdvisory } from "../workspace/index.js";
 import { testPluginContext } from "../../test/helpers.js";
 
-/** What the stub records off an `fs.grep` call. `@cloudflare/computer` declares
- * these but does not re-export them, so the shape is restated here. */
+/** What the stub records off an `fs.grep` call. */
 interface GrepOptions extends Page {
   include?: string;
   regex?: boolean;
@@ -77,7 +77,7 @@ function stub(
   /** Make the container unreachable, for the paths that have to survive it. */
   execThrows?: string | Error
 ): {
-  workspace: () => Promise<WorkspaceClient>;
+  workspace: () => Promise<ComputerClient>;
   execs: Array<{ command: string; options?: unknown }>;
   greps: Array<{ query: string; path: string } & GrepOptions>;
   files: Map<string, string>;
@@ -176,7 +176,7 @@ function stub(
       }
     },
     [Symbol.dispose]: () => {}
-  } as unknown as WorkspaceClient;
+  } as unknown as ComputerClient;
 
   return {
     workspace: async () => client,
@@ -186,10 +186,7 @@ function stub(
   };
 }
 
-const config: ComputerConfig = {
-  binding: undefined as unknown as ComputerConfig["binding"],
-  workspaceName: () => "caller|owner/repo"
-};
+const config: ComputerToolsConfig = {};
 
 const run = (tools: ToolSet, name: string, input: unknown) =>
   (tools[name]!.execute as (i: unknown, o: unknown) => Promise<string>)(
@@ -197,16 +194,6 @@ const run = (tools: ToolSet, name: string, input: unknown) =>
     {}
   );
 
-/**
- * The two shell wrappers, and the difference between them.
- *
- * Both pick the shell the model actually writes for and both ask for `pipefail`.
- * They differ on one thing — whether the result is a *transcript* or two separate
- * streams — and that difference is the output contract, which is why it is two
- * named functions rather than one with a flag. A flag put the choice at the call
- * site as a `true` nobody reads, and `workspaceExec` silently inherited the wrong
- * one for as long as it existed.
- */
 /**
  * What `bash` promises the model, which depends on whether a shell was
  * configured.
@@ -249,10 +236,9 @@ describe("the dependency tree", () => {
   const dep = "/workspace/repo/node_modules/zod/index.ts";
 
   /**
-   * The tree is on the container's disk, so the workspace these tools read has
-   * nothing there. Each file tool refuses it and names `bash`, which reaches
-   * it; a write would land in the workspace, where nothing would ever read it.
-   * The workspace's own methods refuse it too — see `./proxy.spec.ts`.
+   * Installed output, not source: each file tool refuses it and names `bash`,
+   * which reaches it. The workspace's own methods refuse it too — see
+   * `./proxy.spec.ts`.
    */
   it("refuses it in every file tool, routing to bash", async () => {
     const { workspace, files } = stub({ [dep]: "export const z = 1;\n" });
@@ -313,20 +299,8 @@ describe("edit", () => {
       [path]: "const a = 1;\nconst b = 1;\n"
     });
     const scope = () => "caller|owner/repo";
-    const parent = buildComputerTools(
-      workspace,
-      config,
-      undefined,
-      workspace,
-      scope
-    );
-    const child = buildComputerTools(
-      workspace,
-      config,
-      undefined,
-      workspace,
-      scope
-    );
+    const parent = buildComputerTools(workspace, config, undefined, scope);
+    const child = buildComputerTools(workspace, config, undefined, scope);
 
     await Promise.all([
       run(parent, "edit", { path, old_string: "a = 1", new_string: "a = 2" }),
@@ -582,11 +556,7 @@ describe("grep pruning", () => {
       query: "marker"
     });
 
-    expect(greps[0]?.exclude).toEqual([
-      "**/.git",
-      "**/node_modules",
-      "**/.claude-sessions"
-    ]);
+    expect(greps[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
     // The point of the retirement: one round trip. A filter here needed a second
     // to refill a page its own skips had emptied, and a retry re-scanned every
     // file the first round had already read.
@@ -594,18 +564,10 @@ describe("grep pruning", () => {
     expect(out).toContain("const marker = 1;");
   });
 
-  /**
-   * The session directory is skipped for a different reason than the other two:
-   * a transcript quotes every line the session read, so a search that descended
-   * into it would answer a query about the source with the conversation that
-   * happened to mention it.
-   */
   it("keeps every skipped directory out of the results", async () => {
     const { workspace } = stub({
       "/workspace/repo/node_modules/zod/index.ts": "const marker = 1;\n",
       "/workspace/repo/.git/COMMIT_EDITMSG": "const marker = 2;\n",
-      "/workspace/.claude-sessions/projects/-workspace-repo/s.jsonl":
-        '{"text":"const marker = 2;"}\n',
       [src]: "const marker = 3;\n"
     });
 
@@ -616,7 +578,6 @@ describe("grep pruning", () => {
     expect(out).toContain(src);
     expect(out).not.toContain("node_modules");
     expect(out).not.toContain("COMMIT_EDITMSG");
-    expect(out).not.toContain(".jsonl");
   });
 
   /**
@@ -685,19 +646,15 @@ describe("grep pruning", () => {
     expect(pages).toBeGreaterThan(1);
     // Every page asked the store to prune, not just the first.
     for (const call of greps)
-      expect(call.exclude).toEqual([
-        "**/.git",
-        "**/node_modules",
-        "**/.claude-sessions"
-      ]);
+      expect(call.exclude).toEqual(["**/.git", "**/node_modules"]);
   });
 });
 
 /**
  * `.git` is off limits, and the reason differs from `node_modules`.
  *
- * `node_modules` is *absent* — physics, decided by `computerd`. `.git` is present,
- * readable, and refused anyway — policy, because a model that edits `.git/HEAD` or
+ * `node_modules` is installed output. `.git` is present, readable, and refused
+ * anyway — policy, because a model that edits `.git/HEAD` or
  * `.git/config` corrupts a checkout in a way that surfaces much later as an
  * inexplicable git failure. Repository work belongs to the repo tools.
  */
@@ -771,7 +728,7 @@ describe("paths inside .git", () => {
     });
     expect(refusal).not.toContain("bash");
 
-    const [block] = computer(config).context!;
+    const [block] = sandboxComputer(config).context!;
     const context = String(await block.provider!.get());
     const gitLine = context
       .split("\n")
@@ -794,18 +751,15 @@ describe("paths inside .git", () => {
     expect(out).not.toContain("COMMIT_EDITMSG");
   });
 
-  /**
-   * `/repo` runs its git CLI through `workspaceExec`, not through the tools. A
-   * guard there would break clone and commit outright.
-   */
-  it("does not guard workspaceExec, which is how /repo runs git", async () => {
+  /** `bash` is unguarded: `./paths.ts` says why. */
+  it("does not guard bash, which runs git", async () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, config);
     // The tool refuses…
     expect(
       await run(tools, "grep", { query: "x", path: "/workspace/repo/.git" })
     ).toContain("repo_diff");
-    // …while the shell path stays open, which is what /repo depends on.
+    // …while the shell path stays open.
     await run(tools, "bash", { command: "git rev-parse --git-dir" });
     expect(execs).toHaveLength(1);
   });
@@ -856,18 +810,8 @@ describe("bash", () => {
     expect(execs[1]!.options).toMatchObject({ cwd: "/workspace/repo" });
   });
 
-  /**
-   * The seam, asserted where it actually is.
-   *
-   * `withShell` and `withShellTranscript` are tested above in isolation, which
-   * proves they differ but not that each caller picked the right one — and
-   * picking the wrong one is the whole defect. `bash` writes for a model, so
-   * it wants the transcript; `workspaceExec` hands its result to `/repo`, which
-   * compares `stdout` against a URL, tests it for emptiness to call a tree clean,
-   * and reads a sha out of it to push. Merging there turns every one of those
-   * into a question git's diagnostics can answer wrongly.
-   */
-  it("sends a transcript, while workspaceExec sends two streams", async () => {
+  /** `bash` writes for a model, so it wants the transcript — see `./shell.ts`. */
+  it("sends a transcript", async () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, { ...config, shell: "bash" });
 
@@ -875,11 +819,6 @@ describe("bash", () => {
 
     expect(execs[0]!.command).toContain("bash -o pipefail -c ");
     expect(execs[0]!.command.endsWith(" 2>&1")).toBe(true);
-    // The other half of the seam. `workspaceExec` builds its command with the
-    // same `config.shell` and must not come back with the redirect on it.
-    expect(withShell("git rev-list --count main..HEAD", "bash")).not.toContain(
-      "2>&1"
-    );
   });
 
   /**
@@ -924,32 +863,7 @@ describe("bash", () => {
     expect(reads).toBe(1);
   });
 
-  /**
-   * The runtime separates "the container was swapped underneath you" from "your
-   * command failed". The raw error reads like the latter, and a model that
-   * believes it goes debugging a command that never ran — so the facts it needs
-   * are stated instead: nothing completed, and the workspace survived, because
-   * the filesystem is the Durable Object's rather than the container's.
-   */
-  it("tells the model a lost execution was the container, not the command", async () => {
-    const lost = Object.assign(
-      new Error(
-        'Execution "e1" was lost when its container runtime was replaced.'
-      ),
-      { name: "WorkspaceExecutionLostError", code: "EEXEC_LOST" }
-    );
-    const { workspace } = stub({}, lost);
-    const tools = buildComputerTools(workspace, config);
-
-    const out = await run(tools, "bash", { command: "npm test" });
-    expect(out).toContain("container was replaced");
-    expect(out).toContain("re-run it");
-    expect(out).toContain("workspace is durable");
-    // Named as infrastructure, not dressed up as a command failure.
-    expect(out).not.toContain("error running command");
-  });
-
-  it("still reports an ordinary exec failure as one", async () => {
+  it("reports an exec failure as one", async () => {
     const { workspace } = stub({}, "container unreachable");
     const tools = buildComputerTools(workspace, config);
 
@@ -962,7 +876,7 @@ describe("bash", () => {
 describe("the advisory gate on bash", () => {
   const gated = (
     advisories: WorkspaceAdvisory[],
-    extra: Partial<ComputerConfig> = {}
+    extra: Partial<ComputerToolsConfig> = {}
   ) => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(
@@ -1077,50 +991,6 @@ describe("the advisory gate on bash", () => {
   });
 
   /**
-   * **The case that was silent.** A workspace over its ceiling accepts no
-   * further writes, and the write being lost is almost never a dependency's —
-   * so an advisory filtered by `needsDependencies` reached every command except
-   * the ones that mattered. `universal` is what exempts it from that filter.
-   */
-  it("warns a plain file write that its writes are being dropped", async () => {
-    const { tools, execs } = gated([
-      { kind: "storage-exhausted", bytes: 8.6e9, capBytes: 8e9 }
-    ]);
-
-    const out = await run(tools, "bash", { command: "echo hi > /tmp/f" });
-    // It ran — permanent things never block, for the deadlock reason above.
-    expect(execs).toHaveLength(1);
-    expect(out).toContain("nothing further can be written");
-    expect(out).toContain("8.6 GB");
-  });
-
-  /**
-   * **The file tools are where the writes are.**
-   *
-   * `bash` is not how a coding agent edits source — `write` and `edit` are.
-   * Against a workspace that accepts no more writes, a success report is a
-   * fabrication the model has no way to doubt, which is the same silent data
-   * loss this whole mechanism is about, at the entry point where most of it
-   * happens. `write` goes through the workspace, and is held there — see
-   * `./proxy.spec.ts`.
-   */
-  it("refuses an edit when the workspace cannot keep it, leaving the file alone", async () => {
-    const path = "/workspace/repo/a.ts";
-    const { workspace, files } = stub({ [path]: "const a = 1;\n" });
-    const tools = buildComputerTools(workspace, { ...config }, async () => [
-      { kind: "storage-exhausted", bytes: 8.6e9, capBytes: 8e9 }
-    ]);
-
-    const out = await run(tools, "edit", {
-      path,
-      old_string: "1",
-      new_string: "2"
-    });
-    expect(out).toContain("Nothing was written");
-    expect(files.get(path)).toBe("const a = 1;\n");
-  });
-
-  /**
    * A dependency advisory must not reach a write. Source is not `node_modules`,
    * the write will persist perfectly well, and refusing it would take away the
    * one thing an agent can still usefully do while an install is broken.
@@ -1141,29 +1011,6 @@ describe("the advisory gate on bash", () => {
       await run(tools, "edit", { path, old_string: "1", new_string: "2" })
     ).toBe(`edited ${path}`);
     expect(files.get(path)).toBe("const a = 2;\n");
-  });
-
-  /**
-   * Both true at once, which a single slot cannot represent: it keeps whichever
-   * was written last and silently drops the other, so a command that waits out
-   * the install and never hears about the ceiling comes back to a workspace that
-   * still cannot keep its work.
-   */
-  it("reports a full workspace and an install together", async () => {
-    const { tools, execs } = gated([
-      { kind: "storage-exhausted", bytes: 8.6e9, capBytes: 8e9 },
-      { kind: "deps-building", command: "npm ci", startedAt: Date.now() }
-    ]);
-
-    const out = await run(tools, "bash", { command: "npm test" });
-    expect(execs).toHaveLength(0);
-    expect(out).toContain("still installing");
-    expect(out).toContain("nothing further can be written");
-    // The verdict is stated once, by the only thing that knows it. Rendering it
-    // per advisory produced a message that blocked the command and then told the
-    // model it had run.
-    expect(out).toContain("Nothing was run");
-    expect(out).not.toContain("still ran");
   });
 
   /** A command that throws still carries the warning — it explains the throw. */
@@ -1247,36 +1094,38 @@ describe("the advisory gate on bash", () => {
  * workspace is not this container's would read and write one tree and run
  * commands in another. That fails the start, not a turn.
  */
-describe("computer()", () => {
+describe("sandboxComputer()", () => {
   const onWorkspace = (workspace: unknown) =>
     testPluginContext({ workspace: () => workspace as never });
+  const sandboxed = sandboxWorkspace({
+    binding: {
+      getByName: () => ({})
+    } as unknown as DurableObjectNamespace<SandboxComputerHost>,
+    sandboxName: () => "caller|owner/repo"
+  });
 
   it("offers its tools under Think's names, so they replace the built-ins", () => {
-    const tools = computer(config).tools!(
-      onWorkspace(computerWorkspace(config))
-    );
+    const tools = sandboxComputer(config).tools!(onWorkspace(sandboxed));
     // Think's `find` and `list` stay Think's, walking the workspace.
     expect(Object.keys(tools).sort()).toEqual(["bash", "edit", "grep"]);
   });
 
   it("refuses to start on any other workspace, and says what to set", () => {
-    const plugin = computer(config);
+    const plugin = sandboxComputer(config);
     expect(() => plugin.tools!(onWorkspace({}))).toThrow(PluginSetupError);
     expect(() => plugin.tools!(onWorkspace({}))).toThrow(
-      /computerWorkspace\(config/
+      /sandboxWorkspace\(config/
     );
   });
 
   it("fails the start check core runs, not a turn", () => {
-    const assembled = assemblePlugins([computer(config)], {});
+    const assembled = assemblePlugins([sandboxComputer(config)], {});
     expect(() => assembled.check(onWorkspace({}))).toThrow(PluginSetupError);
-    expect(() =>
-      assembled.check(onWorkspace(computerWorkspace(config)))
-    ).not.toThrow();
+    expect(() => assembled.check(onWorkspace(sandboxed))).not.toThrow();
   });
 
   it("tells the model about its tools in a block the model cannot rewrite", async () => {
-    const [block] = computer(config).context!;
+    const [block] = sandboxComputer(config).context!;
     expect(block.provider && "set" in block.provider).toBe(false);
     expect(await block.provider!.get()).toContain("`bash`");
   });
@@ -1303,7 +1152,7 @@ describe("a cancelled command", () => {
         }
       },
       [Symbol.dispose]: () => {}
-    } as unknown as WorkspaceClient;
+    } as unknown as ComputerClient;
     return { workspace: async () => client, kills, execs };
   }
 
@@ -1355,7 +1204,7 @@ describe("a cancelled command", () => {
   it("says nothing ran when the time limit came before the command started", async () => {
     const controller = new AbortController();
     const pending = execWith(
-      buildComputerTools(() => new Promise<WorkspaceClient>(() => {}), config),
+      buildComputerTools(() => new Promise<ComputerClient>(() => {}), config),
       { command: "npm test" },
       controller.signal
     );
@@ -1426,10 +1275,10 @@ describe("cancellation before the command runs", () => {
   });
 
   it("disposes a workspace that opens only after the call gave up", async () => {
-    let arrive: ((client: WorkspaceClient) => void) | undefined;
+    let arrive: ((client: ComputerClient) => void) | undefined;
     const tools = buildComputerTools(
       () =>
-        new Promise<WorkspaceClient>((resolve) => {
+        new Promise<ComputerClient>((resolve) => {
           arrive = resolve;
         }),
       config
@@ -1451,7 +1300,7 @@ describe("cancellation before the command runs", () => {
       [Symbol.dispose]: () => {
         disposed = true;
       }
-    } as unknown as WorkspaceClient);
+    } as unknown as ComputerClient);
     await tick();
     // Nobody is left holding it, so it is released the moment it turns up.
     expect(disposed).toBe(true);
@@ -1467,7 +1316,7 @@ describe("cancellation before the command runs", () => {
           })
       },
       [Symbol.dispose]: () => {}
-    } as unknown as WorkspaceClient;
+    } as unknown as ComputerClient;
     const tools = buildComputerTools(async () => client, config);
     const controller = new AbortController();
 
@@ -1494,78 +1343,5 @@ describe("cancellation before the command runs", () => {
     // Disposing alone detaches this side and leaves the process running.
     expect(kills).toEqual(["SIGTERM"]);
     expect(disposed).toBe(true);
-  });
-});
-
-/**
- * Which way each tool opens the workspace — `WorkspaceHost.__getWorkspaceFsStub`
- * in `./index.ts` holds why the two openers exist.
- *
- * Asserted per tool, because one that reached for the wrong opener would
- * compile, pass everything else here, and be slow only on a cold container.
- */
-describe("which way the workspace is opened", () => {
-  /** The two openers, counted apart. Both hand back the same client. */
-  function openers(seed: Record<string, string> = {}) {
-    const inner = stub(seed);
-    const opens = { exec: 0, fs: 0 };
-    return {
-      ...inner,
-      opens,
-      tools: buildComputerTools(
-        () => {
-          opens.exec++;
-          return inner.workspace();
-        },
-        config,
-        undefined,
-        () => {
-          opens.fs++;
-          return inner.workspace();
-        }
-      )
-    };
-  }
-
-  it("serves every file tool from the filesystem opener", async () => {
-    const path = "/workspace/repo/src/a.ts";
-    const { tools, opens } = openers({ [path]: "const a = 1;\n" });
-
-    await run(tools, "grep", { query: "const" });
-    await run(tools, "edit", {
-      path,
-      old_string: "const a = 1;",
-      new_string: "const a = 2;"
-    });
-
-    expect(opens).toEqual({ exec: 0, fs: 2 });
-  });
-
-  it("serves a command from the opener that readies the container", async () => {
-    const { tools, opens, execs } = openers();
-
-    await run(tools, "bash", { command: "npm test" });
-
-    expect(opens.exec).toBe(1);
-    expect(opens.fs).toBe(0);
-    expect(execs).toHaveLength(1);
-  });
-
-  /**
-   * The **fourth argument** is what is optional, not the host method:
-   * `WorkspaceHost.__getWorkspaceFsStub` is required. A caller passing one
-   * opener gets that opener everywhere, not a file tool with nothing to open.
-   */
-  it("falls back to the one opener when a host passes only one", async () => {
-    const inner = stub();
-    let opens = 0;
-    const tools = buildComputerTools(() => {
-      opens++;
-      return inner.workspace();
-    }, config);
-
-    await run(tools, "grep", { query: "const" });
-
-    expect(opens).toBe(1);
   });
 });

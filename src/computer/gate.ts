@@ -2,47 +2,17 @@ import {
   renderAdvisory,
   shapeOf,
   type WorkspaceAdvisory
-} from "../workspace/advisory.js";
+} from "../sandbox/advisory.js";
 
 /**
  * What one shell command has to wait for, and what to say when it never ran.
  *
- * {@link file://../workspace/advisory.ts} decides what is true about the workspace and how
+ * {@link file://../sandbox/advisory.ts} decides what is true about the sandbox and how
  * to word it; this file decides what that means for a command about to run.
  * {@link needsDependencies} is the part that cannot move there — it is a
  * question about the *command*, and it is what stops `cat README.md` queueing
  * behind an `npm ci` it has no use for.
- *
- * {@link execLostNote} covers a failure with no advisory behind it: a container
- * replaced underneath a command that was running.
  */
-
-/**
- * The one `bash` failure that is not the command's fault.
- *
- * An execution running when the container is replaced throws `EEXEC_LOST`.
- * Unexplained, the model receives `Execution "…" was lost when its container
- * runtime was replaced`, reads it as a crash, and goes looking at its command.
- *
- * What it needs is two facts: nothing ran to completion, and the workspace
- * survived because the filesystem is the Durable Object's rather than the
- * container's. So re-run it. `node_modules` is the container's, so the note
- * says the replacement reinstalls it.
- *
- * Matched on `code` rather than the message — the property the package sets
- * deliberately, and the one that survives a reworded string.
- */
-export function execLostNote(err: unknown): string | undefined {
-  if ((err as { code?: unknown } | null | undefined)?.code !== "EEXEC_LOST")
-    return undefined;
-  return (
-    "the container was replaced while this command was running, so it was lost — " +
-    "nothing ran to completion and no output survived. This is infrastructure, " +
-    "not your command: re-run it. The workspace is durable and is exactly as you " +
-    "left it. `node_modules` is not: the replacement reinstalls it, and a " +
-    "command that needs it waits for that."
-  );
-}
 
 /**
  * What the workspace's advisories mean for a command about to run.

@@ -45,8 +45,8 @@ export { sandboxRepoGit, type SandboxGitHost } from "./sandbox-git.js";
  * request, on GitHub.
  *
  * Layered over a container rather than owning one: it needs a shell with `git`
- * on it, and `@dynamicagents/plugins/workspace` provides exactly that through
- * `workspaceExec`. Passing `exec` in rather than importing that plugin keeps the
+ * on it, and `@dynamicagents/plugins/sandbox` provides exactly that through
+ * `sandboxExec`. Passing `exec` in rather than importing that plugin keeps the
  * two independent — a host with its own container can use this against that
  * instead, and the tests here need no container at all.
  *
@@ -140,13 +140,10 @@ export type RepoExec = (
  * `commit` and `checkout` are local, need nothing to authenticate with, and stay
  * on `exec` where they are cheap and where the model can see them work.
  *
- * A host implements this against whatever git it has on its own side of the
- * boundary. Over `/workspace`, isomorphic-git runs inside the Durable Object
- * that owns the workspace filesystem, so a push reads the token from that
- * object's environment and the container never holds one. Over `/sandbox`,
+ * A host implements this against whatever git it has. Over `/sandbox`,
  * `sandboxRepoGit` runs the container's own git with a placeholder, and the
- * egress swaps the token in on the Worker side — the container still never
- * holds one.
+ * egress swaps the token in on the Worker side, so the container never holds
+ * one.
  *
  * ## Failures arrive as values
  *

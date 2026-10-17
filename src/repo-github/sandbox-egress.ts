@@ -26,8 +26,6 @@ import { PROTECTED_BRANCHES } from "./url.js";
  * shell included, so what `repo_push` refuses is refused here too, for every
  * credentialed push: a ref that is not a branch, a protected name, and the
  * repository's own default branch, which work reaches through a pull request.
- *
- * The same rules as `../claude-code/github.ts`, which goes when its gateway does.
  */
 
 /** What `GH_TOKEN` and git's credential helper hold. Shaped like a classic token, so nothing refuses it on shape. */

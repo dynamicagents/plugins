@@ -84,9 +84,8 @@ export function cloneTools(ctx: RepoContext): ToolSet {
         //
         // Checked here rather than in `refreshCheckout` because this is where
         // model input arrives and where the message can say what to send instead.
-        // It also covers the fresh-clone path, where the name reaches
-        // isomorphic-git as a ref: no argv there, so no option to parse, but an
-        // unresolvable ref is a worse error than this sentence.
+        // It also covers the fresh-clone path, where an unresolvable ref is a
+        // worse error than this sentence.
         if (branch !== undefined && UNSAFE_BRANCH.test(branch))
           return `"${branch}" is not a plain branch name — use something like "main"`;
 
@@ -183,25 +182,6 @@ export function cloneTools(ctx: RepoContext): ToolSet {
         // plugin never cloned, is on
         // {@link file://./checkout.ts writeGitIdentity}.
         await writeGitIdentity(plain, dir, author);
-
-        // Two gits now share one `.git`, and this is where they could disagree.
-        //
-        // The container's git and the host's isomorphic-git read and write the
-        // same index. isomorphic-git understands version 2 and the extensions
-        // git writes for its own caches are not part of that contract, so a
-        // repository that picked up an untracked cache or a split index — from a
-        // `feature.manyFiles` default, or a user config in some future image —
-        // would be written by one and misread by the other. Pinned at clone
-        // time, repo-locally, where it costs three commands and cannot surprise
-        // anyone later.
-        //
-        // Unchecked deliberately, like the upstream-tracking pair in
-        // `repo_push`: git's own defaults are already these values, so a failure
-        // here means the config could not be written at all, which the very next
-        // command will say far more clearly than this one could.
-        await plain(`config index.version 2`, dir);
-        await plain(`config core.untrackedCache false`, dir);
-        await plain(`config core.splitIndex false`, dir);
 
         // The clone reports the branch it landed on, so nothing has to ask git
         // afterwards — and a failed question would fire `afterCheckout` with no

@@ -9,18 +9,15 @@ and result types are still `Repo*`. An agent installs one forge plugin, so
 nothing the model reads has to change when the provider does.
 
 ```ts
-import { repo } from "@dynamicagents/plugins/repo-github";
-import { workspaceExec } from "@dynamicagents/plugins/workspace";
+import { repo, sandboxRepoGit } from "@dynamicagents/plugins/repo-github";
+import { sandboxExec } from "@dynamicagents/plugins/sandbox";
 
 repo({
-  // Runs in the container. Never given a credential.
-  exec: workspaceExec({ binding: env.WORKSPACE, workspaceName: () => name }),
-  // Yours to implement — this package exports the `RepoGit` type, not a
-  // backing for it, because the token has to live on your side of the
-  // boundary. Clone, fetch and push only; see "Where the token lives" below.
-  // `starter`'s coder does it with isomorphic-git inside the Durable
-  // Object that owns the workspace filesystem.
-  git: workspaceGit({ binding: env.WORKSPACE }),
+  // Runs in the container, as the agent. Never given a credential.
+  exec: sandboxExec({ binding: env.CODING_SANDBOX, sandboxName: () => name() }),
+  // Clone, fetch and push: the container's git, presenting a placeholder the
+  // sandbox's egress swaps for the token. See "Where the token lives" below.
+  git: sandboxRepoGit(() => env.CODING_SANDBOX.getByName(name())),
   token: () => env.GITHUB_TOKEN
 });
 ```
@@ -127,26 +124,21 @@ fork that wants a gate has its agent ask first, through core's `ask_user`.
 
 Two injected dependencies, and the line between them is the trust boundary rather
 than a matter of taste. `exec` is anything that runs a command in the container —
-[`/workspace`](../workspace/)'s `workspaceExec` is one such thing, and injecting it
+[`/sandbox`](../sandbox/)'s `sandboxExec` is one such thing, and injecting it
 keeps the two plugins independent, so a host with its own container can use this
 against that and the tests here need no container at all. `git` is the other side:
-the three operations that talk to GitHub, run by the host, with the credential
-never crossing over. See below for why that split exists.
+the three operations that talk to GitHub, with the credential never inside the
+container. See below for why that split exists.
 
 ## Where the token lives
 
 Not in the container. Not for a moment, not in one command, not in one process's
 environment.
 
-`clone`, `fetch` and `push` — the three operations that authenticate — do not run
-there. They go to the injected `git`, which the host implements on its own side of
-the boundary. The coder in `starter` runs isomorphic-git inside the Durable
-Object that owns the workspace filesystem: the same files the container mounts,
-reached without a shell. No hooks, no `ext::` transport, no template directory, no
-credential helpers.
-
-Over a `/sandbox` object the three do run in the container, as `sandboxRepoGit`, and
-the token still never enters it. The sandbox carries `githubSandboxEgress`: the
+`clone`, `fetch` and `push` — the three operations that authenticate — go to the
+injected `git`. Over a `/sandbox` object they run in the container, as
+`sandboxRepoGit`, and the token still never enters it. The sandbox carries
+`githubSandboxEgress`: the
 harness intercepts `github.com`, git presents a placeholder, and the egress — a Worker
 entrypoint, outside the container — swaps the token in. Every process in the
 container can present the placeholder, so the egress holds every credentialed push to
@@ -168,13 +160,13 @@ for its review does not keep one running.
 
 The rule is absolute rather than careful because the narrower versions do not hold.
 Git is a general-purpose command runner: it executes what `.git/config` and
-`.git/hooks` name, both live in the workspace filesystem, and a co-installed shell
+`.git/hooks` name, both live in the checkout, and a co-installed shell
 tool can write them — so a planted `pre-push` hook reads the token straight out of
 the environment an ordinary `repo_push` gives it. Patching that key by key fails
 too, because a URL-specific `http.<url>.sslVerify=false` in the repository's own
 config beats a `-c` override: specificity outranks precedence. And a token that
 lives in a process environment for the length of one command is readable at
-`/proc/<pid>/environ` by anything else on a filesystem the model has root on.
+`/proc/<pid>/environ` by any other process running as the same user.
 
 Two more rules, about GitHub rather than the container:
 

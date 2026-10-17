@@ -72,9 +72,9 @@ describe("parseRepo", () => {
    *
    * Parsed on its own branch ahead of the protocol check,
    * `git@github.com:owner/repo.git` passes a gate whose refusal message
-   * promises https. Nothing downstream can act on it — isomorphic-git has no
-   * SSH transport — so it failed one step further from the model, which is the
-   * worse place for it.
+   * promises https. Nothing downstream can act on it — the egress intercepts
+   * GitHub over https only — so it failed one step further from the model,
+   * which is the worse place for it.
    */
   it.each([
     ["git@github.com:owner/repo.git", "scp-like syntax"],

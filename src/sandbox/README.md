@@ -170,7 +170,7 @@ lost container can resume it.
     {
       "class_name": "CodingSandbox",
       "scheduling_policy": "durable_object",
-      "images": { "app": { "dockerfile": "./Dockerfile.sandbox" } }
+      "images": { "app": { "dockerfile": "./Dockerfile" } }
     }
   ],
   "r2_buckets": [

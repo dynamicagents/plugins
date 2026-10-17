@@ -8,7 +8,7 @@ import type { ComputerContext } from "./context.js";
 /**
  * Editing a file in place — the one file tool this plugin keeps. Think's
  * `read`, `write` and `delete` reach the workspace through the agent's own
- * `this.workspace`, which is `computerWorkspace` (`./proxy.ts`).
+ * `this.workspace`, which is `sandboxWorkspace` (`./sandbox.ts`).
  *
  * Not Think's `edit`, because that one is two calls through the workspace — a
  * `readFile`, then a `writeFile` — and a lock inside the workspace cannot span

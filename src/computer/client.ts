@@ -1,9 +1,7 @@
 /**
  * What the computer tools use of where they run: a filesystem and a shell.
- *
- * Both kinds of workspace give one. `/workspace`'s `@cloudflare/computer` client
- * is one as it stands, and a sandbox's is built by `./sandbox.ts`. The tools
- * are written against this rather than either, so neither's type reaches them.
+ * A sandbox's is built by `./sandbox.ts`; the tools are written against this,
+ * so no RPC type reaches them.
  */
 
 export interface GrepMatch {
@@ -76,7 +74,6 @@ export interface CommandResult {
   stderr: string;
   /** Anything but `completed` is said on the verdict line — see `./render.ts`. */
   status?: "completed" | "failed" | "cancelled";
-  sync?: { status: "complete" | "pending" };
 }
 
 export interface CommandHandle extends Disposable {

@@ -6,7 +6,7 @@ import { createVcr, recordFromEnv } from "@dynamicagents/core/testing/node";
 /**
  * Specs run **inside workerd**, not Node.
  *
- * Most of what lives here is pure and would run anywhere, but the workspace host
+ * Most of what lives here is pure and would run anywhere, but the sandbox host
  * is a Durable Object and has to be driven in a real one. So the pool boots the
  * real runtime with the Durable Object declared in `wrangler.jsonc`, and
  * `test/worker.ts` is the host that owns it.

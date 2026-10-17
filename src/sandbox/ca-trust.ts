@@ -5,8 +5,6 @@
  * and it mounts that CA only after `start()` and the intercept call — so the
  * image's entrypoint runs before there is anything to trust, and this runs from
  * the object instead, once per container. HTTP intercepts need none of it.
- *
- * The same command as `../workspace/ca-trust.ts`, which goes with that subpath.
  */
 export const TRUST_CA_COMMAND = [
   'ls -A /etc/cloudflare/certs 2>&1 || echo "(no /etc/cloudflare/certs)"',

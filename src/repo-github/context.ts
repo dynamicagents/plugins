@@ -61,9 +61,9 @@ const GRAPHQL_URL = `${API_BASE}/graphql`;
 /**
  * What one container command produced — plus one bit the container did not.
  *
- * `exec` does not only *return* failures, it throws them: `@cloudflare/computer`
- * throws `EEXEC_LOST` when a container is replaced mid-command, and any call to a
- * Durable Object can fail outright. Both are caught at the seam
+ * `exec` does not only *return* failures, it throws them: any call to a Durable
+ * Object can fail outright, a container lost mid-command among them. That is
+ * caught at the seam
  * ({@link repoContext}'s `run`) and turned into a failed result, so every tool
  * answers in its own `!success` branch — "could not read the status of /w/r: …"
  * is a better sentence than any wrapper one level up could write, and a seventh
@@ -77,34 +77,20 @@ export type RunResult = Awaited<ReturnType<RepoExec>> & { unreachable?: true };
 
 /**
  * What to tell the model when the plumbing, not the command, is the problem.
- *
- * A sibling of the computer plugin's `execLostNote` rather than an import:
- * `verify:exports` fails any subpath whose module graph reaches a sibling's,
- * and installing this plugin must not drag `/computer` in behind it. A helper
- * two plugins both want goes to `@dynamicagents/core` instead, the way
- * `truncateOutput` did — but this is not one of those. The wording differs, and
- * the difference is the point: that plugin cannot know the lost command was
- * git, and this one does. What a model needs after a lost `git push` is not
- * "re-run it" but whether re-running it is *safe*.
+ * What a model needs after a lost `git push` is not "re-run it" but whether
+ * re-running it is *safe*, which only this plugin knows: the lost command was
+ * git.
  */
 function unreachableNote(err: unknown): string {
-  if ((err as { code?: unknown } | null | undefined)?.code === "EEXEC_LOST") {
-    return (
-      "the container was replaced while this command was running, so nothing here " +
-      "is known to have finished. This is infrastructure — not git, and not what " +
-      "you asked for. The checkout is durable and is exactly as you left it. " +
-      "Retry, and read what the retry says rather than assuming it starts from " +
-      "nothing: a command that had already reached GitHub may have taken " +
-      "effect. Retrying is safe either way — these commands push one branch to " +
-      "the branch of the same name, and never force."
-    );
-  }
   return (
     `the command could not be run: ${String(err)}. This is the plumbing — the ` +
     `container, the transport to it, or the host's own configuration — rather ` +
     `than git or anything you passed, and nothing is known to have completed. ` +
-    `Retry once; if it happens again, say so in your result rather than working ` +
-    `around it.`
+    `Retry once, and read what the retry says rather than assuming it starts ` +
+    `from nothing: a command that had already reached GitHub may have taken ` +
+    `effect. Retrying is safe either way — these commands push one branch to ` +
+    `the branch of the same name, and never force. If it happens again, say so ` +
+    `in your result rather than working around it.`
   );
 }
 

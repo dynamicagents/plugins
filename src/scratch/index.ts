@@ -170,9 +170,9 @@ export interface ScratchConfig {
 /**
  * What one command produced — plus one bit the container did not report.
  *
- * `exec` does not only return failures, it throws them: `@cloudflare/computer`
- * throws when a container is replaced mid-command, and a call to a Durable
- * Object can fail outright. `unreachable` keeps that distinguishable from a
+ * `exec` does not only return failures, it throws them: a call to a Durable
+ * Object can fail outright, a container lost mid-command among them.
+ * `unreachable` keeps that distinguishable from a
  * command that ran and said no, which three branches below depend on.
  */
 interface Ran {

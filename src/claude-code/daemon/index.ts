@@ -2,9 +2,8 @@
  * `@dynamicagents/plugins/claude-code/daemon` — Claude Code as a sandbox
  * daemon's CLI. Node-only, like the daemon it plugs into.
  *
- * The launch is this package's (`../run.ts` `buildLaunch` says why each flag
- * and variable): permission mode, effort, model, a named JSON schema, resume
- * and fork, per turn from the run header. The parse is this package's too
+ * The launch is this package's: permission mode, effort, model, a named JSON
+ * schema, resume and fork, per turn from the run header. The parse is this package's too
  * (`../events.ts`), not the harness preset's, because a transcript card reads
  * a tool's own record of what it did and the preset keeps only the text.
  *
@@ -51,7 +50,7 @@ export interface ClaudeCodeDaemonOptions {
   effort?: EffortLevel;
   /** A `build` run's mode. A `plan` run is always `plan`. */
   permissionMode?: PermissionMode;
-  /** Who the session's own commits are attributed to — see `../config.ts` `ClaudeCodeConfig.author`. */
+  /** Who the session's own commits are attributed to — every git it starts, a submodule's and an amend's included. */
   author?: { name: string; email: string };
   maxSubagentDepth?: number;
   maxConcurrentSubagents?: number;
@@ -85,6 +84,25 @@ export function claudeCodeDaemonCli(
   };
 }
 
+/**
+ * One turn's command.
+ *
+ * `stream-json` with `--verbose`, because the stream is the only way to report
+ * progress before a run of minutes ends, and without `--verbose` the CLI emits
+ * only the final result even in stream mode. The mode is always passed, never
+ * left to the CLI's own — see `../config.ts` `ClaudeCodeConfig.permissionMode`.
+ *
+ * A resumed turn's prompt is the next user turn. An id whose conversation is
+ * not there is not a failed session: the CLI emits a `result` naming it, with
+ * no model call and nothing billed. A fork continues the conversation under a
+ * new id, which is what a change of mode wants — a plan's conversation stays
+ * whole for an edit afterwards.
+ *
+ * What is absent: no `--bare` and no `--settings` override. A cloned
+ * repository's `CLAUDE.md`, skills and hooks are what make the agent good at
+ * it, and the container already runs that repository's `postinstall` and test
+ * suite by design.
+ */
 function command(
   options: ClaudeCodeDaemonOptions,
   turn: SandboxCliTurn
@@ -122,9 +140,17 @@ function command(
 }
 
 /**
- * `../run.ts` `buildLaunch` says why each of these. What is not here is what the
- * sandbox makes unnecessary: the CLI runs as the agent rather than root, so no
- * `IS_SANDBOX`, and each session has its own home, so no `CLAUDE_CONFIG_DIR`.
+ * The session's environment. No autoupdate: the image is pinned, and an update
+ * would move the wire shape the egress and the parser are written against,
+ * mid-run. No nonessential traffic: telemetry and feature-flag fetches, off at
+ * the source. The CLI runs as the agent rather than root, so no `IS_SANDBOX`,
+ * and each session has its own home, so no `CLAUDE_CONFIG_DIR`.
+ *
+ * Git's identity is an environment, not a `git config`: every git the session
+ * starts inherits it — a superproject's submodules, a scratch clone — and it
+ * outranks every config level. Both pairs, because an amend or a rebase keeps
+ * the author and stamps a fresh committer. Applied after `env`, so the four
+ * keys are one answer.
  *
  * The credential and its base URL are applied last, so a deployment's `env`
  * cannot point the CLI at a real one. What other hosts need — git's and `gh`'s

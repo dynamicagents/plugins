@@ -4,14 +4,14 @@ import { z } from "zod";
 /**
  * The Claude Code writer, as data: what the parent's model is offered. The host
  * binds it to a `SubAgent` class whose model is
- * {@link file://./model.ts claudeCodeModel}, and adds the `prepare` and
- * `settle` that claim and release its workspace. A planner is the same spec
+ * {@link file://./harness-model.ts claudeCodeHarnessModel}, and adds the `prepare` and
+ * `settle` that claim and release its sandbox. A planner is the same spec
  * under another name, description and input, whose model runs under `plan` —
- * see {@link file://./model.ts ClaudeCodeModelOptions.permissionMode}.
+ * see `./harness-model.ts` `ClaudeCodeHarnessModelOptions.permissionMode`.
  *
  * A module of its own for its `zod` schemas. `zod` costs a Worker bundle
- * ~460 KiB, and the workspace Durable Object imports this subpath for its
- * egress gateway alone; with `sideEffects: false`, a module nothing it uses
+ * ~460 KiB, and a sandbox Durable Object imports this subpath for its egress
+ * rule and credential pool alone; with `sideEffects: false`, a module nothing it uses
  * reaches is dropped from that bundle whole.
  *
  * It runs **detached**: a session runs for up to its `timeoutMs`, past the

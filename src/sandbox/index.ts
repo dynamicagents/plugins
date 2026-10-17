@@ -67,6 +67,7 @@ export {
 } from "./advisory.js";
 export {
   DEFAULT_INSTALL_PLAN,
+  resolveInstallCommand,
   type InstallPlan,
   type InstallRule,
   type InstallState

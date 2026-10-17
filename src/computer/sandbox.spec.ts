@@ -3,19 +3,15 @@ import { PluginSetupError } from "@dynamicagents/core";
 import { freshSandbox } from "../../test/sandbox/do.js";
 import { testPluginContext } from "../../test/helpers.js";
 import {
-  computer,
-  computerWorkspace,
   sandboxClient,
   sandboxComputer,
   sandboxWorkspace,
-  type ComputerConfig,
   type SandboxComputerHost
 } from "./index.js";
 
 /**
  * The computer tools over a sandbox, behind a fake container: what goes to the
- * container, and how its answers are read. That ripgrep reads them the same
- * way as the workspace's own search is checked against a real one, not here.
+ * container, and how its answers are read.
  */
 
 const json = (value: unknown) => JSON.stringify(value);
@@ -181,35 +177,20 @@ describe("sandboxComputer()", () => {
     getByName: () => ({})
   } as unknown as DurableObjectNamespace<SandboxComputerHost>;
   const sandboxed = sandboxWorkspace({ binding, sandboxName: () => "s" });
-  const workspaceConfig = {
-    binding: {} as ComputerConfig["binding"],
-    workspaceName: () => "w"
-  };
 
-  it("still takes a workspace's whole config", () => {
-    // A type-level check as much as a runtime one: the literal is what
-    // excess-property checking would refuse against the tools' own shape.
-    expect(
-      Object.keys(
-        computer({
-          binding: workspaceConfig.binding,
-          workspaceName: () => "w"
-        }).tools!(onWorkspace(computerWorkspace(workspaceConfig)))
-      ).sort()
-    ).toEqual(["bash", "edit", "grep"]);
-  });
-
-  it("runs on a sandbox's workspace and refuses a workspace's, and the other way round", () => {
+  /**
+   * Think's own workspace is the one an agent has unless it says otherwise,
+   * and over it `read` and `write` would work on a different tree from `bash`.
+   */
+  it("runs on a sandbox's workspace, and refuses any other", () => {
     expect(
       Object.keys(sandboxComputer({}).tools!(onWorkspace(sandboxed))).sort()
     ).toEqual(["bash", "edit", "grep"]);
-    expect(() =>
-      sandboxComputer({}).tools!(
-        onWorkspace(computerWorkspace(workspaceConfig))
-      )
-    ).toThrow(/sandboxWorkspace\(config/);
-    expect(() => computer({}).tools!(onWorkspace(sandboxed))).toThrow(
+    expect(() => sandboxComputer({}).tools!(onWorkspace({}))).toThrow(
       PluginSetupError
+    );
+    expect(() => sandboxComputer({}).tools!(onWorkspace({}))).toThrow(
+      /sandboxWorkspace\(config/
     );
   });
 

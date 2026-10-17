@@ -5,11 +5,11 @@ not a checkout.
 
 ```ts
 import { scratch } from "@dynamicagents/plugins/scratch";
-import { workspaceExec } from "@dynamicagents/plugins/workspace";
+import { sandboxExec } from "@dynamicagents/plugins/sandbox";
 
 scratch({
   // Runs in the container. Nothing here ever needs a credential.
-  exec: workspaceExec({ binding: env.WORKSPACE, workspaceName: () => name })
+  exec: sandboxExec({ binding: env.CODING_SANDBOX, sandboxName: () => name() })
 });
 ```
 
@@ -35,9 +35,9 @@ already does for a checkout applies unchanged:
 
 - It is a real git repository, so a host's `git reset --hard && git clean -fdx`
   discards a cancelled task's edits out of it.
-- It lives in the workspace, so it is durable across tasks and is reclaimed by
-  whatever already reclaims the workspace.
-- It goes through the host's own workspace selection, so it is keyed, routed and
+- It lives in a sandbox, so it is durable across tasks and is reclaimed by
+  whatever already reclaims the sandbox.
+- It goes through the host's own sandbox selection, so it is keyed, routed and
   cleaned up by machinery that exists rather than by a second mechanism alongside
   it.
 
@@ -84,13 +84,13 @@ _is_, the host knows how it addresses one.
 
 ```ts
 scratch({
-  exec: workspaceExec(config),
-  // Select the workspace, before any command runs. Synchronous; a throw fails
+  exec: sandboxExec(config),
+  // Select the sandbox, before any command runs. Synchronous; a throw fails
   // the open, because a host that could not choose has not chosen.
   beforeOpen: () => active.set(SCRATCH),
   // Record it, and say whether you can see it.
   afterOpen: async ({ dir }) => {
-    const { present } = await workspace().noteCheckout({
+    const { present } = await sandbox().noteCheckout({
       dir,
       kind: "scratch"
     });
@@ -100,7 +100,7 @@ scratch({
 ```
 
 A host that wires neither still gets a working scratchpad, as long as its
-workspace is not keyed per repository.
+sandbox is not keyed per repository.
 
 **`afterOpen` returns readiness where `RepoConfig.afterCheckout` returns `void`,
 and a throw in it reaches the model rather than being logged.** Both differences
@@ -114,13 +114,13 @@ not record cannot be delegated into at all.
 ## Selection, not a capability
 
 Install it on a **parent only**, never on a sub-agent. Opening a scratchpad _selects a
-workspace_, exactly as `repo_clone` does. A sub-agent holding it could re-point the
-workspace its parent prepared half-way through its own run; a sub-agent works in whatever
+sandbox_, exactly as `repo_clone` does. A sub-agent holding it could re-point the
+sandbox its parent prepared half-way through its own run; a sub-agent works in whatever
 it was given.
 
 For the same reason, the context block tells the model that a task works in a
 cloned repository **or** in the scratchpad and not both. A host that keys one
-workspace selection per caller points every other workspace tool at whatever was
+sandbox selection per caller points every other container tool at whatever was
 selected last, so an agent that opens a scratchpad mid-checkout has quietly moved
 its own `repo_diff` and `repo_commit` with it. That is a property of the host's
 routing rather than something this plugin can prevent, which is why the model is
@@ -129,5 +129,5 @@ told the rule instead of being left to discover it.
 ## Requirements
 
 None of its own. It needs a shell in a container — `exec` is injected, so
-[`/workspace`](../workspace/)'s `workspaceExec` is one source of it and a host with
-its own container is another. No credential, no binding, no secret.
+[`/sandbox`](../sandbox/)'s `sandboxExec` is one source of it and a host with its
+own container is another. No credential, no binding, no secret.
