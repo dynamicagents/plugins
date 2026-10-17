@@ -5,18 +5,15 @@ its git and its install — is [`/sandbox`](../sandbox/), whose checkout is the
 container's own disk.
 
 ```ts
-import {
-  sandboxComputer,
-  sandboxWorkspace
-} from "@dynamicagents/plugins/computer";
+import { computer, computerWorkspace } from "@dynamicagents/plugins/computer";
 
 class Coder extends StepAgent<Env> {
-  override workspace = sandboxWorkspace(
+  override workspace = computerWorkspace(
     { binding: this.env.CODING_SANDBOX, sandboxName: () => this.name },
     () => this.pluginContext().runtime()
   );
   override getPlugins() {
-    return [sandboxComputer({ shell: "bash" })];
+    return [computer({ shell: "bash" })];
   }
 }
 ```
@@ -33,7 +30,7 @@ holding them carries no container backend.
 Think's `read`, `write`, `edit` and `delete` work on whatever the agent's
 `this.workspace` is. An agent that installed this plugin but kept Think's own
 workspace would run `bash` in the container and `write` in its own SQLite, and
-nothing would say so. So the agent sets `workspace = sandboxWorkspace(config, …)`,
+nothing would say so. So the agent sets `workspace = computerWorkspace(config, …)`,
 and the plugin **refuses to start** on any other — a `PluginSetupError` naming what
 to set. Its tools then reach the container through that workspace rather than
 through their own config, so `bash` and Think's `write` always resolve the same one.

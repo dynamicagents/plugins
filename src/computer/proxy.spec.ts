@@ -1,12 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import type { SandboxAdvisory } from "../sandbox/advisory.js";
 import { SANDBOX_RUNTIME_KEY } from "../sandbox/name.js";
 import { testPluginContext } from "../../test/helpers.js";
 import type { ComputerClient } from "./client.js";
 import {
   buildComputerTools,
-  sandboxComputer,
-  sandboxWorkspace,
+  computer,
+  computerWorkspace,
   type SandboxComputerHost
 } from "./index.js";
 import { routedWorkspace, workspaceRoute } from "./proxy.js";
@@ -33,7 +33,7 @@ interface Seen {
 
 function fake(
   seed: Record<string, string> = {},
-  advisories: readonly WorkspaceAdvisory[] = [],
+  advisories: readonly SandboxAdvisory[] = [],
   /**
    * Hold the first `writeFile` until this settles — an edit's write, caught
    * between its read and its landing, which is where the lock specs look.
@@ -306,7 +306,7 @@ function sandboxHolding(content: string) {
   return { binding, reached };
 }
 
-describe("sandboxWorkspace", () => {
+describe("computerWorkspace", () => {
   /**
    * A parent names its sandbox from config; a sub-agent reads the one its
    * parent prepared out of `runtime()`. Read per call, because the runtime
@@ -315,7 +315,7 @@ describe("sandboxWorkspace", () => {
   it("reaches the sandbox the running turn names", async () => {
     const { binding, reached } = sandboxHolding("x");
     let runtime: Record<string, unknown> | undefined = undefined;
-    const ws = sandboxWorkspace(
+    const ws = computerWorkspace(
       { binding, sandboxName: () => "caller|owner/repo" },
       () => runtime
     );
@@ -338,11 +338,11 @@ describe("the tools and the workspace", () => {
   it("reach the one sandbox the agent's workspace names", async () => {
     const { binding, reached } = sandboxHolding("const a = 1;\n");
     const runtime = { [SANDBOX_RUNTIME_KEY]: "caller|owner/repo#w1" };
-    const workspace = sandboxWorkspace(
+    const workspace = computerWorkspace(
       { binding, sandboxName: () => "caller|owner/repo" },
       () => runtime
     );
-    const tools = sandboxComputer({}).tools!(
+    const tools = computer({}).tools!(
       testPluginContext({ workspace: () => workspace })
     );
 

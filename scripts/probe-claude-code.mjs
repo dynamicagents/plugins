@@ -15,7 +15,7 @@
  * adapter's parser. Its traffic goes to the placeholder host the daemon points
  * it at, over plain HTTP, through a local proxy standing in for the harness's
  * interception: every request goes through the real `sandboxEgress` and
- * `claudeCodeSandboxEgress`, leasing from a `credentialHost` pool, and on to a
+ * `claudeCodeEgress`, leasing from a `credentialHost` pool, and on to a
  * fake Anthropic that streams a canned reply, or with `--live` to the real API
  * on `CLAUDE_CODE_OAUTH_TOKEN`. A session is
  * run once and resumed as a writer's warning turn is; a planning run — a
@@ -169,8 +169,8 @@ const dist = (file) =>
   import(pathToFileURL(path.join(root, "dist", file)).href);
 const { egressPlan, sandboxEgress } = await dist("sandbox/egress.js");
 const { claudeCodeDaemonCli } = await dist("claude-code/daemon/index.js");
-const { claudeCodeSandboxEgress, credentialHost } = await dist(
-  "claude-code/harness-egress.js"
+const { claudeCodeEgress, credentialHost } = await dist(
+  "claude-code/egress.js"
 );
 const { ANTHROPIC_PLACEHOLDER_HOST, decodeRunEnd } = await dist(
   "claude-code/harness-wire.js"
@@ -237,7 +237,7 @@ try {
     },
     credentials: () => [credential]
   });
-  const rule = claudeCodeSandboxEgress({ label: "probe" });
+  const rule = claudeCodeEgress({ label: "probe" });
   const plan = egressPlan([rule], "PROBE_SANDBOX/probe");
   const egress = (request) =>
     sandboxEgress(

@@ -1,5 +1,5 @@
 import { withAbort } from "@dynamicagents/core";
-import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import type { SandboxAdvisory } from "../sandbox/advisory.js";
 import { DEFAULT_EXEC_TIMEOUT_MS } from "../sandbox/exec.js";
 import { SANDBOX_ROOT } from "../sandbox/header.js";
 import type { ComputerClient } from "./client.js";
@@ -53,7 +53,7 @@ export interface ComputerContext {
 export function computerContext(
   workspace: () => Promise<ComputerClient>,
   config: ComputerToolsConfig,
-  advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
+  advisories?: () => Promise<readonly SandboxAdvisory[]>,
   lockScope?: () => string
 ): ComputerContext {
   const cwd = config.cwd ?? SANDBOX_ROOT;
@@ -87,7 +87,7 @@ export function computerContext(
     // working shell — running the command is exactly what would have happened
     // before the gate existed, and a spurious blockage would strand the
     // agent.
-    const read = async (): Promise<readonly WorkspaceAdvisory[]> => {
+    const read = async (): Promise<readonly SandboxAdvisory[]> => {
       try {
         signal?.throwIfAborted();
         return await withAbort(signal, advisories());

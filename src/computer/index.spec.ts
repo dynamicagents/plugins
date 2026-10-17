@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { ToolSet } from "ai";
 import { assemblePlugins, PluginSetupError } from "@dynamicagents/core";
-import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import type { SandboxAdvisory } from "../sandbox/advisory.js";
 import type { ComputerClient } from "./client.js";
 import {
   buildComputerTools,
-  sandboxComputer,
-  sandboxWorkspace,
+  computer,
+  computerWorkspace,
   type ComputerToolsConfig,
   type SandboxComputerHost
 } from "./index.js";
@@ -728,7 +728,7 @@ describe("paths inside .git", () => {
     });
     expect(refusal).not.toContain("bash");
 
-    const [block] = sandboxComputer(config).context!;
+    const [block] = computer(config).context!;
     const context = String(await block.provider!.get());
     const gitLine = context
       .split("\n")
@@ -875,7 +875,7 @@ describe("bash", () => {
 
 describe("the advisory gate on bash", () => {
   const gated = (
-    advisories: WorkspaceAdvisory[],
+    advisories: SandboxAdvisory[],
     extra: Partial<ComputerToolsConfig> = {}
   ) => {
     const { workspace, execs } = stub();
@@ -1094,10 +1094,10 @@ describe("the advisory gate on bash", () => {
  * workspace is not this container's would read and write one tree and run
  * commands in another. That fails the start, not a turn.
  */
-describe("sandboxComputer()", () => {
+describe("computer()", () => {
   const onWorkspace = (workspace: unknown) =>
     testPluginContext({ workspace: () => workspace as never });
-  const sandboxed = sandboxWorkspace({
+  const sandboxed = computerWorkspace({
     binding: {
       getByName: () => ({})
     } as unknown as DurableObjectNamespace<SandboxComputerHost>,
@@ -1105,27 +1105,27 @@ describe("sandboxComputer()", () => {
   });
 
   it("offers its tools under Think's names, so they replace the built-ins", () => {
-    const tools = sandboxComputer(config).tools!(onWorkspace(sandboxed));
+    const tools = computer(config).tools!(onWorkspace(sandboxed));
     // Think's `find` and `list` stay Think's, walking the workspace.
     expect(Object.keys(tools).sort()).toEqual(["bash", "edit", "grep"]);
   });
 
   it("refuses to start on any other workspace, and says what to set", () => {
-    const plugin = sandboxComputer(config);
+    const plugin = computer(config);
     expect(() => plugin.tools!(onWorkspace({}))).toThrow(PluginSetupError);
     expect(() => plugin.tools!(onWorkspace({}))).toThrow(
-      /sandboxWorkspace\(config/
+      /computerWorkspace\(config/
     );
   });
 
   it("fails the start check core runs, not a turn", () => {
-    const assembled = assemblePlugins([sandboxComputer(config)], {});
+    const assembled = assemblePlugins([computer(config)], {});
     expect(() => assembled.check(onWorkspace({}))).toThrow(PluginSetupError);
     expect(() => assembled.check(onWorkspace(sandboxed))).not.toThrow();
   });
 
   it("tells the model about its tools in a block the model cannot rewrite", async () => {
-    const [block] = sandboxComputer(config).context!;
+    const [block] = computer(config).context!;
     expect(block.provider && "set" in block.provider).toBe(false);
     expect(await block.provider!.get()).toContain("`bash`");
   });
@@ -1256,7 +1256,7 @@ describe("cancellation before the command runs", () => {
     const tools = buildComputerTools(
       workspace,
       { ...config, installGateMs: 60_000 },
-      () => new Promise<readonly WorkspaceAdvisory[]>(() => {})
+      () => new Promise<readonly SandboxAdvisory[]>(() => {})
     );
     const controller = new AbortController();
 

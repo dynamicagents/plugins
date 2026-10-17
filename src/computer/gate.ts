@@ -1,7 +1,7 @@
 import {
   renderAdvisory,
   shapeOf,
-  type WorkspaceAdvisory
+  type SandboxAdvisory
 } from "../sandbox/advisory.js";
 
 /**
@@ -53,9 +53,9 @@ export interface ExecGate {
 
 /** Which advisories this particular command needs to hear about. */
 function relevantTo(
-  advisories: readonly WorkspaceAdvisory[],
+  advisories: readonly SandboxAdvisory[],
   command: string
-): readonly WorkspaceAdvisory[] {
+): readonly SandboxAdvisory[] {
   // Computed once for the whole set rather than per advisory: it parses the
   // command, and it is the same answer for all of them.
   const dependencyCommand = needsDependencies(command);
@@ -73,7 +73,7 @@ function relevantTo(
  * pointless, and reporting only the blockage would send it round the loop again.
  */
 export function execGate(
-  advisories: readonly WorkspaceAdvisory[],
+  advisories: readonly SandboxAdvisory[],
   command: string
 ): ExecGate {
   const relevant = relevantTo(advisories, command);
@@ -119,7 +119,7 @@ export function execGate(
  * and that message is worse than nothing because it is believed.
  */
 export function writeGate(
-  advisories: readonly WorkspaceAdvisory[]
+  advisories: readonly SandboxAdvisory[]
 ): string | undefined {
   // Keyed on the axis, not on the kind: any future advisory that loses writes
   // stops them here without this function being revisited.

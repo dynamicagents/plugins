@@ -1,7 +1,7 @@
 import type { ToolSet } from "ai";
 import { definePlugin, PluginSetupError } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
-import type { WorkspaceAdvisory } from "../sandbox/advisory.js";
+import type { SandboxAdvisory } from "../sandbox/advisory.js";
 import type { ComputerClient } from "./client.js";
 import { workspaceRoute } from "./proxy.js";
 import { computerContext } from "./context.js";
@@ -11,7 +11,7 @@ import { grepTools } from "./tools-grep.js";
 
 /**
  * `@dynamicagents/plugins/computer` — an agent's tools over a `/sandbox`
- * container: `bash`, `grep` and `edit`, and `sandboxWorkspace`, the agent's own
+ * container: `bash`, `grep` and `edit`, and `computerWorkspace`, the agent's own
  * `this.workspace`, which Think's `read`, `write`, `delete`, `find` and `list`
  * go through.
  *
@@ -20,7 +20,7 @@ import { grepTools } from "./tools-grep.js";
  * through its object, so an agent that holds the tools carries no container
  * backend.
  *
- * The agent's own workspace has to be the sandbox's — `sandboxWorkspace` — or
+ * The agent's own workspace has to be the sandbox's — `computerWorkspace` — or
  * Think's `read` and `write` would work on a different tree from `bash`. The
  * plugin refuses to start otherwise; see `./proxy.ts`. `paths.ts` owns what a
  * path may be and what walks drop.
@@ -41,7 +41,7 @@ export {
 } from "./gate.js";
 export {
   sandboxClient,
-  sandboxWorkspace,
+  computerWorkspace,
   type SandboxComputerConfig,
   type SandboxComputerHost
 } from "./sandbox.js";
@@ -127,7 +127,7 @@ export interface ComputerToolsConfig {
 export function buildComputerTools(
   workspace: () => Promise<ComputerClient>,
   config: ComputerToolsConfig,
-  advisories?: () => Promise<readonly WorkspaceAdvisory[]>,
+  advisories?: () => Promise<readonly SandboxAdvisory[]>,
   lockScope?: () => string
 ): ToolSet {
   const ctx = computerContext(workspace, config, advisories, lockScope);
@@ -154,11 +154,11 @@ const CONTEXT = [
 
 /**
  * The container plugin over a `/sandbox` object. Its tools reach the sandbox
- * through the agent's own `sandboxWorkspace` — the one Think's `read` and
+ * through the agent's own `computerWorkspace` — the one Think's `read` and
  * `write` use — so the two can never resolve different ones. `config` answers
  * everything else.
  */
-export function sandboxComputer(config: ComputerToolsConfig): AgentPlugin {
+export function computer(config: ComputerToolsConfig): AgentPlugin {
   return definePlugin({
     name: "computer",
 
@@ -171,7 +171,7 @@ export function sandboxComputer(config: ComputerToolsConfig): AgentPlugin {
           `plugin "computer" runs \`bash\` in a container, but ${ctx.agentName}'s ` +
             "workspace is not that container's, so Think's `read` and `write` " +
             "would work on a different tree. Set it on the agent class: " +
-            "`override workspace = sandboxWorkspace(config, () => this.pluginContext().runtime())`."
+            "`override workspace = computerWorkspace(config, () => this.pluginContext().runtime())`."
         );
       // Resolved per call, not memoized: the name belongs to the turn — a
       // sub-agent's comes from `runtime()`, see `/sandbox`'s

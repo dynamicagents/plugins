@@ -106,7 +106,7 @@ export interface SandboxRuns {
   stopRun(runId: string): Promise<{ stopped: boolean }>;
 }
 
-export interface ClaudeCodeHarnessModelOptions {
+export interface ClaudeCodeModelOptions {
   /**
    * The sandbox the run is in. Called again after a failed call, so each call
    * should reach the object through a new stub.
@@ -133,7 +133,7 @@ export interface ClaudeCodeHarnessModelOptions {
   resume?: { run: string; fork?: boolean };
   /**
    * How long a session may run, from its first submission, before it is
-   * stopped. Default {@link DEFAULT_HARNESS_TIMEOUT_MS}.
+   * stopped. Default {@link DEFAULT_TIMEOUT_MS}.
    */
   timeoutMs?: number;
   /**
@@ -178,7 +178,7 @@ export interface ClaudeCodeHarnessModelOptions {
  * budget for one that is. No timer in the sandbox races it, since the
  * container's idle stop never fires while an operation is open.
  */
-export const DEFAULT_HARNESS_TIMEOUT_MS = 3 * 60 * 60_000;
+export const DEFAULT_TIMEOUT_MS = 3 * 60 * 60_000;
 
 /** What a session is told when it resumes in a new container. */
 export const CONTAINER_LOST_PROMPT =
@@ -220,11 +220,11 @@ interface TurnState {
 
 type Step = "session" | "follow-up";
 
-export function claudeCodeHarnessModel(
-  options: ClaudeCodeHarnessModelOptions
+export function claudeCodeModel(
+  options: ClaudeCodeModelOptions
 ): LanguageModelV3 {
   const { storage, runId } = options;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_HARNESS_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const key = (name: string) => `claude-code:${runId}:${name}`;
   const KEYS = {
     brief: key("brief"),

@@ -25,7 +25,7 @@ import { humanMs } from "./format.js";
  *
  * ## One home for what each kind means
  *
- * {@link shapeOf} is the only exhaustive `switch` over {@link WorkspaceAdvisory}
+ * {@link shapeOf} is the only exhaustive `switch` over {@link SandboxAdvisory}
  * that decides *policy*, and {@link renderAdvisory} the only one that decides
  * *wording*. Everything else reads {@link AdvisoryShape}. A new kind is a
  * compile error in exactly those two places, and whoever adds it has to say what
@@ -35,7 +35,7 @@ import { humanMs } from "./format.js";
  */
 
 /** Something a caller must not assume away. An empty array is the good case. */
-export type WorkspaceAdvisory =
+export type SandboxAdvisory =
   | {
       kind: "deps-building";
       command: string;
@@ -96,7 +96,7 @@ export interface AdvisoryShape {
 }
 
 /** What each advisory *means*. The one exhaustive home for policy. */
-export function shapeOf(advisory: WorkspaceAdvisory): AdvisoryShape {
+export function shapeOf(advisory: SandboxAdvisory): AdvisoryShape {
   switch (advisory.kind) {
     case "deps-building":
       return { transient: true, universal: false, writesPersist: true };
@@ -143,7 +143,7 @@ function quoted(tail: string | undefined): string {
  * see.
  */
 export function renderAdvisory(
-  advisory: WorkspaceAdvisory,
+  advisory: SandboxAdvisory,
   to: AdvisoryAudience
 ): string {
   switch (advisory.kind) {
@@ -216,7 +216,7 @@ export interface AdvisoryInput {
    * with the install having failed for real.
    *
    * So it never suppresses a proven failure. It travels onto the advisory as
-   * {@link WorkspaceAdvisory} `treePresent` and the reader is told which way the
+   * {@link SandboxAdvisory} `treePresent` and the reader is told which way the
    * ambiguity runs. The alternative — treating it as proof of success — is what
    * made a durable record of a failed install disappear on exactly the failure
    * mode it was recording.
@@ -250,8 +250,8 @@ export interface AdvisoryInput {
  */
 export function deriveAdvisories(
   input: AdvisoryInput
-): readonly WorkspaceAdvisory[] {
-  const advisories: WorkspaceAdvisory[] = [];
+): readonly SandboxAdvisory[] {
+  const advisories: SandboxAdvisory[] = [];
 
   const install = input.install;
   switch (install.state) {
@@ -335,7 +335,7 @@ export function deriveAdvisories(
  * work silently against a workspace that is not what it assumes.
  */
 export function sessionAdvisory(
-  advisories: readonly WorkspaceAdvisory[]
+  advisories: readonly SandboxAdvisory[]
 ): string | undefined {
   if (advisories.length === 0) return undefined;
   return advisories.map((a) => renderAdvisory(a, "session")).join("\n\n");

@@ -15,14 +15,14 @@
  * **A writer's sub-agent spec, a model, and no plugin.** Claude Code brings its own
  * tools, its own loop and its own context management, so there is nothing for
  * an agent loop to drive: the session *is* the sub-agent's model —
- * {@link claudeCodeHarnessModel} — and Think's recovery drives that. A host binds
+ * {@link claudeCodeModel} — and Think's recovery drives that. A host binds
  * {@link CLAUDE_CODE_AGENT} to a `SubAgent` class whose `getModel()` returns
  * one, and adds the `prepare` and `settle` that claim and release a sandbox.
  *
  * ## The credential never enters the container
  *
  * The session is launched with a placeholder and a placeholder host. The
- * sandbox's egress rule, {@link claudeCodeSandboxEgress}, swaps in a real
+ * sandbox's egress rule, {@link claudeCodeEgress}, swaps in a real
  * credential on the Worker side, leased from the pool the sandbox object holds
  * ({@link credentialHost}). The image's daemon runs
  * `@dynamicagents/plugins/claude-code/daemon`'s CLI.
@@ -46,26 +46,19 @@
  * CLI installed at a pinned version. See the README.
  */
 export {
-  claudeCodeHarnessModel,
+  claudeCodeModel,
   CONTAINER_LOST_PROMPT,
-  DEFAULT_HARNESS_TIMEOUT_MS
-} from "./harness-model.js";
+  DEFAULT_TIMEOUT_MS
+} from "./model.js";
 export type {
-  ClaudeCodeHarnessModelOptions,
+  ClaudeCodeModelOptions,
   SandboxRuns,
   SessionEnd,
   SessionOutcome,
   SessionRecord
-} from "./harness-model.js";
-export {
-  ANTHROPIC_HOST,
-  claudeCodeSandboxEgress,
-  credentialHost
-} from "./harness-egress.js";
-export type {
-  ClaudeCodeSandboxEgressOptions,
-  CredentialLease
-} from "./harness-egress.js";
+} from "./model.js";
+export { ANTHROPIC_HOST, claudeCodeEgress, credentialHost } from "./egress.js";
+export type { ClaudeCodeEgressOptions, CredentialLease } from "./egress.js";
 export { ANTHROPIC_PLACEHOLDER_HOST } from "./harness-wire.js";
 export { CREDENTIAL_PLACEHOLDER } from "./placeholder.js";
 export {

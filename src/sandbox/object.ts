@@ -19,7 +19,7 @@ import {
   type DirectoryBackupRecord
 } from "@cloudflare/sandbox";
 import { asAgent, AGENT_GID, AGENT_UID, shellQuote } from "./agent-exec.js";
-import { deriveAdvisories, type WorkspaceAdvisory } from "./advisory.js";
+import { deriveAdvisories, type SandboxAdvisory } from "./advisory.js";
 import {
   egressPlan,
   type EgressPlan,
@@ -1323,7 +1323,7 @@ export abstract class SandboxObjectBase<
     await this.#nextInstall(true);
   }
 
-  async advisories(): Promise<readonly WorkspaceAdvisory[]> {
+  async advisories(): Promise<readonly SandboxAdvisory[]> {
     const install = (await this.ctx.storage.get<InstallState>(INSTALL_KEY)) ?? {
       state: "idle"
     };

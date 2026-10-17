@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import capture from "../../test/fixtures/claude-code-probe-capture.json";
 import { egressPlan, sandboxEgress } from "../sandbox/egress.js";
 import {
-  claudeCodeSandboxEgress,
+  claudeCodeEgress,
   credentialHost,
   type CredentialLease
-} from "./harness-egress.js";
+} from "./egress.js";
 import { ANTHROPIC_PLACEHOLDER_HOST } from "./harness-wire.js";
 import { CREDENTIAL_PLACEHOLDER } from "./placeholder.js";
 
@@ -51,15 +51,12 @@ function serve(tokens: string[]) {
     storage: memoryStorage(),
     credentials: () => tokens
   });
-  return send(
-    claudeCodeSandboxEgress({ pool: () => pool, now: () => NOW }),
-    {}
-  );
+  return send(claudeCodeEgress({ pool: () => pool, now: () => NOW }), {});
 }
 
 /** A request the CLI makes, through the routes a sandbox registers for `rule`. */
 function send(
-  rule: ReturnType<typeof claudeCodeSandboxEgress>,
+  rule: ReturnType<typeof claudeCodeEgress>,
   env: Record<string, unknown>
 ) {
   const { http } = egressPlan([rule], SANDBOX);
@@ -81,7 +78,7 @@ function send(
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("claudeCodeSandboxEgress", () => {
+describe("claudeCodeEgress", () => {
   it("sends the pool's lead as the Bearer, to the real host, and nothing of the CLI's own", async () => {
     const { calls } = upstream([]);
     const response = await serve(["sk-ant-oat01-A"])({ "x-api-key": "k" });
@@ -158,7 +155,7 @@ function sendRecorded(request: Request) {
     storage: memoryStorage(),
     credentials: () => ["sk-ant-oat01-A"]
   });
-  const rule = claudeCodeSandboxEgress({ pool: () => pool, now: () => NOW });
+  const rule = claudeCodeEgress({ pool: () => pool, now: () => NOW });
   return sandboxEgress(request, egressPlan([rule], SANDBOX).http, {}, [rule]);
 }
 
@@ -168,7 +165,7 @@ const RECORDED_CALL = capture.requests.find(
     request.method === "POST" && request.path.startsWith("/v1/messages")
 )!;
 
-describe("claudeCodeSandboxEgress, on what the verified version sends", () => {
+describe("claudeCodeEgress, on what the verified version sends", () => {
   /**
    * Every request, not only the model call: a request shape the swap missed
    * would send the placeholder upstream.
@@ -216,9 +213,9 @@ describe("claudeCodeSandboxEgress, on what the verified version sends", () => {
   });
 });
 
-describe("claudeCodeSandboxEgress's rule", () => {
+describe("claudeCodeEgress's rule", () => {
   it("declares the CLI's placeholder host over the real API, and leaves the CLI's environment to the daemon", () => {
-    const rule = claudeCodeSandboxEgress();
+    const rule = claudeCodeEgress();
     expect(rule.http).toEqual({
       [ANTHROPIC_PLACEHOLDER_HOST]: "https://api.anthropic.com"
     });
@@ -241,13 +238,13 @@ describe("claudeCodeSandboxEgress's rule", () => {
         }
       }
     };
-    expect((await send(claudeCodeSandboxEgress(), env)()).status).toBe(200);
+    expect((await send(claudeCodeEgress(), env)()).status).toBe(200);
     expect(reached).toEqual(["slot-1"]);
   });
 
   it("names a sandbox the Worker cannot reach, rather than sending the placeholder on", async () => {
     const { calls } = upstream([]);
-    await expect(send(claudeCodeSandboxEgress(), {})()).rejects.toThrow(
+    await expect(send(claudeCodeEgress(), {})()).rejects.toThrow(
       /names no sandbox/
     );
     expect(calls).toHaveLength(0);
