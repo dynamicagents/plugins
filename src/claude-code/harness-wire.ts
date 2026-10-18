@@ -30,6 +30,7 @@ export const ANTHROPIC_PLACEHOLDER_HOST = "anthropic.harness.internal";
 const END = "claude-code-end:";
 const NOTE = "claude-code-note:";
 const SESSION = "claude-code-session:";
+const SKILLS = "claude-code-skills:";
 
 export function encodeRunEnd(end: RunEnd): string {
   return `${END}${JSON.stringify(end)}`;
@@ -67,6 +68,23 @@ export function encodeSessionId(sessionId: string): string {
 
 export function decodeSessionId(text: string): string | undefined {
   return decode<string>(SESSION, text);
+}
+
+/**
+ * The skills the CLI reported loading, from the `init` line, as their own
+ * message — so a host that asked for one can tell whether it got it while the
+ * session is still young enough to stop.
+ *
+ * The daemon reports what loaded and judges nothing: which skill was asked for
+ * is the host's own question, and the comparison lives with it
+ * (`./model.ts`).
+ */
+export function encodeSkills(skills: readonly string[]): string {
+  return `${SKILLS}${JSON.stringify(skills)}`;
+}
+
+export function decodeSkills(text: string): string[] | undefined {
+  return decode<string[]>(SKILLS, text);
 }
 
 function decode<T>(prefix: string, text: string | undefined): T | undefined {

@@ -41,8 +41,12 @@ const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
 const failures = [];
 const fail = (msg) => failures.push(msg);
 
-/** Subpaths that are a container image's entrypoint, never a Worker's import. */
-const NODE_ONLY = new Set(["./sandbox/daemon"]);
+/**
+ * Subpaths that run inside a container image rather than in a Worker: the
+ * daemon's entrypoint, and the CLI adapters it composes — which read the
+ * checkout the CLI is launched in and so reach `node:fs` too.
+ */
+const NODE_ONLY = new Set(["./sandbox/daemon", "./claude-code/daemon"]);
 
 /** Bare specifiers that must never be reachable from a runtime subpath. */
 const TEST_ONLY = [/^node:/, /^undici$/, /^cloudflare:test$/, /^vitest$/];

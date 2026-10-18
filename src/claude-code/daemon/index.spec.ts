@@ -1,10 +1,14 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { SandboxCliTurn } from "../../sandbox/daemon/index.js";
 import {
   ANTHROPIC_PLACEHOLDER_HOST,
   decodeNote,
   decodeRunEnd,
-  decodeSessionId
+  decodeSessionId,
+  decodeSkills
 } from "../harness-wire.js";
 import { CREDENTIAL_PLACEHOLDER } from "../placeholder.js";
 import { claudeCodeDaemonCli } from "./index.js";
@@ -77,6 +81,56 @@ describe("the launch", () => {
         })
       ).argv
     ).toContain("--fork-session");
+  });
+
+  /**
+   * A skill is selected by a first line of stdin, `/<name>`, because the pinned
+   * CLI has no flag for one — `scripts/probe-claude-code.mjs` is where that is
+   * established against the CLI itself, every dependency round.
+   *
+   * `cwd` is a real directory here and under `/tmp` rather than `/workspace`,
+   * which is the only tree this pool's filesystem lets a spec write: the launch
+   * reads the checkout, and a header that has already been read is not
+   * re-validated here.
+   */
+  describe("a skill the run header names", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "claude-code-skill-"));
+    const skill = "refactor-discovery";
+    mkdirSync(join(cwd, ".claude", "skills", skill), { recursive: true });
+    writeFileSync(join(cwd, ".claude", "skills", skill, "SKILL.md"), "---\n");
+
+    it("goes on the first line of stdin, with the prompt under it", () => {
+      const { argv, stdin } = cli().command(
+        turn({ header: { cwd, skill }, prompt: "find one" })
+      );
+      expect(stdin).toBe(`/${skill}\nfind one`);
+      // A selected skill is not a flag, and changes nothing else about the launch.
+      expect(argv).toEqual(cli().command(turn({ header: { cwd } })).argv);
+    });
+
+    it("is not sent again into a conversation that already has it", () => {
+      const { stdin } = cli().command(
+        turn({
+          header: { cwd, skill },
+          prompt: "carry on",
+          state: { sessionId: "sess-1" }
+        })
+      );
+      expect(stdin).toBe("carry on");
+    });
+
+    it("leaves a run that names none byte-identical to its prompt", () => {
+      const prompt = "/not-a-skill-line\nand a prompt that starts with one";
+      expect(cli().command(turn({ header: { cwd }, prompt })).stdin).toBe(
+        prompt
+      );
+    });
+
+    it("is refused before launch when the checkout has no such skill", () => {
+      expect(() =>
+        cli().command(turn({ header: { cwd, skill: "renamed-since" } }))
+      ).toThrow(/no skill named renamed-since in this checkout/);
+    });
   });
 
   it("refuses a schema the image was not built with", () => {
@@ -165,6 +219,46 @@ describe("the parse", () => {
     expect(end?.result?.text).toBe("the answer");
     expect(end?.exitCode).toBe(0);
     expect(end?.sessionId).toBe("sess-1");
+  });
+
+  /**
+   * What the CLI loaded, as its own answer rather than as a guess from disk —
+   * the host compares it with the skill it asked for and stops a session that
+   * is about to do generic work (`../model.ts`). A version that stops reporting
+   * them sends nothing rather than an empty list, so the host can tell the two
+   * apart.
+   */
+  it("sends the skills the CLI reported loading, and nothing when it reported none", () => {
+    const text = (event: unknown) =>
+      (event as { message: { parts: { text: string }[] } }).message.parts[0]!
+        .text;
+    const init = (over: Record<string, unknown>) =>
+      cli()
+        .parser(turn())
+        .line(
+          line({
+            type: "system",
+            subtype: "init",
+            session_id: "sess-1",
+            ...over
+          })
+        );
+
+    const loaded = init({ skills: ["refactor-discovery", "simplify"] });
+    const message = loaded.events?.find(
+      (event) => decodeSkills(text(event)) !== undefined
+    );
+    expect(decodeSkills(text(message))).toEqual([
+      "refactor-discovery",
+      "simplify"
+    ]);
+
+    for (const over of [{}, { skills: "refactor-discovery" }]) {
+      const quiet = init(over);
+      expect(
+        quiet.events?.some((event) => decodeSkills(text(event)) !== undefined)
+      ).toBe(false);
+    }
   });
 
   it("keeps the code a CLI exits with after an error result", () => {

@@ -55,6 +55,39 @@ describe("run header", () => {
     );
   });
 
+  /**
+   * The skill name is spliced into a path under the checkout, so the shape is
+   * the boundary: everything refused here is something that would have escaped
+   * `<cwd>/.claude/skills/<skill>/SKILL.md` or named nothing in it.
+   */
+  it("takes a skill that is one path segment, and nothing that is not", () => {
+    const carried = (skill: string) =>
+      readRunHeader(withRunHeader({ cwd: "/workspace/repo", skill }, "x"))
+        .header?.skill;
+    for (const skill of ["refactor-discovery", "a", "a.b_c-1"]) {
+      expect(carried(skill)).toBe(skill);
+    }
+    for (const skill of [
+      "",
+      " ",
+      "..",
+      ".hidden",
+      "/refactor-discovery",
+      "refactor discovery",
+      "refactor\ndiscovery",
+      "nested/skill",
+      "../../etc/passwd",
+      "plugin:skill"
+    ]) {
+      expect(() =>
+        withRunHeader({ cwd: "/workspace/repo", skill }, "x")
+      ).toThrow(/skill must be one path segment/);
+    }
+    expect(() =>
+      readRunHeader('@@da {"cwd":"/workspace","skill":7}\nx')
+    ).toThrow(/skill must be one path segment/);
+  });
+
   it("confines paths to the root, `..` included", () => {
     expect(isUnder("/workspace", "/workspace")).toBe(true);
     expect(isUnder("/workspace/a/./b", "/workspace")).toBe(true);

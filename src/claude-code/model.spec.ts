@@ -12,7 +12,12 @@ import {
   type SessionOutcome,
   type SessionRecord
 } from "./model.js";
-import { encodeNote, encodeRunEnd, encodeSessionId } from "./harness-wire.js";
+import {
+  encodeNote,
+  encodeRunEnd,
+  encodeSessionId,
+  encodeSkills
+} from "./harness-wire.js";
 
 /**
  * The session as a sub-agent's model, over a scripted sandbox: what is this
@@ -50,6 +55,9 @@ const message = (
 });
 const session = (op: string, id = "sess-1") =>
   message(op, "session", encodeSessionId(id));
+/** What the daemon read off the `init` line: the skills the CLI loaded. */
+const skills = (op: string, loaded: string[]) =>
+  message(op, "skills", encodeSkills(loaded));
 const note = (op: string, n: number, text: string, createdAt = 0) =>
   message(
     op,
@@ -405,6 +413,69 @@ describe("claudeCodeModel", () => {
       (map.get(`claude-code:${RUN}:turn:${step}`) as { startedAt: number })
         .startedAt;
     expect(started("follow-up")).toBe(started("session"));
+  });
+
+  /**
+   * A skill is chosen for the turn that starts a conversation, and only that
+   * one: a slash line sent into a conversation that already has the skill would
+   * run it again and re-inject its text, so neither a resubmission after a lost
+   * container nor a follow-up asks for one.
+   */
+  it("names the chosen skill on the session's header, and on no turn that carries it on", async () => {
+    const box = sandbox((op, n) =>
+      n === 0
+        ? { messages: [session(op)], result: lost }
+        : { messages: [session(op)], result: done() }
+    );
+    const { model } = harness(box, {
+      skill: "refactor-discovery",
+      followUp: async () => "now push it"
+    });
+    await textOf(model);
+    const headers = box.submits.map((s) => readRunHeader(s.text).header);
+    expect(headers[0]).toEqual({
+      cwd: "/workspace/repo",
+      mode: "build",
+      schema: "write",
+      skill: "refactor-discovery"
+    });
+    expect(headers[1]).not.toHaveProperty("skill");
+    expect(headers[2]).not.toHaveProperty("skill");
+  });
+
+  /**
+   * The CLI's `init` line is the only account of what it loaded, and a session
+   * that did not load the chosen skill is about to spend hours doing generic
+   * work under the name of a process somebody chose. Stopped on the poll that
+   * carries the news rather than reported at the end.
+   */
+  it("stops a session whose CLI did not load the skill it was given", async () => {
+    const box = sandbox((op) => ({
+      messages: [session(op), skills(op, ["simplify", "code-review"])],
+      result: done()
+    }));
+    const { model, notes } = harness(box, { skill: "refactor-discovery" });
+    await expect(textOf(model)).rejects.toThrow(
+      /did not load the skill refactor-discovery/
+    );
+    expect(box.stops()).toBe(1);
+    expect(notes.map((n) => n.key)).toContain(`${RUN}:session:a0:lost`);
+  });
+
+  it("lets it run when the CLI reports the skill, and when no skill was chosen", async () => {
+    const script = (op: string) => ({
+      messages: [session(op), skills(op, ["refactor-discovery"])],
+      result: done()
+    });
+    const chosen = sandbox(script);
+    expect(
+      await textOf(harness(chosen, { skill: "refactor-discovery" }).model)
+    ).toBe("report 1");
+    expect(chosen.stops()).toBe(0);
+
+    const none = sandbox(script);
+    expect(await textOf(harness(none).model)).toBe("report 1");
+    expect(none.stops()).toBe(0);
   });
 
   it("polls a note again that failed to file, rather than moving past it", async () => {

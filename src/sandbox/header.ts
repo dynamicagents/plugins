@@ -25,6 +25,16 @@ export interface RunHeader {
   mode?: "plan" | "build";
   /** A schema the daemon was built with, by name. Not the schema itself: a prompt is stored. */
   schema?: string;
+  /**
+   * A skill in the run's checkout the session starts in, by name — the one the
+   * caller chose, rather than one the model picked off a description.
+   *
+   * Unlike {@link schema}, which names something the image was built with, this
+   * names a directory of {@link cwd}: what skills a checkout has is the
+   * checkout's business, and a name with nothing behind it is refused at launch
+   * by the CLI's own adapter rather than here.
+   */
+  skill?: string;
   /** The CLI's effort level, passed through. */
   effort?: string;
   /** Continue the session's conversation as a new branch of it. */
@@ -98,10 +108,31 @@ function assertRunHeader(value: unknown): asserts value is RunHeader {
   if (header.fork !== undefined && typeof header.fork !== "boolean") {
     throw new RunHeaderError("the run header's fork must be a boolean");
   }
+  const skill = header.skill;
+  if (
+    skill !== undefined &&
+    (typeof skill !== "string" || !SKILL_NAME.test(skill))
+  ) {
+    throw new RunHeaderError(
+      `the run header's skill must be one path segment naming a skill, got ${JSON.stringify(skill)}`
+    );
+  }
   if (header.mode === "plan" && header.schema === undefined) {
     throw new RunHeaderError("a plan run names the schema its answer follows");
   }
 }
+
+/**
+ * What a skill name may be: one segment, starting with a letter or a digit.
+ *
+ * The name is spliced into a path under the run's checkout, so this is the
+ * boundary that keeps it one — no separator, no `..`, no leading dot, no
+ * whitespace and nothing empty. It also refuses a name with a `:` in it, which
+ * is how a CLI names a skill a plugin brought rather than one the checkout
+ * holds: that is not a file this package could check for, and it is not what
+ * this field is for.
+ */
+const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** Whether `path` is `root` or inside it, with no `..` escaping it. */
 export function isUnder(path: string, root: string): boolean {

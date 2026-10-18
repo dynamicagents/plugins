@@ -10,6 +10,7 @@ import {
   decodeNote,
   decodeRunEnd,
   decodeSessionId,
+  decodeSkills,
   type RunEnd
 } from "./harness-wire.js";
 import type { ClaudeCodeResult, RateLimitInfo } from "./events.js";
@@ -123,6 +124,16 @@ export interface ClaudeCodeModelOptions {
   effort?: EffortLevel;
   /** A JSON schema the daemon was built with, by name, that the answer must match. */
   schema?: string;
+  /**
+   * A skill in the checkout the session starts in, by name: the caller's own
+   * choice of process, rather than one the model picks off a description.
+   *
+   * It applies to the session's first turn, which is the only one that starts a
+   * conversation — see the run header's `skill` and how
+   * `./daemon/index.ts` launches it. A run whose CLI does not report
+   * loading it is stopped rather than left doing generic work.
+   */
+  skill?: string;
   /** `plan` runs read-only and answers to {@link schema}; anything else is the daemon's mode. */
   permissionMode?: PermissionMode;
   /**
@@ -336,6 +347,32 @@ export function claudeCodeModel(
     };
 
     /**
+     * The session has to be running the skill the caller chose, and the CLI's
+     * `init` line is the only account of that worth having: a skill whose
+     * frontmatter will not parse is dropped silently, so a directory on disk
+     * says nothing. Stopped here rather than reported at the end, because the
+     * alternative is a session of hours doing generic work under the name of a
+     * process somebody chose.
+     *
+     * Only for the turn whose header asked for it. A turn carrying a
+     * conversation on asks for no skill, and a session that is editing the
+     * skills themselves can legitimately rename the one it started under.
+     */
+    const requireSkill = async (
+      operationId: string,
+      skill: string,
+      loaded: readonly string[]
+    ): Promise<void> => {
+      if (loaded.includes(skill)) return;
+      await stop(
+        operationId,
+        new Error(
+          `claude-code: the session did not load the skill ${skill} — the CLI reported ${loaded.join(", ") || "none"}`
+        )
+      );
+    };
+
+    /**
      * One step of the run, to its end: the brief's session, or the follow-up.
      * Both count against one limit, from the session's first submission.
      */
@@ -386,7 +423,9 @@ export function claudeCodeModel(
         const operationId = `${runId}:${step}:a${state.attempt}`;
         // A resubmission that reached the CLI is told what happened, in the
         // conversation it already had; one that never did is the step again.
-        const { fork: _fork, ...resumed } = header;
+        // Neither the fork nor the skill is re-asked for: both are decisions
+        // the turn that started the conversation already made.
+        const { fork: _fork, skill: _skill, ...resumed } = header;
         const text =
           state.attempt > 0 && state.sessionId
             ? withRunHeader(resumed, CONTAINER_LOST_PROMPT)
@@ -454,6 +493,8 @@ export function claudeCodeModel(
                 await save({ ...state, sessionId: taken.sessionId });
               await announce({ sessionId: taken.sessionId });
             }
+            if (taken.skills !== undefined && header.skill !== undefined)
+              await requireSkill(operationId, header.skill, taken.skills);
           }
           if (filedTo !== state.from) await save({ ...state, from: filedTo });
           if (filedTo === polled.next) result = polled.result;
@@ -498,14 +539,23 @@ export function claudeCodeModel(
       }
     };
 
-    /** File one polled message's note, or read the session id it carries. */
+    /**
+     * File one polled message's note, or read what the daemon reported rather
+     * than said: the session id, or the skills the CLI loaded.
+     */
     const take = async (
       message: PolledMessage
-    ): Promise<{ sessionId?: string; failed?: true }> => {
+    ): Promise<{
+      sessionId?: string;
+      skills?: string[];
+      failed?: true;
+    }> => {
       const part = message.message.parts[0];
       if (part?.type !== "text") return {};
       const sessionId = decodeSessionId(part.text);
       if (sessionId !== undefined) return { sessionId };
+      const skills = decodeSkills(part.text);
+      if (skills !== undefined) return { skills };
       const note = decodeNote(part.text);
       if (!note) return {};
       // Keyed on the message, which is the operation and the note's position:
@@ -535,6 +585,7 @@ export function claudeCodeModel(
         ? { mode: "plan" as const }
         : { mode: "build" as const }),
       ...(options.schema !== undefined ? { schema: options.schema } : {}),
+      ...(options.skill !== undefined ? { skill: options.skill } : {}),
       ...(options.effort !== undefined ? { effort: options.effort } : {}),
       ...(options.model !== undefined ? { model: options.model } : {})
     };
@@ -566,10 +617,12 @@ export function claudeCodeModel(
       }
       // A session with no conversation has nothing to follow up. Its schema
       // was the session's answer, not the follow-up's — except a plan's, which
-      // answers to one every turn.
+      // answers to one every turn. A skill is neither: it was chosen for the
+      // turn that started the conversation this one continues.
       if (asked.prompt && (ended.result?.sessionId ?? ended.sessionId)) {
-        const { schema: _schema, ...unbound } = header;
-        const followUpHeader = header.mode === "plan" ? header : unbound;
+        const { skill: _skill, ...carried } = header;
+        const { schema: _schema, ...unbound } = carried;
+        const followUpHeader = header.mode === "plan" ? carried : unbound;
         followUpEnd = await turn("follow-up", asked.prompt, followUpHeader);
         await storage.put(KEYS.followUpEnd, followUpEnd);
       }

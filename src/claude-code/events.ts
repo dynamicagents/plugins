@@ -126,6 +126,13 @@ export type ClaudeCodeEvent =
       model?: string;
       cwd?: string;
       permissionMode?: string;
+      /**
+       * The skills the CLI says it loaded, from every source it looks in. Its
+       * own account of what a session can reach, which is the only reliable one:
+       * a skill whose frontmatter would not parse is dropped silently, and a
+       * directory on disk proves nothing about it.
+       */
+      skills?: string[];
     }
   /**
    * The subscription bucket, as the client sees it. Carried rather than acted
@@ -468,12 +475,14 @@ export function parseStream(buffer: string, clock?: ParseClock): ParsedStream {
           const model = str(event.model);
           const cwd = str(event.cwd);
           const permissionMode = str(event.permissionMode);
+          const skills = readStrings(event.skills);
           events.push({
             kind: "init",
             sessionId,
             ...(model ? { model } : {}),
             ...(cwd ? { cwd } : {}),
-            ...(permissionMode ? { permissionMode } : {})
+            ...(permissionMode ? { permissionMode } : {}),
+            ...(skills ? { skills } : {})
           });
           break;
         }
@@ -690,6 +699,19 @@ function readErrors(raw: unknown): string[] {
   return raw
     .map((entry) => (typeof entry === "string" ? entry : safeJson(entry)))
     .filter((entry) => entry.length > 0);
+}
+
+/**
+ * A list of names, or `undefined` for a field that is not one.
+ *
+ * `undefined` and not `[]`: a reader asking "did the CLI load this skill" has
+ * to be able to tell a version that reports none from one that does not report
+ * them at all. Non-string entries are dropped rather than stringified — the
+ * answer is matched against a name, so an entry that is not one cannot be it.
+ */
+function readStrings(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.filter((entry): entry is string => typeof entry === "string");
 }
 
 /** `value` as JSON, or as whatever `String` makes of it when it has no JSON. */

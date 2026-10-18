@@ -21,6 +21,7 @@ import type {
   ContainerOutcome
 } from "agents/harness/container/daemon";
 import type { CliCommand } from "agents/harness/container/runtime";
+import { existsSync } from "node:fs";
 import type {
   SandboxCliTurn,
   SandboxDaemonOptions
@@ -36,7 +37,8 @@ import {
   ANTHROPIC_PLACEHOLDER_HOST,
   encodeNote,
   encodeRunEnd,
-  encodeSessionId
+  encodeSessionId,
+  encodeSkills
 } from "../harness-wire.js";
 import { CREDENTIAL_PLACEHOLDER } from "../placeholder.js";
 
@@ -85,12 +87,31 @@ export function claudeCodeDaemonCli(
 }
 
 /**
+ * Where a checkout keeps the skills the CLI discovers in it, and the file that
+ * makes one. Joined onto a run's `cwd`, which is where the CLI is launched.
+ */
+const SKILL_FILE = (cwd: string, skill: string) =>
+  `${cwd}/.claude/skills/${skill}/SKILL.md`;
+
+/**
  * One turn's command.
  *
  * `stream-json` with `--verbose`, because the stream is the only way to report
  * progress before a run of minutes ends, and without `--verbose` the CLI emits
  * only the final result even in stream mode. The mode is always passed, never
  * left to the CLI's own — see `../config.ts` `ClaudeCodeConfig.permissionMode`.
+ *
+ * A run header's `skill` is a **first line of stdin**, `/<name>`, and not a
+ * flag: the pinned CLI has none, and its own rule for `-p` is that a prompt
+ * beginning `/name` loads that skill and hands it the rest as its arguments.
+ * Measured against the pinned version, offline (`scripts/probe-claude-code.mjs`
+ * runs it every round): the `init` line then names the skill, its body is in
+ * the first message, and a brief of several paragraphs arrives whole.
+ *
+ * **Only on a turn that starts a conversation.** The line is a slash command,
+ * so sending it into a resumed or forked conversation would re-run the skill
+ * and re-inject its whole text mid-session. A skill is chosen once, where the
+ * session is chosen.
  *
  * A resumed turn's prompt is the next user turn. An id whose conversation is
  * not there is not a failed session: the CLI emits a `result` naming it, with
@@ -136,7 +157,21 @@ function command(
       throw new Error(`no schema named ${header.schema} in this image`);
     argv.push("--json-schema", JSON.stringify(schema));
   }
-  return { argv, stdin: turn.prompt, env: sessionEnv(options) };
+  let stdin = turn.prompt;
+  if (header?.skill !== undefined) {
+    // Checked whatever the turn is, since the checkout is fixed for a session's
+    // life: a stat, and it catches the drift that costs the most — a skill
+    // renamed where the caller's name for it was not. Whether the CLI then
+    // *loaded* it is the CLI's own answer, on the `init` line's `skills`, which
+    // the host checks (`../model.ts`).
+    const file = SKILL_FILE(header.cwd, header.skill);
+    if (!existsSync(file))
+      throw new Error(
+        `no skill named ${header.skill} in this checkout: ${file} is not there`
+      );
+    if (!sessionId) stdin = `/${header.skill}\n${turn.prompt}`;
+  }
+  return { argv, stdin, env: sessionEnv(options) };
 }
 
 /**
@@ -206,10 +241,13 @@ function parser(operationId: string) {
       thinkingFrom = parsed.thinkingFrom;
       // The resume state the harness hands the next turn of this session.
       let state: { sessionId: string } | undefined;
+      /** The CLI's own list of what it loaded, when its `init` line carried one. */
+      let skills: readonly string[] | undefined;
       for (const event of parsed.events) {
         if (event.kind === "init") {
           sessionId = event.sessionId;
           state = { sessionId };
+          skills = event.skills;
         } else if (event.kind === "rateLimit") rateLimit = event.info;
         else if (event.kind === "result") result = event.result;
       }
@@ -226,6 +264,7 @@ function parser(operationId: string) {
       const events: ContainerEvent[] = [];
       if (state)
         events.push(message("session", encodeSessionId(state.sessionId)));
+      if (skills) events.push(message("skills", encodeSkills(skills)));
       const notes = toProgress(parsed.events, n);
       n += notes.length;
       for (const note of notes)

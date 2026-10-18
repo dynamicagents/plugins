@@ -74,6 +74,43 @@ describe("parseStream", () => {
   });
 
   /**
+   * The CLI's own list of what it loaded, which is the only thing that can say
+   * a selected skill is running: a skill whose frontmatter will not parse is
+   * dropped without a word, so the directory being there proves nothing.
+   *
+   * Absent rather than empty when the line carries no list, so a host can tell
+   * "loaded none" from "does not report them".
+   */
+  it("reads the skills an init line names, and leaves them out when it names none", () => {
+    const withSkills = line({
+      type: "system",
+      subtype: "init",
+      session_id: "abc",
+      skills: ["security-audit-discovery", 7, "simplify"]
+    });
+    expect(parseStream(withSkills).events).toEqual([
+      {
+        kind: "init",
+        sessionId: "abc",
+        // The entry that is not a name is dropped: the answer is matched
+        // against one, so a number cannot be it.
+        skills: ["security-audit-discovery", "simplify"]
+      }
+    ]);
+    expect(parseStream(init("abc")).events[0]).not.toHaveProperty("skills");
+    expect(
+      parseStream(
+        line({
+          type: "system",
+          subtype: "init",
+          session_id: "abc",
+          skills: "security-audit-discovery"
+        })
+      ).events[0]
+    ).not.toHaveProperty("skills");
+  });
+
+  /**
    * A bounded-window drain reads whatever has arrived, which cuts a line in half
    * routinely rather than rarely. Parsing the half loses a whole event.
    */

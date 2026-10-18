@@ -75,6 +75,19 @@ const STRUCTURED = { answer: REPLY };
 /** The tool `--json-schema` gives the model, by the name the CLI gives it. */
 const STRUCTURED_TOOL = "StructuredOutput";
 /**
+ * A skill written into the run's checkout, named by a run header the way a
+ * caller names the process a session is to follow.
+ *
+ * This is the one leg that cannot be reasoned out from the CLI's documentation:
+ * the pinned version has no `--skill` flag, so a skill is selected by a `/name`
+ * first line, and whether that line is read as a command or as the first words
+ * of the prompt is a property of how the prompt arrives — here, on stdin, as
+ * the daemon sends it.
+ */
+const SKILL = "probe-discovery";
+/** A sentence only the skill's body carries, so its arrival is observable. */
+const SKILL_SENTINEL = "probe-skill-body-7f3a";
+/**
  * A session id no transcript can be under: a fresh uuid, in a config directory
  * this run created. What a host's resume hits when the container that held the
  * conversation is gone.
@@ -172,7 +185,7 @@ const { claudeCodeDaemonCli } = await dist("claude-code/daemon/index.js");
 const { claudeCodeEgress, credentialHost } = await dist(
   "claude-code/egress.js"
 );
-const { ANTHROPIC_PLACEHOLDER_HOST, decodeRunEnd } = await dist(
+const { ANTHROPIC_PLACEHOLDER_HOST, decodeRunEnd, decodeSkills } = await dist(
   "claude-code/harness-wire.js"
 );
 const { parseStream } = await dist("claude-code/events.js");
@@ -202,6 +215,32 @@ const work = path.join(tmp, "work");
 mkdirSync(home);
 mkdirSync(work);
 
+// The checkout's own skills, where the CLI discovers them — a cloned
+// repository's `.claude/skills/`, as the daemon runs no `--bare`. Written
+// before any run, since a header naming a skill is refused when the file is
+// not there, and `disable-model-invocation` because a selected skill is the
+// caller's choice and not an offer to the model.
+const skillDir = path.join(work, ".claude", "skills", SKILL);
+mkdirSync(skillDir, { recursive: true });
+writeFileSync(
+  path.join(skillDir, "SKILL.md"),
+  [
+    "---",
+    `name: ${SKILL}`,
+    "description: >-",
+    "  A marker skill for the probe. Finds nothing, files nothing, changes nothing.",
+    "disable-model-invocation: true",
+    "---",
+    "",
+    "# Marker",
+    "",
+    SKILL_SENTINEL,
+    "",
+    `Say ${REPLY} and stop.`,
+    ""
+  ].join("\n")
+);
+
 const checks = [];
 const check = (name, ok, detail) => checks.push({ name, ok, detail });
 
@@ -222,7 +261,7 @@ try {
     request.headers.delete(PROBE_ID);
     requests[id].upstream = Object.fromEntries(request.headers);
     if (live) return realFetch(request);
-    const answer = await fake(request);
+    const answer = await fake(request, requests[id]);
     if (answer.status === 404) unanswered.push(pathOf(request.url));
     return answer;
   };
@@ -261,6 +300,22 @@ try {
     ? await runSession(bin, proxyUrl, {
         resume: structured.sessionId,
         fork: true
+      })
+    : undefined;
+  // A skill the run header names, which arrives as the first line of stdin.
+  // The index is taken first: what the model was asked during this run is what
+  // shows the skill was loaded rather than read as the first words of a prompt.
+  const askedBefore = requests.length;
+  const skilled = await runSession(bin, proxyUrl, { skill: SKILL });
+  const skillSent = requests
+    .slice(askedBefore)
+    .map((r) => r.sent ?? "")
+    .join("\n");
+  // And the same conversation carried on, which must not select it again.
+  const skillResumed = skilled.sessionId
+    ? await runSession(bin, proxyUrl, {
+        skill: SKILL,
+        resume: skilled.sessionId
       })
     : undefined;
   // Last, and the count is taken before it: this one must make no model call,
@@ -322,6 +377,76 @@ try {
       "the planning run reported no session id"
     );
   }
+  /**
+   * The selected skill, end to end. `init` is the CLI's own report of what it
+   * loaded, and the request body is the only proof the skill ran rather than
+   * being read as text — a `/name` line the CLI did not recognise would reach
+   * the model as the prompt's first words and cost nothing visible.
+   */
+  checkRun("skill run", skilled);
+  check(
+    "the skill run's init line names the skill the header asked for",
+    skilled.skills?.includes(SKILL) === true,
+    `${(skilled.skills ?? []).length} loaded${skilled.skills?.includes(SKILL) ? "" : `: ${(skilled.skills ?? []).join(", ")}`}`
+  );
+  check(
+    "the launch puts the skill on the first line of stdin, with the prompt under it",
+    skilled.stdin === `/${SKILL}\n${skilled.prompt}`,
+    JSON.stringify(skilled.stdin?.slice(0, 60))
+  );
+  if (!live) {
+    check(
+      "the skill's own body reaches the model, with the prompt it was given",
+      skillSent.includes(SKILL_SENTINEL) && skillSent.includes(skilled.prompt),
+      `body ${skillSent.includes(SKILL_SENTINEL) ? "✓" : "✗"}, prompt ${skillSent.includes(skilled.prompt) ? "✓" : "✗"}`
+    );
+  }
+  /**
+   * A turn that carries a conversation on. The line is a slash command, so
+   * sending it again would re-run the skill and re-inject its text mid-session
+   * — which is why the launch, and not the caller, decides.
+   */
+  if (skillResumed) {
+    checkRun("resumed skill run", skillResumed);
+    check(
+      "a resumed turn is sent the prompt alone",
+      skillResumed.stdin === skillResumed.prompt,
+      JSON.stringify(skillResumed.stdin?.slice(0, 60))
+    );
+  } else {
+    check(
+      "the resumed skill run ran",
+      false,
+      "the skill run reported no session id"
+    );
+  }
+  check(
+    "a run naming no skill is sent the prompt alone",
+    first.stdin === first.prompt,
+    JSON.stringify(first.stdin?.slice(0, 60))
+  );
+  /**
+   * And a name with nothing behind it, which costs no process: the common
+   * drift is a skill renamed where the caller's name for it was not, and a
+   * session that started generically instead would report success.
+   */
+  check(
+    "a skill with no SKILL.md behind it is refused before launch",
+    (() => {
+      try {
+        cli.command({
+          operationId: "probe:no-such-skill",
+          prompt: "x",
+          settings: {},
+          state: {},
+          header: { cwd: work, skill: "not-a-skill-here" }
+        });
+        return false;
+      } catch (err) {
+        return /no skill named not-a-skill-here/.test(String(err));
+      }
+    })()
+  );
   /**
    * A resume of a conversation that is not there. This has to stay cheap and
    * legible, because it is the fallback for every check a host skips: a
@@ -390,6 +515,8 @@ try {
       resumed: normalizeLines(second?.lines ?? []),
       forked: normalizeLines(forked?.lines ?? []),
       structured: normalizeLines(structured.lines),
+      skill: normalizeLines(skilled.lines),
+      skillResumed: normalizeLines(skillResumed?.lines ?? []),
       unresumable: normalizeLines(unresumable.lines)
     }
   };
@@ -565,7 +692,7 @@ function listen(egress, requests, refused) {
  * daemon's parser — the session id it hands the next turn, and the outcome the
  * host decodes — as well as parsed whole, for what a line-by-line read hides.
  */
-function runSession(bin, proxyUrl, { resume, fork, plan } = {}) {
+function runSession(bin, proxyUrl, { resume, fork, plan, skill } = {}) {
   const turn = {
     operationId: `probe:${randomUUID()}`,
     prompt: `Reply with exactly: ${REPLY}`,
@@ -574,7 +701,8 @@ function runSession(bin, proxyUrl, { resume, fork, plan } = {}) {
     header: {
       cwd: work,
       ...(plan ? { mode: "plan", schema: "probe" } : {}),
-      ...(fork ? { fork: true } : {})
+      ...(fork ? { fork: true } : {}),
+      ...(skill ? { skill } : {})
     }
   };
   const launch = cli.command(turn);
@@ -633,9 +761,16 @@ function runSession(bin, proxyUrl, { resume, fork, plan } = {}) {
       const lines = stdout.split("\n").filter(Boolean);
       const parser = cli.parser(turn);
       let sessionId;
+      /** What the daemon reported the CLI had loaded, as a host reads it. */
+      let skills;
       for (const line of lines) {
         const update = parser.line(line);
         if (update.state?.sessionId) sessionId = update.state.sessionId;
+        for (const event of update.events ?? []) {
+          const text = event.message?.parts?.[0]?.text;
+          const loaded = text === undefined ? undefined : decodeSkills(text);
+          if (loaded) skills = loaded;
+        }
       }
       const outcome = parser.end({ code, stderr });
       const end = decodeRunEnd(
@@ -647,6 +782,11 @@ function runSession(bin, proxyUrl, { resume, fork, plan } = {}) {
         parsed: parseStream(`${lines.join("\n")}\n`),
         result: end?.result,
         sessionId,
+        skills,
+        // The prompt as the daemon sent it, beside the prompt it was given:
+        // the only difference a selected skill makes to a launch.
+        stdin: launch.stdin,
+        prompt: turn.prompt,
         lines
       });
     });
@@ -720,8 +860,16 @@ function checkRun(label, run, { structured = false } = {}) {
 
 // --- the fake Anthropic -----------------------------------------------------------
 
-/** Just enough of the API for a one-turn session, and a 404 naming the rest. */
-async function fake(request) {
+/**
+ * Just enough of the API for a one-turn session, and a 404 naming the rest.
+ *
+ * `entry.sent` is what the model was asked, kept in memory for the checks that
+ * are about the prompt rather than the traffic — a skill's body arriving with
+ * the brief under it, for one. The capture keeps each request's method, path
+ * and headers and never a body, which is what keeps a conversation out of a
+ * committed file.
+ */
+async function fake(request, entry) {
   const url = pathOf(request.url);
   if (request.method === "HEAD") return new Response(null, { status: 200 });
   if (url === "/v1/messages/count_tokens") {
@@ -729,6 +877,7 @@ async function fake(request) {
   }
   if (url === "/v1/messages" && request.method === "POST") {
     const body = await request.json();
+    if (entry) entry.sent = JSON.stringify(body.messages ?? []);
     const message = {
       id: "msg_probe",
       type: "message",
