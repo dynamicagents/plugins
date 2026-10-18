@@ -132,6 +132,11 @@ export interface ClaudeCodeModelOptions {
    * conversation — see the run header's `skill` and how
    * `./daemon/index.ts` launches it. A run whose CLI does not report
    * loading it is stopped rather than left doing generic work.
+   *
+   * So it does nothing beside {@link resume}, whose conversation already has
+   * whatever process it started under: the launch injects nothing and this
+   * confirms nothing. A caller with a choice to offer refuses the pair rather
+   * than passing both — starter's writer tool does.
    */
   skill?: string;
   /** `plan` runs read-only and answers to {@link schema}; anything else is the daemon's mode. */
@@ -354,20 +359,29 @@ export function claudeCodeModel(
      * alternative is a session of hours doing generic work under the name of a
      * process somebody chose.
      *
-     * Only for the turn whose header asked for it. A turn carrying a
-     * conversation on asks for no skill, and a session that is editing the
+     * Only for a submission that starts a conversation, which is the only one
+     * the launch spends the name on. One carrying a conversation on asks for no
+     * skill, and the CLI's list on a resume is what the checkout holds now
+     * rather than what that conversation loaded — a session that is editing the
      * skills themselves can legitimately rename the one it started under.
+     *
+     * `null` is a CLI that reported no list at all (`./harness-wire.ts`). It
+     * stops the session too: an unconfirmed skill is the failure this check
+     * exists for, and a CLI that stopped reporting them is one this package has
+     * not been checked against.
      */
     const requireSkill = async (
       operationId: string,
       skill: string,
-      loaded: readonly string[]
+      loaded: readonly string[] | null
     ): Promise<void> => {
-      if (loaded.includes(skill)) return;
+      if (loaded?.includes(skill)) return;
       await stop(
         operationId,
         new Error(
-          `claude-code: the session did not load the skill ${skill} — the CLI reported ${loaded.join(", ") || "none"}`
+          loaded === null
+            ? `claude-code: the session did not report which skills it loaded, so it cannot be shown to be running ${skill}`
+            : `claude-code: the session did not load the skill ${skill} — the CLI reported ${loaded.join(", ") || "none"}`
         )
       );
     };
@@ -426,10 +440,25 @@ export function claudeCodeModel(
         // Neither the fork nor the skill is re-asked for: both are decisions
         // the turn that started the conversation already made.
         const { fork: _fork, skill: _skill, ...resumed } = header;
-        const text =
-          state.attempt > 0 && state.sessionId
-            ? withRunHeader(resumed, CONTAINER_LOST_PROMPT)
-            : withRunHeader(header, prompt);
+        const resubmitting = state.attempt > 0 && state.sessionId !== undefined;
+        const text = resubmitting
+          ? withRunHeader(resumed, CONTAINER_LOST_PROMPT)
+          : withRunHeader(header, prompt);
+        /**
+         * The skill *this* submission asked for — read here rather than off
+         * `header` where it is checked, because the poll moves
+         * `state.sessionId` on and what has to be confirmed is what the text
+         * just sent carries.
+         *
+         * None, for a submission that carries a conversation on rather than
+         * starting one: a resubmission into the session the last attempt
+         * reached, or a run the caller opened on another run's conversation,
+         * where the launch injects nothing either.
+         */
+        const chosen =
+          resubmitting || options.resume !== undefined
+            ? undefined
+            : header.skill;
         try {
           await rpc((sandbox) => sandbox.submit(runId, text, operationId));
         } catch (err) {
@@ -493,8 +522,8 @@ export function claudeCodeModel(
                 await save({ ...state, sessionId: taken.sessionId });
               await announce({ sessionId: taken.sessionId });
             }
-            if (taken.skills !== undefined && header.skill !== undefined)
-              await requireSkill(operationId, header.skill, taken.skills);
+            if (taken.skills !== undefined && chosen !== undefined)
+              await requireSkill(operationId, chosen, taken.skills);
           }
           if (filedTo !== state.from) await save({ ...state, from: filedTo });
           if (filedTo === polled.next) result = polled.result;
@@ -547,7 +576,7 @@ export function claudeCodeModel(
       message: PolledMessage
     ): Promise<{
       sessionId?: string;
-      skills?: string[];
+      skills?: string[] | null;
       failed?: true;
     }> => {
       const part = message.message.parts[0];

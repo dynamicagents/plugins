@@ -55,8 +55,8 @@ const message = (
 });
 const session = (op: string, id = "sess-1") =>
   message(op, "session", encodeSessionId(id));
-/** What the daemon read off the `init` line: the skills the CLI loaded. */
-const skills = (op: string, loaded: string[]) =>
+/** What the daemon read off the `init` line: the skills the CLI loaded, or `null` for a CLI that named none. */
+const skills = (op: string, loaded: string[] | null) =>
   message(op, "skills", encodeSkills(loaded));
 const note = (op: string, n: number, text: string, createdAt = 0) =>
   message(
@@ -462,20 +462,86 @@ describe("claudeCodeModel", () => {
     expect(notes.map((n) => n.key)).toContain(`${RUN}:session:a0:lost`);
   });
 
+  /**
+   * A CLI that names no skills at all is a CLI this package has not been
+   * checked against. Silence cannot mean confirmation: a host that only acts on
+   * a list it was sent would run the whole session generically and report
+   * success.
+   */
+  it("stops a session whose CLI reported no skills at all", async () => {
+    const box = sandbox((op) => ({
+      messages: [session(op), skills(op, null)],
+      result: done()
+    }));
+    const { model } = harness(box, { skill: "refactor-discovery" });
+    await expect(textOf(model)).rejects.toThrow(
+      /did not report which skills it loaded/
+    );
+    expect(box.stops()).toBe(1);
+  });
+
   it("lets it run when the CLI reports the skill, and when no skill was chosen", async () => {
-    const script = (op: string) => ({
+    const chosen = sandbox((op) => ({
       messages: [session(op), skills(op, ["refactor-discovery"])],
       result: done()
-    });
-    const chosen = sandbox(script);
+    }));
     expect(
       await textOf(harness(chosen, { skill: "refactor-discovery" }).model)
     ).toBe("report 1");
     expect(chosen.stops()).toBe(0);
 
-    const none = sandbox(script);
+    // A run that chose none is unaffected by either answer, the one this
+    // package has not been checked against included.
+    const none = sandbox((op) => ({
+      messages: [session(op), skills(op, null)],
+      result: done()
+    }));
     expect(await textOf(harness(none).model)).toBe("report 1");
     expect(none.stops()).toBe(0);
+  });
+
+  /**
+   * What a resubmission after a lost container asks for is what has to be
+   * confirmed, and it asks for no skill: the conversation it resumes is already
+   * running the process it started under, while the CLI's list on a resume is
+   * what the checkout holds *now*. A session that renamed the skill it started
+   * under — work a discovery run into the skills themselves does — would
+   * otherwise lose its conversation to its own commit.
+   */
+  it("does not re-check the skill when a lost container is resumed", async () => {
+    const box = sandbox((op, n) =>
+      n === 0
+        ? {
+            messages: [session(op), skills(op, ["refactor-discovery"])],
+            result: lost
+          }
+        : {
+            messages: [session(op), skills(op, ["renamed-since"])],
+            result: done()
+          }
+    );
+    const { model } = harness(box, { skill: "refactor-discovery" });
+    expect(await textOf(model)).toBe("report 1");
+    expect(box.stops()).toBe(0);
+  });
+
+  /** A retry that never reached a conversation is the first turn again, and asks for it again. */
+  it("checks the skill on a retry that starts the conversation after all", async () => {
+    const box = sandbox((op, n) =>
+      n === 0
+        ? { messages: [], result: lost }
+        : {
+            messages: [session(op), skills(op, ["simplify"])],
+            result: done()
+          }
+    );
+    const { model } = harness(box, { skill: "refactor-discovery" });
+    await expect(textOf(model)).rejects.toThrow(
+      /did not load the skill refactor-discovery/
+    );
+    expect(readRunHeader(box.submits[1]!.text).header).toMatchObject({
+      skill: "refactor-discovery"
+    });
   });
 
   it("polls a note again that failed to file, rather than moving past it", async () => {

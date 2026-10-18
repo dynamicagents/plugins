@@ -75,16 +75,25 @@ export function decodeSessionId(text: string): string | undefined {
  * message — so a host that asked for one can tell whether it got it while the
  * session is still young enough to stop.
  *
+ * Sent for every conversation the CLI starts, and `null` when its `init` line
+ * carried no list of names. Three answers, not two: `[…]` is what it loaded,
+ * `[]` is that it loaded nothing, and `null` is a CLI that does not say — a
+ * version whose traffic this package has not been checked against
+ * (`scripts/probe-claude-code.mjs`). Absent entirely is a turn that reported no
+ * `init` line at all. A host that asked for a skill can act on all of them;
+ * one that asked for none ignores them.
+ *
  * The daemon reports what loaded and judges nothing: which skill was asked for
  * is the host's own question, and the comparison lives with it
  * (`./model.ts`).
  */
-export function encodeSkills(skills: readonly string[]): string {
+export function encodeSkills(skills: readonly string[] | null): string {
   return `${SKILLS}${JSON.stringify(skills)}`;
 }
 
-export function decodeSkills(text: string): string[] | undefined {
-  return decode<string[]>(SKILLS, text);
+/** The report in `text`: the names, `null` for a CLI that named none, `undefined` for any other message. */
+export function decodeSkills(text: string): string[] | null | undefined {
+  return decode<string[] | null>(SKILLS, text);
 }
 
 function decode<T>(prefix: string, text: string | undefined): T | undefined {

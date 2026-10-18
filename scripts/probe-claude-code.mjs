@@ -87,6 +87,24 @@ const STRUCTURED_TOOL = "StructuredOutput";
 const SKILL = "probe-discovery";
 /** A sentence only the skill's body carries, so its arrival is observable. */
 const SKILL_SENTINEL = "probe-skill-body-7f3a";
+/** The last words of the brief, so a brief cut short is visible rather than merely shorter. */
+const SKILL_BRIEF_END = "probe-brief-end-2c91";
+/**
+ * The brief a skilled run is given: several paragraphs, ending in a marker.
+ *
+ * One line would establish nothing. The `/name` first line is a command and
+ * the rest of stdin is its argument, so what has to be measured is where the
+ * CLI thinks that argument stops — at the newline, or at the end of the brief.
+ * A real one is paragraphs of context, and losing all but its first line would
+ * leave a session that ran the right process on the wrong instructions.
+ */
+const SKILL_BRIEF = [
+  `Reply with exactly: ${REPLY}`,
+  "",
+  "A second paragraph, which a reader that stopped at the first newline never sees.",
+  "",
+  `End of brief: ${SKILL_BRIEF_END}`
+].join("\n");
 /**
  * A session id no transcript can be under: a fresh uuid, in a config directory
  * this run created. What a host's resume hits when the container that held the
@@ -306,7 +324,10 @@ try {
   // The index is taken first: what the model was asked during this run is what
   // shows the skill was loaded rather than read as the first words of a prompt.
   const askedBefore = requests.length;
-  const skilled = await runSession(bin, proxyUrl, { skill: SKILL });
+  const skilled = await runSession(bin, proxyUrl, {
+    skill: SKILL,
+    prompt: SKILL_BRIEF
+  });
   const skillSent = requests
     .slice(askedBefore)
     .map((r) => r.sent ?? "")
@@ -395,10 +416,19 @@ try {
     JSON.stringify(skilled.stdin?.slice(0, 60))
   );
   if (!live) {
+    /**
+     * The body, and the brief **whole**: the `/name` line is a command whose
+     * argument is the rest of stdin, and a CLI that took only the first line of
+     * it would leave the right process running the wrong instructions. The last
+     * paragraph's marker is what says the argument did not stop at a newline.
+     */
+    const body = skillSent.includes(SKILL_SENTINEL);
+    const whole = skillSent.includes(skilled.prompt);
+    const end = skillSent.includes(SKILL_BRIEF_END);
     check(
-      "the skill's own body reaches the model, with the prompt it was given",
-      skillSent.includes(SKILL_SENTINEL) && skillSent.includes(skilled.prompt),
-      `body ${skillSent.includes(SKILL_SENTINEL) ? "✓" : "✗"}, prompt ${skillSent.includes(skilled.prompt) ? "✓" : "✗"}`
+      "the skill's own body reaches the model, with the whole brief under it",
+      body && whole && end,
+      `body ${body ? "✓" : "✗"}, brief ${whole ? "✓" : "✗"}, last paragraph ${end ? "✓" : "✗"}`
     );
   }
   /**
@@ -692,10 +722,10 @@ function listen(egress, requests, refused) {
  * daemon's parser — the session id it hands the next turn, and the outcome the
  * host decodes — as well as parsed whole, for what a line-by-line read hides.
  */
-function runSession(bin, proxyUrl, { resume, fork, plan, skill } = {}) {
+function runSession(bin, proxyUrl, { resume, fork, plan, skill, prompt } = {}) {
   const turn = {
     operationId: `probe:${randomUUID()}`,
-    prompt: `Reply with exactly: ${REPLY}`,
+    prompt: prompt ?? `Reply with exactly: ${REPLY}`,
     settings: {},
     state: resume ? { sessionId: resume } : {},
     header: {
@@ -865,9 +895,10 @@ function checkRun(label, run, { structured = false } = {}) {
  *
  * `entry.sent` is what the model was asked, kept in memory for the checks that
  * are about the prompt rather than the traffic — a skill's body arriving with
- * the brief under it, for one. The capture keeps each request's method, path
- * and headers and never a body, which is what keeps a conversation out of a
- * committed file.
+ * the brief under it, for one. Text rather than the JSON around it: a brief of
+ * several paragraphs is what the checks look for, and JSON escapes every
+ * newline in it. The capture keeps each request's method, path and headers and
+ * never a body, which is what keeps a conversation out of a committed file.
  */
 async function fake(request, entry) {
   const url = pathOf(request.url);
@@ -877,7 +908,7 @@ async function fake(request, entry) {
   }
   if (url === "/v1/messages" && request.method === "POST") {
     const body = await request.json();
-    if (entry) entry.sent = JSON.stringify(body.messages ?? []);
+    if (entry) entry.sent = askedText(body);
     const message = {
       id: "msg_probe",
       type: "message",
@@ -963,6 +994,23 @@ async function fake(request, entry) {
     },
     { status: 404 }
   );
+}
+
+/**
+ * Every text block of a request's messages, joined — what the model was asked,
+ * as it reads rather than as it travels. A system prompt is not in it: what the
+ * checks look for is a skill's body and a brief, and both arrive as a turn.
+ */
+function askedText(body) {
+  const out = [];
+  for (const message of Array.isArray(body?.messages) ? body.messages : []) {
+    const content = message?.content;
+    if (typeof content === "string") out.push(content);
+    else if (Array.isArray(content))
+      for (const block of content)
+        if (typeof block?.text === "string") out.push(block.text);
+  }
+  return out.join("\n");
 }
 
 // --- the capture and the report ----------------------------------------------------

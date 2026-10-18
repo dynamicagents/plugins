@@ -119,6 +119,23 @@ describe("the launch", () => {
       expect(stdin).toBe("carry on");
     });
 
+    /**
+     * The checkout is not fixed for a session's life — editing the skills is
+     * work a session does — and a turn that injects nothing has no name to
+     * spend. Checking one anyway would make a skill renamed mid-session the end
+     * of the conversation that renamed it.
+     */
+    it("is not looked for on a turn carrying a conversation on", () => {
+      const { stdin } = cli().command(
+        turn({
+          header: { cwd, skill: "renamed-since" },
+          prompt: "carry on",
+          state: { sessionId: "sess-1" }
+        })
+      );
+      expect(stdin).toBe("carry on");
+    });
+
     it("leaves a run that names none byte-identical to its prompt", () => {
       const prompt = "/not-a-skill-line\nand a prompt that starts with one";
       expect(cli().command(turn({ header: { cwd }, prompt })).stdin).toBe(
@@ -179,7 +196,10 @@ describe("the parse", () => {
       })
     );
     expect(init.state).toEqual({ sessionId: "sess-1" });
-    const [session, initNote] = init.events ?? [];
+    // What the line said about the session comes before what it said the model
+    // did: a host reads the id and the skills off the first poll either way,
+    // and only the notes are positional.
+    const [session, loaded, initNote] = init.events ?? [];
     expect(session).toMatchObject({
       type: "message",
       message: { id: "op-1:session", operationId: "op-1" }
@@ -188,6 +208,7 @@ describe("the parse", () => {
       (event as { message: { parts: { text: string }[] } }).message.parts[0]!
         .text;
     expect(decodeSessionId(text(session))).toBe("sess-1");
+    expect(decodeSkills(text(loaded))).toBeNull();
     expect(decodeNote(text(initNote))?.key).toBe("claude:0");
 
     const said = parse.line(
@@ -224,16 +245,16 @@ describe("the parse", () => {
   /**
    * What the CLI loaded, as its own answer rather than as a guess from disk —
    * the host compares it with the skill it asked for and stops a session that
-   * is about to do generic work (`../model.ts`). A version that stops reporting
-   * them sends nothing rather than an empty list, so the host can tell the two
-   * apart.
+   * is about to do generic work (`../model.ts`). Reported for every `init`,
+   * `null` included: a host left waiting for a message that never comes would
+   * read silence as confirmation, which is the one answer it must not give.
    */
-  it("sends the skills the CLI reported loading, and nothing when it reported none", () => {
+  it("sends the skills the CLI reported loading, and null when it named none", () => {
     const text = (event: unknown) =>
       (event as { message: { parts: { text: string }[] } }).message.parts[0]!
         .text;
-    const init = (over: Record<string, unknown>) =>
-      cli()
+    const reported = (over: Record<string, unknown>) => {
+      const update = cli()
         .parser(turn())
         .line(
           line({
@@ -243,22 +264,35 @@ describe("the parse", () => {
             ...over
           })
         );
+      const message = update.events?.find(
+        (event) => decodeSkills(text(event)) !== undefined
+      );
+      return message === undefined ? "no message" : decodeSkills(text(message));
+    };
 
-    const loaded = init({ skills: ["refactor-discovery", "simplify"] });
-    const message = loaded.events?.find(
-      (event) => decodeSkills(text(event)) !== undefined
-    );
-    expect(decodeSkills(text(message))).toEqual([
+    expect(reported({ skills: ["refactor-discovery", "simplify"] })).toEqual([
       "refactor-discovery",
       "simplify"
     ]);
-
+    // Loaded nothing, and did not say — two answers, and the host stops on
+    // both, so what matters is that neither arrives as silence.
+    expect(reported({ skills: [] })).toEqual([]);
     for (const over of [{}, { skills: "refactor-discovery" }]) {
-      const quiet = init(over);
-      expect(
-        quiet.events?.some((event) => decodeSkills(text(event)) !== undefined)
-      ).toBe(false);
+      expect(reported(over)).toBeNull();
     }
+  });
+
+  /** No `init` line at all is the one turn with nothing to report. */
+  it("sends no skills message for a line that starts no conversation", () => {
+    const text = (event: unknown) =>
+      (event as { message: { parts: { text: string }[] } }).message.parts[0]!
+        .text;
+    const update = cli()
+      .parser(turn())
+      .line(line({ type: "system", subtype: "compact_boundary" }));
+    expect(
+      update.events?.some((event) => decodeSkills(text(event)) !== undefined)
+    ).toBe(false);
   });
 
   it("keeps the code a CLI exits with after an error result", () => {

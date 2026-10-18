@@ -158,18 +158,21 @@ function command(
     argv.push("--json-schema", JSON.stringify(schema));
   }
   let stdin = turn.prompt;
-  if (header?.skill !== undefined) {
-    // Checked whatever the turn is, since the checkout is fixed for a session's
-    // life: a stat, and it catches the drift that costs the most — a skill
-    // renamed where the caller's name for it was not. Whether the CLI then
-    // *loaded* it is the CLI's own answer, on the `init` line's `skills`, which
-    // the host checks (`../model.ts`).
+  if (header?.skill !== undefined && !sessionId) {
+    // A stat, on the one launch that spends the name: it catches the drift that
+    // costs the most — a skill renamed where the caller's name for it was not.
+    // Not on a turn carrying a conversation on, which injects nothing: that
+    // session is already running the process it started under, and the skills
+    // in the checkout may have moved since, a session editing them being one of
+    // the things a session does. Whether the CLI then *loaded* it is the CLI's
+    // own answer, on the `init` line's `skills`, which the host checks
+    // (`../model.ts`).
     const file = SKILL_FILE(header.cwd, header.skill);
     if (!existsSync(file))
       throw new Error(
         `no skill named ${header.skill} in this checkout: ${file} is not there`
       );
-    if (!sessionId) stdin = `/${header.skill}\n${turn.prompt}`;
+    stdin = `/${header.skill}\n${turn.prompt}`;
   }
   return { argv, stdin, env: sessionEnv(options) };
 }
@@ -241,13 +244,18 @@ function parser(operationId: string) {
       thinkingFrom = parsed.thinkingFrom;
       // The resume state the harness hands the next turn of this session.
       let state: { sessionId: string } | undefined;
-      /** The CLI's own list of what it loaded, when its `init` line carried one. */
-      let skills: readonly string[] | undefined;
+      /**
+       * The CLI's own list of what it loaded, or `null` where its `init` line
+       * carried none. Reported on every `init` rather than only on the lines
+       * that carry a list, so a host that asked for a skill is never left
+       * inferring confirmation from a message that did not arrive.
+       */
+      let skills: readonly string[] | null | undefined;
       for (const event of parsed.events) {
         if (event.kind === "init") {
           sessionId = event.sessionId;
           state = { sessionId };
-          skills = event.skills;
+          skills = event.skills ?? null;
         } else if (event.kind === "rateLimit") rateLimit = event.info;
         else if (event.kind === "result") result = event.result;
       }
@@ -264,7 +272,8 @@ function parser(operationId: string) {
       const events: ContainerEvent[] = [];
       if (state)
         events.push(message("session", encodeSessionId(state.sessionId)));
-      if (skills) events.push(message("skills", encodeSkills(skills)));
+      if (skills !== undefined)
+        events.push(message("skills", encodeSkills(skills)));
       const notes = toProgress(parsed.events, n);
       n += notes.length;
       for (const note of notes)
