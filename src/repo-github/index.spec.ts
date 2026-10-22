@@ -2105,6 +2105,18 @@ describe("the skills a checkout carries", () => {
     expect(calls.some((c) => c.command.includes(".claude/skills"))).toBe(false);
   });
 
+  it("reads nothing when git could not say which repository is there", async () => {
+    const { exec, calls } = recorder(
+      existing({ ...read(SKILL), "remote get-url origin": { success: false } })
+    );
+    const result = await run(tools(exec), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toMatch(/could not read which repository/i);
+    expect(calls.some((c) => c.command.includes(".claude/skills"))).toBe(false);
+  });
+
   /** The clone succeeded. A read that did not is worth a line, never an error. */
   it("keeps the clone's own answer when the read fails", async () => {
     const { exec } = recorder({

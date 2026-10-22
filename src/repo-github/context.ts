@@ -190,8 +190,8 @@ export interface RepoContext {
   ) => Promise<RunResult>;
   /**
    * The same runner without git in front of it, for the one thing these tools
-   * read that git cannot answer: what a checkout's own files say. See
-   * {@link file://./skills.ts READ_SKILLS}, which is the only caller.
+   * read that git cannot answer: what a checkout's own files say.
+   * {@link file://./skills.ts skillInventory} is what runs on it.
    *
    * Published alongside `plain` rather than instead of it. Every command this
    * plugin runs is still one of two shapes, and a reader can tell which from the

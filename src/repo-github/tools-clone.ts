@@ -35,7 +35,9 @@ export function cloneTools(ctx: RepoContext): ToolSet {
    *
    * Bounded here rather than in the inventory: the inventory caps itself at a
    * list a reader can use, and this is the host's own ceiling on an answer,
-   * which the rest of the plugin applies in the same place.
+   * which the rest of the plugin applies in the same place. The refusals that
+   * carry no inventory are bounded in the same expression, since each of them
+   * quotes something it was given: another remote's URL, or git's own output.
    */
   const withSkills = async (message: string, dir: string): Promise<string> =>
     bounded(`${message}\n\n${await skillInventory(shell, dir)}`);
@@ -175,7 +177,7 @@ export function cloneTools(ctx: RepoContext): ToolSet {
           }
           return refreshed.checkout
             ? await withSkills(refreshed.message, dir)
-            : refreshed.message;
+            : bounded(refreshed.message);
         }
 
         // `depth` is bounded here rather than trusted from the schema. It no

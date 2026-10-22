@@ -248,8 +248,10 @@ prompt may reach it. That last part is the half that is not decoration: a skill 
 frontmatter sets `disable-model-invocation` is refused to a model's own skill tool, so
 naming it as `/<name>` is the only way in, while `user-invocable: false` removes that
 command and leaves prose. A host that cannot tell those apart writes a prompt that
-silently does nothing. The list is capped and each description clipped, and the answer
-carries the total, how many it listed and how many it left out; a checkout with none says
+silently does nothing, so a skill whose frontmatter did not read whole is reported as
+one the read cannot place rather than as one both forms reach. The list is capped and each
+description clipped, and the answer carries the total, how many it listed and how many it
+left out; a checkout with none says
 so, because "none here" and "this tool does not report them" are different facts. A read
 that fails costs the inventory and never the clone. `./skills.ts` holds the parsing and
 the bounds, and what it does **not** hold is when a skill should be named: that is the

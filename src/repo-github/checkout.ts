@@ -26,9 +26,14 @@ interface RefreshOutcome {
    *
    * Weaker than `branch` on purpose, and the difference is the dirty tree: that
    * checkout is there and is the right repository, so an answer may describe
-   * what is in it, while nothing may *act* on it. Every return before the status
-   * read is a case where there is no such checkout to describe, and a caller
-   * cannot tell those from the rest by their message alone.
+   * what is in it, while nothing may *act* on it.
+   *
+   * The returns above the status read leave it unset, and so does the status
+   * read's own failure: a tree git could not read is not one to read anything
+   * else out of, and the doubt that stops the reset below stops a description of
+   * what is on the disk under it. A caller cannot tell any of that from the
+   * message alone, which is why this is a flag and not a reading of the
+   * sentence.
    */
   checkout?: true;
 }

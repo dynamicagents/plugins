@@ -132,7 +132,8 @@ metadata:
   /**
    * The bound on the read can cut a block before its closing delimiter. The
    * skill is still there and still nameable, so what arrived is read rather
-   * than thrown away.
+   * than thrown away, and how to reach it is reported as unknown rather than
+   * as the default of a field that may be the one that did not arrive.
    */
   it("reads a frontmatter block the read cut short", () => {
     const cut = `---
@@ -141,6 +142,61 @@ description: The part that arrived`;
     expect(skillsIn([`${SKILLS_DIR}/long-one`, cut])[0]).toEqual({
       name: "long-one",
       description: "The part that arrived",
+      invocation: "unknown"
+    });
+  });
+
+  /**
+   * What an unreadable `SKILL.md` looks like from here: the directory was
+   * named and nothing was indented under it. The skill is reported, because the
+   * directory is there, and nothing is claimed about reaching it.
+   */
+  it("places a skill whose file read nothing by its directory alone", () => {
+    expect(readSkillInventory(`${SKILLS_DIR}/unreadable\n\n`)).toEqual([
+      { name: "unreadable", invocation: "unknown" }
+    ]);
+  });
+
+  /**
+   * A directory name comes from a cloned repository, so one carrying a newline
+   * writes a second line at column zero. It is the rest of that one directory's
+   * name, and a name holds no `/`, so requiring the path is what keeps it from
+   * opening a record: without that it is a skill of its own, with the frontmatter
+   * belonging to the directory above it read under a name nobody wrote.
+   */
+  it("starts a record only on a path under the skills directory", () => {
+    const split = [
+      `${SKILLS_DIR}/one-directory`,
+      "whose name carries a newline",
+      "\t---",
+      "\tdescription: One skill, not two.",
+      "\t---",
+      ""
+    ].join("\n");
+    expect(readSkillInventory(split)).toEqual([
+      {
+        name: "one-directory",
+        description: "One skill, not two.",
+        invocation: "either"
+      }
+    ]);
+  });
+
+  /**
+   * A description written as plain indented lines rather than with a block
+   * indicator. Legal frontmatter, and read as nothing at all if an empty value
+   * is not taken as the lines below it.
+   */
+  it("folds a description indented under a bare key", () => {
+    const bare = `---
+name: plain-block
+description:
+  A description that runs
+  over two lines.
+---`;
+    expect(skillsIn([`${SKILLS_DIR}/plain-block`, bare])[0]).toEqual({
+      name: "plain-block",
+      description: "A description that runs over two lines.",
       invocation: "either"
     });
   });
@@ -207,6 +263,58 @@ ${fields}
       ])[0]
     ).toMatchObject({ invocation: "either" });
   });
+
+  /**
+   * A comment on the line is what a careful author writes next to a field like
+   * this one, and it is also what makes the value stop being the word `true`.
+   */
+  it.each([
+    ["disable-model-invocation: true # named from the prompt", "command"],
+    ["user-invocable: false # the model picks it up itself", "prose"]
+  ])("reads a restriction a comment follows (%s)", (fields, invocation) => {
+    expect(skillsIn([`${SKILLS_DIR}/subject`, front(fields)])[0]).toMatchObject(
+      { invocation }
+    );
+  });
+});
+
+/**
+ * YAML starts a comment at a `#` that follows whitespace, and this reads the
+ * field the way the parser that acts on it does. Guessing either way is wrong in
+ * a case that happens: a name is offered as a command, so a comment left on it
+ * is offered too, and a description legitimately carries a hash.
+ */
+describe("a comment on a frontmatter line", () => {
+  const read = (fields: string) =>
+    skillsIn([`${SKILLS_DIR}/subject`, `---\n${fields}\n---`])[0];
+
+  it("takes it off a name, which is what a prompt has to spell", () => {
+    expect(read("name: audit # the command a prompt names")?.name).toBe(
+      "audit"
+    );
+  });
+
+  it("leaves a hash that starts no comment", () => {
+    expect(read("description: Costs in C# and cost#id.")?.description).toBe(
+      "Costs in C# and cost#id."
+    );
+  });
+
+  it("leaves one inside quotes, and takes off what follows them", () => {
+    expect(
+      read(`description: "Use the # sign." # not part of the description`)
+        ?.description
+    ).toBe("Use the # sign.");
+  });
+
+  it("reads a block indicator a comment follows", () => {
+    expect(
+      skillsIn([
+        `${SKILLS_DIR}/subject`,
+        `---\ndescription: >- # folded below\n  Over one line.\n---`
+      ])[0]?.description
+    ).toBe("Over one line.");
+  });
 });
 
 describe("the answer the model reads", () => {
@@ -271,7 +379,8 @@ describe("the answer the model reads", () => {
 
   it.each([
     ["prose", "name it in prose; it has no `/` form"],
-    ["neither", "no prompt can invoke it"]
+    ["neither", "no prompt can invoke it"],
+    ["unknown", "how to reach it is unknown"]
   ])("says how a %s skill is reached", (invocation, note) => {
     expect(
       skillInventoryText([
@@ -328,5 +437,56 @@ describe("reading the checkout", () => {
     );
 
     expect(text).toContain("could not be read: the read failed");
+  });
+
+  /**
+   * A reason is one line of an answer about a clone that worked. What a host
+   * hands back for a command that never ran is a paragraph on retrying a lost
+   * `git push`, and the whole of it on a successful clone reads as advice about
+   * the clone.
+   */
+  it("clips the reason a failed read gave", async () => {
+    const text = await skillInventory(
+      async () =>
+        answer({
+          success: false,
+          stderr: `the read failed. ${"word ".repeat(200)}`
+        }),
+      "/workspace/r"
+    );
+
+    expect(text.length).toBeLessThanOrEqual(
+      `The skills under \`${SKILLS_DIR}\` in this checkout could not be read: `
+        .length +
+        MAX_DESCRIPTION_CHARS +
+        1
+    );
+    expect(text).toContain("could not be read: the read failed. word");
+  });
+
+  /**
+   * One file the read could not open costs its own record and no other. The
+   * collector's exit status is not that read's, so this arrives as a successful
+   * stream with a directory and nothing under it, and the skill it names is
+   * reported without a claim about reaching it.
+   */
+  it("keeps the rest of the inventory when one file could not be read", async () => {
+    const text = await skillInventory(
+      async () =>
+        answer({
+          stdout: `${SKILLS_DIR}/unreadable\n\n${stream([
+            `${SKILLS_DIR}/wrangler`,
+            PLAIN
+          ])}`,
+          stderr: "head: .claude/skills/unreadable/SKILL.md: Permission denied"
+        }),
+      "/workspace/r"
+    );
+
+    expect(text).toContain(
+      "- `unreadable` (how to reach it is unknown: its frontmatter did not read whole)"
+    );
+    expect(text).toContain("- `wrangler`: Run or troubleshoot");
+    expect(text).toContain("2 skills, 2 listed, 0 omitted.");
   });
 });

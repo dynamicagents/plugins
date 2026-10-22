@@ -195,7 +195,11 @@ describe("refreshCheckout", () => {
       fetchOrigin
     });
 
+    // The pair that is the whole point of `checkout`: no `branch`, so nothing
+    // acts on the tree, and the flag, so an answer may still describe what is
+    // in it.
     expect(out.branch).toBeUndefined();
+    expect(out.checkout).toBe(true);
     expect(out.message).toContain("uncommitted changes");
     expect(out.message).toContain("repo_diff");
     expect(ran.some((c) => c.startsWith("reset"))).toBe(false);
@@ -247,6 +251,8 @@ describe("refreshCheckout", () => {
     });
 
     expect(out.branch).toBeUndefined();
+    // A tree git could not read is not one to read anything else out of either.
+    expect(out.checkout).toBeUndefined();
     expect(out.message).toContain("permission denied");
     expect(ran.some((c) => c.startsWith("reset"))).toBe(false);
   });
@@ -298,6 +304,7 @@ describe("refreshCheckout", () => {
     });
 
     expect(out.branch).toBeUndefined();
+    expect(out.checkout).toBeUndefined();
     expect(out.message).toContain("someone/else");
     expect(ran.some((c) => c.startsWith("status"))).toBe(false);
   });
@@ -321,6 +328,7 @@ describe("refreshCheckout", () => {
       fetchOrigin
     });
 
+    expect(out.checkout).toBeUndefined();
     expect(out.message).toContain("could not read which repository");
     expect(out.message).toContain("Nothing was fetched or reset");
   });
@@ -368,6 +376,7 @@ describe("refreshCheckout", () => {
     });
 
     expect(out.branch).toBe("next");
+    expect(out.checkout).toBe(true);
     expect(out.message).toContain("fetch failed: could not authenticate");
     expect(out.message).toContain("left on next, clean but not updated");
     expect(ran.some((c) => c.startsWith("reset"))).toBe(false);
