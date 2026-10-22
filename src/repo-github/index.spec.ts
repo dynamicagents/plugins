@@ -1899,7 +1899,9 @@ describe("a clone URL that names no repository", () => {
     );
 
     expect(chosen).toEqual([{ owner: "o", repo: "r" }]);
-    expect(result).toBe("cloned to /workspace/r on branch main");
+    // The clone's own sentence leads, and the checkout's skills follow it.
+    // See "the skills a checkout carries" below.
+    expect(result.split("\n")[0]).toBe("cloned to /workspace/r on branch main");
   });
 
   it("stops the clone when the host cannot choose a workspace", async () => {
@@ -1979,6 +1981,155 @@ describe("re-entrant clone", () => {
     });
 
     expect(result).toMatch(/already holds a checkout of/i);
+  });
+});
+
+/**
+ * What a session can be told to follow, reported where the agent briefing that
+ * session will see it.
+ *
+ * A Claude Code session reads the skills of the repository it runs in, and the
+ * agent that briefs it has no other way to learn they exist, so a skill it
+ * should follow has to be named in the prompt, and naming one means knowing it
+ * is there. `./skills.ts` carries the parsing and the rendering, and what is
+ * asserted here is the half that is this tool's: which answers describe a
+ * checkout, and that reading it can never cost a clone.
+ */
+describe("the skills a checkout carries", () => {
+  const SKILL = [
+    ".claude/skills/security-audit-discovery",
+    "\t---",
+    "\tname: security-audit-discovery",
+    "\tdescription: Go looking for the weakness no single component owns.",
+    "\tdisable-model-invocation: true",
+    "\t---",
+    ""
+  ].join("\n");
+
+  /** What the read answers, keyed the way `recorder` matches a command. */
+  const read = (stdout: string): Stubbed => ({ ".claude/skills": { stdout } });
+
+  const existing = (extra: Stubbed = {}): Stubbed => ({
+    "rev-parse --git-dir": { success: true, stdout: ".git" },
+    ...extra
+  });
+
+  it("lists them under a fresh clone, with how each one is invoked", async () => {
+    const { exec, calls } = recorder(read(SKILL));
+    const result = await run(tools(exec), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toContain("cloned to /workspace/r on branch main");
+    expect(result).toContain(
+      "- `security-audit-discovery` (name it as `/security-audit-discovery`)"
+    );
+    expect(result).toContain("1 skill, 1 listed, 0 omitted.");
+    // In the checkout, which is the tree the session will get.
+    expect(
+      calls.find((c) => c.command.includes(".claude/skills"))?.options?.cwd
+    ).toBe("/workspace/r");
+  });
+
+  it("lists them again when an existing checkout is refreshed", async () => {
+    const { exec } = recorder(existing(read(SKILL)));
+    const { git } = gitRecorder();
+    const result = await run(tools(exec, { git }), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toMatch(/reused the existing checkout/i);
+    expect(result).toContain("- `security-audit-discovery`");
+  });
+
+  /**
+   * The dirty tree is the case worth pinning. Nothing may *act* on that
+   * checkout, which is why the refusal exists, but it is the right repository
+   * and it is on disk, so what it carries is still worth saying.
+   */
+  it("lists them for a checkout left alone because it is dirty", async () => {
+    const { exec } = recorder(
+      existing({
+        ...read(SKILL),
+        "status --porcelain": { stdout: " M src/a.ts" }
+      })
+    );
+    const result = await run(tools(exec), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toMatch(/uncommitted changes/i);
+    expect(result).toContain("- `security-audit-discovery`");
+  });
+
+  it("says a checkout carries none rather than saying nothing", async () => {
+    const { exec } = recorder(read(""));
+    const result = await run(tools(exec), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toContain(
+      "No skills under `.claude/skills` in this checkout: 0 skills, 0 listed, 0 omitted."
+    );
+  });
+
+  /**
+   * An answer about where the checkout is *not* describes nothing, so nothing is
+   * read: an inventory on this path would be the other repository's.
+   */
+  it("reads nothing when the directory holds a different repository", async () => {
+    const { exec, calls } = recorder(
+      existing({
+        ...read(SKILL),
+        "remote get-url origin": { stdout: "https://github.com/other/thing" }
+      })
+    );
+    const result = await run(tools(exec), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toMatch(/already holds a checkout of/i);
+    expect(result).not.toContain("security-audit-discovery");
+    expect(calls.some((c) => c.command.includes(".claude/skills"))).toBe(false);
+  });
+
+  it("reads nothing when the tree could not be inspected", async () => {
+    const { exec, calls } = recorder(
+      existing({ ...read(SKILL), "status --porcelain": { success: false } })
+    );
+    const result = await run(tools(exec), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toMatch(/could not read the state of the checkout/i);
+    expect(calls.some((c) => c.command.includes(".claude/skills"))).toBe(false);
+  });
+
+  /** The clone succeeded. A read that did not is worth a line, never an error. */
+  it("keeps the clone's own answer when the read fails", async () => {
+    const { exec } = recorder({
+      ".claude/skills": { success: false, stdout: "" }
+    });
+    const result = await run(tools(exec), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toContain("cloned to /workspace/r on branch main");
+    expect(result).toContain(
+      "The skills under `.claude/skills` in this checkout could not be read"
+    );
+  });
+
+  it("never lets a lost container turn a clone into a failure", async () => {
+    const { exec } = recorder({
+      ".claude/skills": { throws: new Error("container replaced") }
+    });
+    const result = await run(tools(exec), "repo_clone", {
+      url: "https://github.com/o/r"
+    });
+
+    expect(result).toContain("cloned to /workspace/r on branch main");
+    expect(result).toContain("could not be read");
   });
 });
 

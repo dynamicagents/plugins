@@ -3,6 +3,7 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import { parseRepo, repoLocation, UNSAFE_BRANCH } from "./url.js";
 import { refreshCheckout, writeGitIdentity } from "./checkout.js";
+import { skillInventory } from "./skills.js";
 import type { RepoContext } from "./context.js";
 
 /** Putting a checkout on disk, fresh or refreshed. */
@@ -16,14 +17,33 @@ export function cloneTools(ctx: RepoContext): ToolSet {
     notifyCheckout,
     logFailure,
     plain,
+    shell,
     runGit,
     fetchOrigin
   } = ctx;
 
+  /**
+   * One answer about a checkout that is on disk: what happened to it, and the
+   * skills the repository carries.
+   *
+   * **Only for an answer that establishes such a checkout.** A URL that names no
+   * repository, a directory holding a different one, and a tree git could not
+   * read are all answers about where the checkout is *not*, and an inventory
+   * read on that path would be describing something nobody asked about. What
+   * tells the two apart on the refresh path is `checkout` in
+   * {@link file://./checkout.ts refreshCheckout}'s outcome.
+   *
+   * Bounded here rather than in the inventory: the inventory caps itself at a
+   * list a reader can use, and this is the host's own ceiling on an answer,
+   * which the rest of the plugin applies in the same place.
+   */
+  const withSkills = async (message: string, dir: string): Promise<string> =>
+    bounded(`${message}\n\n${await skillInventory(shell, dir)}`);
+
   return {
     repo_clone: tool({
       description:
-        "Clone a git repository into the workspace. Returns the checkout path and the branch you landed on. If the repository is already checked out from an earlier task, it is fetched and reset to the remote instead — unless it has uncommitted changes, which are left alone for you to inspect.",
+        "Clone a git repository into the workspace. Returns the checkout path, the branch you landed on, and the skills the repository carries with how each one may be named in a prompt. If the repository is already checked out from an earlier task, it is fetched and reset to the remote instead. A checkout with uncommitted changes is left alone for you to inspect.",
       inputSchema: z.object({
         url: z.string().describe("HTTPS repository URL"),
         branch: z
@@ -153,7 +173,9 @@ export function cloneTools(ctx: RepoContext): ToolSet {
               fresh: false
             });
           }
-          return refreshed.message;
+          return refreshed.checkout
+            ? await withSkills(refreshed.message, dir)
+            : refreshed.message;
         }
 
         // `depth` is bounded here rather than trusted from the schema. It no
@@ -201,7 +223,7 @@ export function cloneTools(ctx: RepoContext): ToolSet {
           branch: landed,
           fresh: true
         });
-        return `cloned to ${dir} on branch ${landed}`;
+        return await withSkills(`cloned to ${dir} on branch ${landed}`, dir);
       }
     })
   };
