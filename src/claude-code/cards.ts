@@ -319,11 +319,20 @@ export function initCard(event: InitEvent): Card {
   return { text: parts.join(" · "), detail: { title: "Session" } };
 }
 
-/** A session's end, with what its `result` line says about it. */
+/**
+ * A session's end, with what its `result` line says about it. A session the API
+ * failed reports `success` as its subtype, so the card names the API instead.
+ */
 export function resultCard(result: ClaudeCodeResult): Card {
   const failed = result.isError || result.subtype !== "success";
+  const why =
+    result.subtype !== "success"
+      ? result.subtype
+      : result.apiErrorStatus === null
+        ? "API error"
+        : `API ${result.apiErrorStatus}`;
   const parts = [
-    failed ? `Session failed (${result.subtype})` : "Session finished",
+    failed ? `Session failed (${why})` : "Session finished",
     result.numTurns
       ? `${result.numTurns} turn${result.numTurns === 1 ? "" : "s"}`
       : undefined,
@@ -360,6 +369,18 @@ export function containerLostCard(reason: string): Card {
       title: "Session",
       status: "error",
       sections: [section("Why", reason, "text")]
+    }
+  };
+}
+
+/** A session the API failed, resuming after `waitMs`. */
+export function apiErrorCard(error: string, waitMs: number): Card {
+  return {
+    text: `Model call failed — the session resumes in ${duration(waitMs)}`,
+    detail: {
+      title: "Session",
+      status: "error",
+      sections: [section("Why", error, "text")]
     }
   };
 }

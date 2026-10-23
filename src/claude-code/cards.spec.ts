@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ENTRY_SECTION_MAX_CHARS } from "@dynamicagents/core/artifacts";
 import {
+  apiErrorCard,
   initCard,
   lostCard,
   resultCard,
@@ -355,6 +356,39 @@ describe("the session's own cards", () => {
         status: "error",
         sections: [
           { label: "Errors", body: "ran out of turns", format: "text" }
+        ]
+      }
+    });
+  });
+
+  it("names the API for a session it failed, which the CLI ends as `success`", () => {
+    const failed = (apiErrorStatus: number | null) =>
+      resultCard({
+        subtype: "success",
+        isError: true,
+        text: "API Error: ZlibError fetching",
+        numTurns: 67,
+        apiErrorStatus,
+        costUsd: 0,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        permissionDenials: 0
+      }).text;
+    expect(failed(null)).toBe("Session failed (API error) · 67 turns");
+    expect(failed(529)).toBe("Session failed (API 529) · 67 turns");
+  });
+
+  it("says a session the API failed resumes, and why", () => {
+    expect(apiErrorCard("API Error: ZlibError fetching", 30_000)).toEqual({
+      text: "Model call failed — the session resumes in 30s",
+      detail: {
+        title: "Session",
+        status: "error",
+        sections: [
+          {
+            label: "Why",
+            body: "API Error: ZlibError fetching",
+            format: "text"
+          }
         ]
       }
     });
