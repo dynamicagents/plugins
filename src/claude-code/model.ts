@@ -359,6 +359,20 @@ export function claudeCodeModel(
       throw reason;
     };
 
+    /** Stop the session, unless it is still within its limit. */
+    const withinLimit = async (
+      operationId: string,
+      startedAt: number
+    ): Promise<void> => {
+      if (Date.now() - startedAt <= timeoutMs) return;
+      await stop(
+        operationId,
+        new Error(
+          `the session ran past its limit of ${Math.round(timeoutMs / 60_000)} minutes`
+        )
+      );
+    };
+
     /**
      * One step of the run, to its end: the brief's session, or the follow-up.
      * Both count against one limit, from the session's first submission.
@@ -418,6 +432,9 @@ export function claudeCodeModel(
               signal.reason ?? new Error("the session was stopped")
             );
         }
+        // Before the submission, which starts a model call: a turn recovered
+        // past its limit would otherwise start one only for the poll to stop it.
+        await withinLimit(operationId, state.startedAt);
         // A resubmission that reached the CLI is told what happened, in the
         // conversation it already had; one that never did is the step again.
         const { fork: _fork, ...resumed } = header;
@@ -447,14 +464,7 @@ export function claudeCodeModel(
               operationId,
               signal.reason ?? new Error("the session was stopped")
             );
-          if (Date.now() - state.startedAt > timeoutMs) {
-            await stop(
-              operationId,
-              new Error(
-                `the session ran past its limit of ${Math.round(timeoutMs / 60_000)} minutes`
-              )
-            );
-          }
+          await withinLimit(operationId, state.startedAt);
           let polled: PollResult;
           try {
             polled = await rpc((sandbox) =>
@@ -507,10 +517,11 @@ export function claudeCodeModel(
           }
           const apiErrors = state.apiErrors ?? 0;
           const waitMs = API_ERROR_BACKOFF_MS * 2 ** apiErrors;
+          const retryAt = Date.now() + waitMs;
           if (
             transientApiError(end.result) &&
             apiErrors < API_ERROR_RESUMES &&
-            Date.now() + waitMs - state.startedAt < timeoutMs &&
+            retryAt - state.startedAt < timeoutMs &&
             !signal?.aborted
           ) {
             console.warn(
@@ -525,7 +536,7 @@ export function claudeCodeModel(
               from: 0,
               apiErrors: apiErrors + 1,
               resumeWith: "api-error",
-              retryAt: Date.now() + waitMs
+              retryAt
             });
             continue;
           }

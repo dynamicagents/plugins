@@ -415,6 +415,39 @@ describe("claudeCodeModel", () => {
     });
   });
 
+  it("submits nothing for a turn recovered past its limit, its backoff long over", async () => {
+    const box = sandbox((op) => ({ messages: [session(op)], result: done() }));
+    const { model, map } = harness(box, { timeoutMs: 60_000 });
+    map.set(`claude-code:${RUN}:turn:session`, {
+      attempt: 1,
+      startedAt: Date.now() - 120_000,
+      from: 0,
+      sessionId: "sess-1",
+      apiErrors: 1,
+      resumeWith: "api-error",
+      retryAt: Date.now() - 90_000
+    });
+    await expect(textOf(model)).rejects.toThrow(/ran past its limit/);
+    expect(box.submits).toHaveLength(0);
+  });
+
+  it("submits nothing when filing the resume's card takes the session past its limit", async () => {
+    await onFakeClock(async () => {
+      const box = sandbox((op) => ({
+        messages: [session(op)],
+        result: apiError()
+      }));
+      const { model } = harness(box, {
+        timeoutMs: 20_000,
+        note: async (key) => {
+          if (key.endsWith(":api-error")) vi.setSystemTime(Date.now() + 25_000);
+        }
+      });
+      await expect(textOf(model)).rejects.toThrow(/ran past its limit/);
+      expect(box.submits).toHaveLength(1);
+    });
+  });
+
   it("stops a run aborted while it waits out a backoff", async () => {
     await onFakeClock(async () => {
       const box = sandbox((op) => ({
