@@ -4,7 +4,7 @@ import type { ContainerOperationResult } from "agents/harness/container";
 import { SANDBOX_CONTRACT } from "../sandbox/constants.js";
 import { withRunHeader, type RunHeader } from "../sandbox/header.js";
 import type { PolledMessage, PollResult } from "../sandbox/object.js";
-import { containerLostCard, lostCard } from "./cards.js";
+import { apiErrorCard, containerLostCard, lostCard } from "./cards.js";
 import type { EffortLevel, PermissionMode } from "./config.js";
 import {
   decodeNote,
@@ -84,6 +84,8 @@ export interface SessionOutcome {
  *   `container_lost`, and this submits the next attempt to the same harness
  *   session, whose CLI conversation the harness kept: the session is told what
  *   happened, not briefed again.
+ * - **So does an API error the CLI gave up on** — see {@link transientApiError}
+ *   — after a backoff.
  */
 
 /** The sandbox RPCs a run uses. */
@@ -195,6 +197,20 @@ const LOST_RESUBMITS = 3;
 /** Why an operation settled that a new attempt may get past. */
 const LOST_REASONS = new Set(["container_lost", "container_unavailable"]);
 
+/** What a session is told when it resumes after an API error. */
+export const API_ERROR_PROMPT =
+  "Your last response was cut off by an API error, and the session has " +
+  "resumed. What you completed before it is kept, but a tool call it " +
+  "interrupted never ran. Carry on with the task from your last completed step.";
+
+/**
+ * Resumes after an API error. One that recurs on every attempt would otherwise
+ * be resumed, a full-context call each time, until the session's limit.
+ */
+const API_ERROR_RESUMES = 5;
+/** The first resume's wait, doubled for each after it. Every wait follows the CLI's own retries. */
+const API_ERROR_BACKOFF_MS = 15_000;
+
 /** Polls in a row a note may fail to file before it is given up on. */
 const NOTE_TRIES = 3;
 
@@ -216,6 +232,14 @@ interface TurnState {
   sessionId?: string;
   /** The current attempt's messages already filed — see `poll`'s `from`. */
   from: number;
+  /** Attempts resubmitted for a lost container. Absent is none. */
+  lost?: number;
+  /** Attempts resubmitted for an API error. Absent is none. */
+  apiErrors?: number;
+  /** What the current attempt was resubmitted for. Absent past the first is a lost container. */
+  resumeWith?: "container-lost" | "api-error";
+  /** When an API error's backoff ends: kept, so a recovered turn waits out only the rest. */
+  retryAt?: number;
 }
 
 type Step = "session" | "follow-up";
@@ -384,12 +408,27 @@ export function claudeCodeModel(
 
       for (;;) {
         const operationId = `${runId}:${step}:a${state.attempt}`;
+        if (state.retryAt !== undefined && state.retryAt > Date.now()) {
+          await untilAborted(sleep(state.retryAt - Date.now()), signal).catch(
+            () => undefined
+          );
+          if (signal?.aborted)
+            await stop(
+              operationId,
+              signal.reason ?? new Error("the session was stopped")
+            );
+        }
         // A resubmission that reached the CLI is told what happened, in the
         // conversation it already had; one that never did is the step again.
         const { fork: _fork, ...resumed } = header;
         const text =
           state.attempt > 0 && state.sessionId
-            ? withRunHeader(resumed, CONTAINER_LOST_PROMPT)
+            ? withRunHeader(
+                resumed,
+                state.resumeWith === "api-error"
+                  ? API_ERROR_PROMPT
+                  : CONTAINER_LOST_PROMPT
+              )
             : withRunHeader(header, prompt);
         try {
           await rpc((sandbox) => sandbox.submit(runId, text, operationId));
@@ -466,6 +505,30 @@ export function claudeCodeModel(
               `claude-code: the sandbox settled the session with no end it could read: ${String(result.text).slice(0, 200)}`
             );
           }
+          const apiErrors = state.apiErrors ?? 0;
+          const waitMs = API_ERROR_BACKOFF_MS * 2 ** apiErrors;
+          if (
+            transientApiError(end.result) &&
+            apiErrors < API_ERROR_RESUMES &&
+            Date.now() + waitMs - state.startedAt < timeoutMs &&
+            !signal?.aborted
+          ) {
+            console.warn(
+              "[claude-code] the session ended on an API error — resuming",
+              { runId, operationId, error: end.result.text, waitMs }
+            );
+            const card = apiErrorCard(end.result.text, waitMs);
+            await file(`${operationId}:api-error`, card.text, card.detail);
+            await save({
+              ...state,
+              attempt: state.attempt + 1,
+              from: 0,
+              apiErrors: apiErrors + 1,
+              resumeWith: "api-error",
+              retryAt: Date.now() + waitMs
+            });
+            continue;
+          }
           // No code is a process a signal ended.
           return sessionEnd(end, end.exitCode ?? -1, state.sessionId);
         }
@@ -477,7 +540,8 @@ export function claudeCodeModel(
             operationId,
             signal.reason ?? new Error("the session was stopped")
           );
-        if (!LOST_REASONS.has(reason) || state.attempt >= LOST_RESUBMITS) {
+        const lost = state.lost ?? 0;
+        if (!LOST_REASONS.has(reason) || lost >= LOST_RESUBMITS) {
           const card = lostCard(reason || "the sandbox gave no reason");
           await file(`${operationId}:lost`, card.text, card.detail);
           throw new Error(
@@ -494,7 +558,13 @@ export function claudeCodeModel(
         );
         const card = containerLostCard(reason);
         await file(`${operationId}:container-lost`, card.text, card.detail);
-        await save({ ...state, attempt: state.attempt + 1, from: 0 });
+        await save({
+          ...state,
+          attempt: state.attempt + 1,
+          from: 0,
+          lost: lost + 1,
+          resumeWith: "container-lost"
+        });
       }
     };
 
@@ -584,6 +654,21 @@ export function claudeCodeModel(
   };
 
   return reportingModel(options.model ?? "claude-code", run);
+}
+
+/**
+ * Whether a step's end is an API error another attempt may get past.
+ *
+ * The CLI retries a failed call itself, but never one cut off after a block of
+ * the response was complete, since a resend could run a tool call twice; its
+ * documented recovery is to resume the session. No status is the transport — a
+ * dropped or stalled stream, a body that would not decompress — and a 5xx or
+ * 529 the API's own. A 4xx is the request's, 429 included: the egress has
+ * already moved the credential pool on (`./egress.ts`).
+ */
+function transientApiError(result: ClaudeCodeResult): boolean {
+  if (!result.isError || !result.text.startsWith("API Error")) return false;
+  return result.apiErrorStatus === null || result.apiErrorStatus >= 500;
 }
 
 function sessionEnd(

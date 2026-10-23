@@ -227,6 +227,13 @@ session, whose CLI conversation the harness kept: the session is told what
 happened (`CONTAINER_LOST_PROMPT`), not briefed again. A turn that kills its
 container every time is resubmitted a bounded number of times.
 
+**So does an API error the CLI gave up on.** A response cut off after part of it
+was complete is one the CLI never retries, since a resend could run a tool call
+twice, and it ends the session with `API Error: …` as its answer. The model
+resumes the same conversation (`API_ERROR_PROMPT`) after a doubling backoff, a
+bounded number of times and within the session's limit; a 4xx is final.
+`transientApiError` in `./model.ts` says which errors qualify.
+
 **The report is the only text the model streams.** A run's result is what its
 assistant messages say, so narration streamed as text would become the result.
 What the session says as it works goes to the parent as **notes**, through

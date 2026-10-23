@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ContainerOperationResult } from "agents/harness/container";
 import { SANDBOX_CONTRACT } from "../sandbox/constants.js";
 import { readRunHeader } from "../sandbox/header.js";
 import type { PolledMessage, PollResult } from "../sandbox/object.js";
 import type { ClaudeCodeResult } from "./events.js";
 import {
+  API_ERROR_PROMPT,
   claudeCodeModel,
   CONTAINER_LOST_PROMPT,
   type ClaudeCodeModelOptions,
@@ -67,6 +68,30 @@ const done = (sessionId = "sess-1", exitCode = 0): Turn["result"] => ({
   text: encodeRunEnd({ result: { ...RESULT, sessionId }, exitCode, sessionId })
 });
 const lost: Turn["result"] = { status: "unanswered", reason: "container_lost" };
+/** How the CLI ends a session the API failed: `success`, with the error as its answer. */
+const ZLIB =
+  'API Error: ZlibError fetching "http://anthropic.harness.internal/v1/messages?beta=true".';
+const apiError = (
+  apiErrorStatus: number | null = null,
+  text = ZLIB
+): Turn["result"] => ({
+  status: "done",
+  text: encodeRunEnd({
+    result: { ...RESULT, isError: true, text, apiErrorStatus },
+    exitCode: 1,
+    sessionId: "sess-1"
+  })
+});
+
+/** `body` on a clock that only moves when it is told to. */
+async function onFakeClock(body: () => Promise<void>): Promise<void> {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    await body();
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 /** A sandbox whose every operation is answered by `script`, in the order it is submitted. */
 function sandbox(script: (operationId: string, attempt: number) => Turn) {
@@ -283,6 +308,154 @@ describe("claudeCodeModel", () => {
     await expect(textOf(model)).rejects.toThrow(/container_lost/);
     expect(box.submits).toHaveLength(4);
     expect(notes.map((n) => n.key)).toContain(`${RUN}:session:a3:lost`);
+  });
+
+  it("resumes a session an API error cut short, in the same conversation, after a backoff", async () => {
+    await onFakeClock(async () => {
+      const box = sandbox((op, n) =>
+        n === 0
+          ? {
+              messages: [session(op), note(op, 0, "half-way")],
+              result: apiError()
+            }
+          : { messages: [note(op, 0, "done now")], result: done() }
+      );
+      const { model, notes, reports } = harness(box);
+      const text = textOf(model);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(box.submits).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await text).toBe("report 1");
+
+      expect(box.submits.map((s) => s.operationId)).toEqual([
+        `${RUN}:session:a0`,
+        `${RUN}:session:a1`
+      ]);
+      const resumed = readRunHeader(box.submits[1]!.text);
+      expect(resumed.prompt).toBe(API_ERROR_PROMPT);
+      expect(resumed.header?.schema).toBe("write");
+      expect(notes.map((n) => n.key)).toContain(`${RUN}:session:a0:api-error`);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.session.result?.text).toBe("the answer");
+    });
+  });
+
+  it("doubles the backoff, and reports the API error once the resumes are spent", async () => {
+    await onFakeClock(async () => {
+      const at: number[] = [];
+      const box = sandbox((op) => {
+        at.push(Date.now());
+        return { messages: [session(op)], result: apiError(529) };
+      });
+      const { model, reports } = harness(box);
+      const text = textOf(model);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(await text).toBe("report 1");
+      expect(at.slice(1).map((t, i) => t - at[i]!)).toEqual([
+        15_000, 30_000, 60_000, 120_000, 240_000
+      ]);
+      expect(reports[0]?.session.result).toMatchObject({
+        isError: true,
+        apiErrorStatus: 529
+      });
+    });
+  });
+
+  it("does not resume a request the API refused", async () => {
+    for (const status of [400, 429]) {
+      const box = sandbox((op) => ({
+        messages: [session(op)],
+        result: apiError(status, `API Error: ${status} refused`)
+      }));
+      const { model, reports } = harness(box);
+      await textOf(model);
+      expect(box.submits).toHaveLength(1);
+      expect(reports[0]?.session.result?.text).toBe(
+        `API Error: ${status} refused`
+      );
+    }
+  });
+
+  it("does not resume when the backoff would end past the session's limit", async () => {
+    const box = sandbox((op) => ({
+      messages: [session(op)],
+      result: apiError()
+    }));
+    const { model, reports } = harness(box, { timeoutMs: 10_000 });
+    await textOf(model);
+    expect(box.submits).toHaveLength(1);
+    expect(reports[0]?.session.result?.text).toBe(ZLIB);
+  });
+
+  it("waits out only the rest of a backoff a recovered turn kept", async () => {
+    await onFakeClock(async () => {
+      const box = sandbox((op) => ({
+        messages: [session(op)],
+        result: done()
+      }));
+      const { model, map } = harness(box);
+      map.set(`claude-code:${RUN}:turn:session`, {
+        attempt: 1,
+        startedAt: Date.now(),
+        from: 0,
+        sessionId: "sess-1",
+        apiErrors: 1,
+        resumeWith: "api-error",
+        retryAt: Date.now() + 5_000
+      });
+      const text = textOf(model);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(box.submits).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await text;
+      expect(box.submits.map((s) => s.operationId)).toEqual([
+        `${RUN}:session:a1`
+      ]);
+      expect(readRunHeader(box.submits[0]!.text).prompt).toBe(API_ERROR_PROMPT);
+    });
+  });
+
+  it("stops a run aborted while it waits out a backoff", async () => {
+    await onFakeClock(async () => {
+      const box = sandbox((op) => ({
+        messages: [session(op)],
+        result: apiError()
+      }));
+      const { model, notes } = harness(box);
+      const abort = new AbortController();
+      const ended = expect(textOf(model, abort.signal)).rejects.toThrow(
+        /cancelled by the parent/
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      abort.abort(new Error("cancelled by the parent"));
+      await ended;
+      expect(box.submits).toHaveLength(1);
+      expect(box.stops()).toBe(1);
+      expect(notes.map((n) => n.key)).toContain(`${RUN}:session:a1:lost`);
+    });
+  });
+
+  it("counts API errors and lost containers against budgets of their own", async () => {
+    await onFakeClock(async () => {
+      const script = [apiError(), apiError(), lost, lost, lost, done()];
+      const box = sandbox((op, n) => ({
+        messages: [session(op)],
+        result: script[n]
+      }));
+      const { model } = harness(box);
+      const text = textOf(model);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await text).toBe("report 1");
+      expect(
+        box.submits.slice(1).map((s) => readRunHeader(s.text).prompt)
+      ).toEqual([
+        API_ERROR_PROMPT,
+        API_ERROR_PROMPT,
+        CONTAINER_LOST_PROMPT,
+        CONTAINER_LOST_PROMPT,
+        CONTAINER_LOST_PROMPT
+      ]);
+    });
   });
 
   it("reports a session that ended without a result with its exit and stderr", async () => {
