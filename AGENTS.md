@@ -227,3 +227,17 @@ real `429`. A deployment's smoke test covers those after it ships.
 
 It needs `npm` on the PATH, and no credential unless `--live`. It imports the package
 from `dist/`, so the npm script builds first.
+
+---
+
+## Copilot reviews a pull request once
+
+Opening a pull request ready for review gets it one Copilot review, requested
+automatically, and that is the only one it gets. A push asks for nothing, and a
+second review happens only when a person requests one by hand.
+
+So **never wait for a second review**: once Copilot's review has landed, answer
+it and hand over, because polling for another waits on something that will not
+come. Never request one either, since every review is billed. The workspace's
+AGENTS.md, under "Pull requests", has how to tell a review has landed and how to
+answer it.
