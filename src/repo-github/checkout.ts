@@ -20,6 +20,22 @@ import { sameRepoUrl } from "./url.js";
 interface RefreshOutcome {
   message: string;
   branch?: string;
+  /**
+   * Set once this directory is known to hold a checkout of the repository that
+   * was asked for, with a tree git could read.
+   *
+   * Weaker than `branch` on purpose, and the difference is the dirty tree: that
+   * checkout is there and is the right repository, so an answer may describe
+   * what is in it, while nothing may *act* on it.
+   *
+   * The returns above the status read leave it unset, and so does the status
+   * read's own failure: a tree git could not read is not one to read anything
+   * else out of, and the doubt that stops the reset below stops a description of
+   * what is on the disk under it. A caller cannot tell any of that from the
+   * message alone, which is why this is a flag and not a reading of the
+   * sentence.
+   */
+  checkout?: true;
 }
 
 /**
@@ -204,6 +220,7 @@ export async function refreshCheckout({
     // call established — kicking off an install over it would be acting on a
     // state the model has not looked at yet.
     return {
+      checkout: true,
       message:
         `${dir} already has this repository checked out, with uncommitted changes:\n` +
         `${dirty.stdout.trim()}\n\n` +
@@ -226,10 +243,11 @@ export async function refreshCheckout({
     const failure = `fetch failed: ${fetched.stderr || fetched.stdout}`;
     const current = await plain("symbolic-ref --quiet --short HEAD", dir);
     const on = current.success ? current.stdout.trim() : "";
-    if (!on) return { message: failure };
+    if (!on) return { message: failure, checkout: true };
     return {
       message: `${failure}\nThe checkout was left on ${on}, clean but not updated from the remote.`,
-      branch: on
+      branch: on,
+      checkout: true
     };
   }
 
@@ -242,12 +260,16 @@ export async function refreshCheckout({
     // way.
     if (head.unreachable)
       return {
-        message: `could not read the default branch for ${url}: ${head.unreachable}`
+        message: `could not read the default branch for ${url}: ${head.unreachable}`,
+        checkout: true
       };
     target = head.branch;
   }
   if (!target)
-    return { message: `could not determine a default branch for ${url}` };
+    return {
+      message: `could not determine a default branch for ${url}`,
+      checkout: true
+    };
 
   // The one place in this plugin where a model-authored value lands in git's
   // *operand* position — everywhere else it is prefixed (`origin/…`,
@@ -260,7 +282,8 @@ export async function refreshCheckout({
   });
   if (!checkout.success)
     return {
-      message: `could not check out ${target}: ${checkout.stderr || checkout.stdout}`
+      message: `could not check out ${target}: ${checkout.stderr || checkout.stdout}`,
+      checkout: true
     };
 
   const reset = await plain(`reset --hard "origin/$REPO_BRANCH"`, dir, {
@@ -268,11 +291,13 @@ export async function refreshCheckout({
   });
   if (!reset.success)
     return {
-      message: `could not reset to origin/${target}: ${reset.stderr || reset.stdout}`
+      message: `could not reset to origin/${target}: ${reset.stderr || reset.stdout}`,
+      checkout: true
     };
 
   return {
     message: `reused the existing checkout at ${dir}, fetched and reset to origin/${target}`,
-    branch: target
+    branch: target,
+    checkout: true
   };
 }
