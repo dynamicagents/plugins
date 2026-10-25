@@ -27,6 +27,7 @@
  * `packageManager` pin, then lockfiles in the order the plan lists them.
  */
 
+import { sha256Hex } from "@dynamicagents/core";
 import type { JobState } from "@dynamicagents/core/job";
 
 /** Just enough of a workspace filesystem to inspect a checkout. */
@@ -438,11 +439,5 @@ async function digestFiles(
   }
   if (!found) return null;
 
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(input)
-  );
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return await sha256Hex(input);
 }

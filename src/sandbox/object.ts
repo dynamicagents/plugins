@@ -7,6 +7,7 @@ import {
   type ContainerMessage,
   type ContainerOperationResult
 } from "agents/harness/container";
+import { sha256Hex } from "@dynamicagents/core";
 import {
   installScheduler,
   namedDeadline,
@@ -1448,21 +1449,20 @@ function installMarkOf(dir: string): string {
   return `${INSTALL_MARKS}/${encodeURIComponent(dir)}`;
 }
 
-/** `env`, in key order, as a digest a fingerprint can carry. */
+/**
+ * `env`, in key order, as a digest a fingerprint can carry.
+ *
+ * The width is load-bearing: this goes into an install mark stored on the
+ * container's disk, so changing it makes every tree already marked look
+ * uninstalled and costs each one an install it does not need.
+ */
 async function digestEnv(
   env: Readonly<Record<string, string>> | undefined
 ): Promise<string> {
   const sorted = Object.entries(env ?? {}).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0
   );
-  const bytes = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(JSON.stringify(sorted))
-  );
-  return [...new Uint8Array(bytes)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 16);
+  return (await sha256Hex(JSON.stringify(sorted))).slice(0, 16);
 }
 
 function isNotFound(err: unknown): boolean {
@@ -1487,11 +1487,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * `value`, as the digest a poll returns beside a message.
+ *
+ * Nothing stores it: a poll composes it again for every message it answers
+ * with, so the width has only to tell two messages apart.
+ */
 async function digest(value: unknown): Promise<string> {
-  const bytes = new TextEncoder().encode(JSON.stringify(value));
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(hash)]
-    .slice(0, 12)
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+  return (await sha256Hex(JSON.stringify(value))).slice(0, 24);
 }
