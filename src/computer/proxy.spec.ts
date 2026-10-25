@@ -275,6 +275,19 @@ describe("routedWorkspace", () => {
   });
 
   /**
+   * The directory is the model's to spell, and a trailing slash is a spelling
+   * it produces. Compared verbatim it misses the root, and the walk hands back
+   * the agent's own directories as if they were the repository's.
+   */
+  it("prunes them for the root however the path is spelled", async () => {
+    const { workspace: ws, seen } = fake();
+
+    await ws.fs.find("/workspace/", "**/*.png");
+
+    expect(seen.finds[0]?.exclude).toContain("attachments/**");
+  });
+
+  /**
    * Think writes evicted media as bytes, and the marker it leaves in the
    * conversation names the path it wrote. A workspace that refused bytes would
    * make the marker point at nothing.

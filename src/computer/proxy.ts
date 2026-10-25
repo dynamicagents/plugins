@@ -99,6 +99,11 @@ export function routedWorkspace(
    * method Computer's filesystem declares. The options go through untouched:
    * an `edit` reads text and writes back what it read, and a `read` of an
    * evicted image asks for the bytes.
+   *
+   * **A host's `readFile` has to materialise what it answers**, because the
+   * client is released when this call returns and a stream that outlived it
+   * would be read against a disposed one. `/sandbox`'s does: it awaits the
+   * bytes and hands back a stream over them.
    */
   const readFile = (path: string, options?: unknown) =>
     withFs(path, "read", (fs) =>

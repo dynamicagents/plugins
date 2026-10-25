@@ -62,9 +62,22 @@ export const AGENT_OWNED = ["attachments", "fetched", ".agents"] as const;
  */
 export function walkSkips(directory: string, root: string): string[] {
   const anywhere = WALK_SKIPS.map((segment) => `**/${segment}`);
-  return directory === root
+  return atRoot(directory, root)
     ? [...anywhere, ...AGENT_OWNED.map((name) => `${name}/**`)]
     : anywhere;
+}
+
+/**
+ * Whether a walk starts at the workspace root, by a comparison a trailing
+ * slash cannot defeat.
+ *
+ * The directory is the model's to spell, and `/workspace/` is a spelling it
+ * produces. Compared verbatim, that one misses the root and the walk returns
+ * the agent's own directories as if they were the repository's.
+ */
+function atRoot(directory: string, root: string): boolean {
+  const bare = (path: string) => path.replace(/\/+$/, "");
+  return bare(directory) === bare(root);
 }
 
 /** The sentence a `node_modules` path gets. */
