@@ -5,7 +5,8 @@ import { shellQuote } from "../sandbox/agent-exec.js";
  * two output streams merged into one transcript, in the order they were
  * written, or hand it back untouched when no shell is configured.
  *
- * `bash`'s consumer is **a model reading output**. A project's check is a chain
+ * The shell tool's consumer is **a model reading output**. A project's check is a
+ * chain
  * — `wrangler types && prettier && eslint && tsc` — and *which tool spoke last*
  * is how you know which one failed. A stdout block and a separate stderr block
  * destroy that ordering, and a model that wants it back re-runs the whole gate
@@ -27,13 +28,13 @@ import { shellQuote } from "../sandbox/agent-exec.js";
  *
  * The trade is worth stating. `pipefail` surfaces SIGPIPE too, so
  * `ls big-dir | head -1` reports 141 rather than 0 — noisy, but *visible*. The
- * tool description tells the model not to pipe into `head`/`tail` at all, since
- * output is already truncated with both ends kept. It needs a shell that
- * implements it — `bash`, `zsh`, `ksh`, not `sh`/dash.
+ * tool's description is Computer's and says nothing about either, so the
+ * plugin's own context block in {@link file://./index.ts} is where the model is
+ * told not to pipe into `head`/`tail`. It needs a shell that implements it —
+ * `bash`, `zsh`, `ksh`, not `sh`/dash.
  *
- * With no shell configured the two streams arrive separate, and
- * {@link file://./render.ts renderResult} renders them as a labelled
- * `--- stderr ---` block.
+ * With no shell configured the two streams arrive separate, and the tool reports
+ * them as the `stdout` and `stderr` of its result.
  */
 export function withShellTranscript(
   command: string,

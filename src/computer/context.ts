@@ -166,7 +166,7 @@ export function computerContext(
    * only recover from what it is told, so this returns the sentence rather than
    * throwing it.
    *
-   * `bash` deliberately does not use it: it logs, and carries an install
+   * `exec` deliberately does not use it: it logs, and carries an install
    * warning through the failure path — a bespoke catch saying something this
    * cannot.
    */

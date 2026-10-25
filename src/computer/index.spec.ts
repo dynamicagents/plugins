@@ -171,6 +171,7 @@ function stub(
         execs.push({ command, options });
         return {
           result: async () => ({ exitCode: 0, stdout: "ok", stderr: "" }),
+          kill: async () => {},
           [Symbol.dispose]: () => {}
         };
       }
@@ -194,41 +195,93 @@ const run = (tools: ToolSet, name: string, input: unknown) =>
     {}
   );
 
+/** One `exec` part, as Computer's tool yields it. */
+type ExecPart = Record<string, unknown>;
+
 /**
- * What `bash` promises the model, which depends on whether a shell was
- * configured.
+ * `exec`, drained to the part the model is handed.
  *
- * Two of the guarantees are the shell's, not this plugin's: the interleaved
- * transcript is `2>&1` on the wrapper process, and first-failure reporting is
- * `-o pipefail`. Without a shell there is no wrapper to carry either, and a
- * description that promised them anyway would be the exact failure `wrapped`
- * documents at length — a model that cannot trust a piped exit code re-runs the
- * whole gate to get one.
+ * Computer's executor is an async generator: it yields a snapshot while the
+ * command runs and a final part when it settles, so the last one is the answer.
  */
-describe("what bash claims for itself", () => {
-  const describeOf = (shell?: string) =>
-    buildComputerTools(stub().workspace, { ...config, shell }).bash!
+const execWith = async (
+  tools: ToolSet,
+  input: unknown,
+  abortSignal?: AbortSignal
+): Promise<ExecPart> => {
+  const produced = (
+    tools.exec!.execute as (
+      i: unknown,
+      o: unknown
+    ) => AsyncIterable<ExecPart> | Promise<ExecPart>
+  )(input, abortSignal ? { abortSignal } : {});
+  if (Symbol.asyncIterator in produced) {
+    let last: ExecPart = {};
+    for await (const part of produced) last = part;
+    return last;
+  }
+  return produced;
+};
+
+/** `exec` with no signal, which is how most of these call it. */
+const exec = (tools: ToolSet, input: unknown) => execWith(tools, input);
+
+/**
+ * Everything one part says, for an assertion that does not care which field it
+ * came back in. A command's own output is `stdout`/`stderr`; a refusal and a
+ * failure are `error`.
+ */
+const execText = (part: ExecPart) =>
+  [part.stdout, part.stderr, part.error]
+    .filter((value) => typeof value === "string")
+    .join("\n");
+
+/**
+ * What `exec` claims for itself, which is Computer's to say rather than this
+ * plugin's.
+ *
+ * The description is generated from the backends and the output limits, so it
+ * carries neither of the two guarantees a configured shell adds — the
+ * interleaved transcript and first-failure reporting — and it promises a saved
+ * file this workspace does not write. The plugin's own context block is where
+ * the model is told what the description cannot say; the last case here holds
+ * those two apart.
+ */
+describe("what exec claims for itself", () => {
+  const descriptionOf = (shell?: string) =>
+    buildComputerTools(stub().workspace, { ...config, shell }).exec!
       .description!;
 
-  it("promises a transcript and first-failure only with a shell", () => {
-    const withShell = describeOf("bash");
-    expect(withShell).toContain("interleaved in the order they were written");
-    expect(withShell).toContain("report the first failing stage");
+  it("describes the one backend, so the model never names one", async () => {
+    const tools = buildComputerTools(stub().workspace, config);
+    expect(descriptionOf()).toContain("Linux container");
+    // One backend and no choice to make: the schema is the command and a cwd.
+    const schema = JSON.stringify(tools.exec!.inputSchema);
+    expect(schema).toContain("command");
+    expect(schema).not.toContain("backend");
   });
 
-  it("promises neither without one, and says what happens instead", () => {
-    const bare = describeOf(undefined);
-    expect(bare).not.toContain("interleaved in the order they were written");
-    expect(bare).not.toContain("report the first failing stage");
-    // The honest replacements: labelled blocks, and the pipe's own status.
-    expect(bare).toContain("--- stderr ---");
-    expect(bare).toContain("reports its **last** stage");
+  it("is the same description with a shell and without, because it is upstream's", () => {
+    expect(descriptionOf("bash")).toBe(descriptionOf(undefined));
   });
 
-  it("still promises the exit line either way, because that one is ours", () => {
-    for (const shell of ["bash", undefined]) {
-      expect(describeOf(shell)).toContain("--- exit 0 ---");
-    }
+  /**
+   * The costs of taking the tool as it comes, each stated where a reader will
+   * meet it. The promise of a saved path is upstream's and cannot be turned
+   * off; the reply never names one, which is why the context block tells the
+   * model what truncation actually does.
+   */
+  it("promises a saved output file that this workspace does not write", async () => {
+    expect(descriptionOf()).toContain("saved to a file");
+
+    const tools = buildComputerTools(stub().workspace, config);
+    const part = await exec(tools, { command: "npm test" });
+    expect(execText(part)).not.toContain("Full output:");
+
+    const [block] = computer(config).context!;
+    const context = String(await block.provider!.get());
+    expect(context).toContain("cut to its last lines");
+    expect(context).toContain("Do not pipe into `head` or `tail`");
   });
 });
 
@@ -240,7 +293,7 @@ describe("the dependency tree", () => {
    * which reaches it. The workspace's own methods refuse it too — see
    * `./proxy.spec.ts`.
    */
-  it("refuses it in every file tool, routing to bash", async () => {
+  it("refuses it in every file tool, routing to exec", async () => {
     const { workspace, files } = stub({ [dep]: "export const z = 1;\n" });
     const tools = buildComputerTools(workspace, config);
 
@@ -248,7 +301,7 @@ describe("the dependency tree", () => {
       ["edit", { path: dep, old_string: "z", new_string: "y" }],
       ["grep", { query: "z", path: "/workspace/repo/node_modules" }]
     ] as const) {
-      expect(await run(tools, name, input)).toContain("bash");
+      expect(await run(tools, name, input)).toContain("exec");
     }
     expect(files.get(dep)).toBe("export const z = 1;\n");
   });
@@ -718,7 +771,7 @@ describe("paths inside .git", () => {
    * authority behind it. Asserted against the rendered strings so a later
    * well-meaning rewording fails here rather than shipping.
    */
-  it("never offers bash as a way to reach git", async () => {
+  it("never offers exec as a way to reach git", async () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
 
@@ -726,7 +779,7 @@ describe("paths inside .git", () => {
       query: "x",
       path: "/workspace/repo/.git"
     });
-    expect(refusal).not.toContain("bash");
+    expect(refusal).not.toContain("exec");
 
     const [block] = computer(config).context!;
     const context = String(await block.provider!.get());
@@ -734,7 +787,7 @@ describe("paths inside .git", () => {
       .split("\n")
       .find((line) => line.includes("`.git`"))!;
     expect(gitLine).toBeDefined();
-    expect(gitLine).not.toContain("bash");
+    expect(gitLine).not.toContain("exec");
     // And it still says where to go instead.
     expect(gitLine).toContain("repo_commit");
   });
@@ -751,8 +804,8 @@ describe("paths inside .git", () => {
     expect(out).not.toContain("COMMIT_EDITMSG");
   });
 
-  /** `bash` is unguarded: `./paths.ts` says why. */
-  it("does not guard bash, which runs git", async () => {
+  /** `exec` is unguarded: `./paths.ts` says why. */
+  it("does not guard exec, which runs git", async () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, config);
     // The tool refuses…
@@ -760,7 +813,7 @@ describe("paths inside .git", () => {
       await run(tools, "grep", { query: "x", path: "/workspace/repo/.git" })
     ).toContain("repo_diff");
     // …while the shell path stays open.
-    await run(tools, "bash", { command: "git rev-parse --git-dir" });
+    await exec(tools, { command: "git rev-parse --git-dir" });
     expect(execs).toHaveLength(1);
   });
 });
@@ -791,7 +844,7 @@ describe("offsets that survive filtering", () => {
   });
 });
 
-describe("bash", () => {
+describe("exec", () => {
   it("passes the configured cwd and timeout, and lets the model override cwd", async () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, {
@@ -800,8 +853,8 @@ describe("bash", () => {
       timeoutMs: 1234
     });
 
-    await run(tools, "bash", { command: "npm test" });
-    await run(tools, "bash", { command: "ls", cwd: "/workspace/repo" });
+    await exec(tools, { command: "npm test" });
+    await exec(tools, { command: "ls", cwd: "/workspace/repo" });
 
     expect(execs[0]).toMatchObject({
       command: "npm test",
@@ -810,12 +863,12 @@ describe("bash", () => {
     expect(execs[1]!.options).toMatchObject({ cwd: "/workspace/repo" });
   });
 
-  /** `bash` writes for a model, so it wants the transcript — see `./shell.ts`. */
+  /** The shell writes for a model, so it wants the transcript — see `./shell.ts`. */
   it("sends a transcript", async () => {
     const { workspace, execs } = stub();
     const tools = buildComputerTools(workspace, { ...config, shell: "bash" });
 
-    await run(tools, "bash", { command: "npm run check" });
+    await exec(tools, { command: "npm run check" });
 
     expect(execs[0]!.command).toContain("bash -o pipefail -c ");
     expect(execs[0]!.command.endsWith(" 2>&1")).toBe(true);
@@ -834,7 +887,7 @@ describe("bash", () => {
       env: () => ({ SET: "yes", UNSET: undefined })
     });
 
-    await run(tools, "bash", { command: "printenv" });
+    await exec(tools, { command: "printenv" });
 
     expect((execs[0]!.options as { env: Record<string, string> }).env).toEqual({
       SET: "yes"
@@ -858,7 +911,7 @@ describe("bash", () => {
       }
     });
 
-    await run(tools, "bash", { command: "printenv" });
+    await exec(tools, { command: "printenv" });
 
     expect(reads).toBe(1);
   });
@@ -867,13 +920,35 @@ describe("bash", () => {
     const { workspace } = stub({}, "container unreachable");
     const tools = buildComputerTools(workspace, config);
 
-    const out = await run(tools, "bash", { command: "npm test" });
-    expect(out).toContain("error running command");
-    expect(out).toContain("container unreachable");
+    const part = await exec(tools, { command: "npm test" });
+    // Upstream's failure member: no exit code, and the reason as `error`.
+    expect(part).not.toHaveProperty("exitCode");
+    expect(execText(part)).toContain("container unreachable");
+  });
+
+  /**
+   * The result the model reads is Computer's, and nothing here reshapes it.
+   * Asserted on the whole part rather than on a rendered string, because the
+   * shape is the thing this release changed.
+   */
+  it("hands back Computer's own result, not a rendered transcript", async () => {
+    const { workspace } = stub();
+    const tools = buildComputerTools(workspace, config);
+
+    const part = await exec(tools, { command: "npm test" });
+    expect(part).toMatchObject({
+      command: "npm test",
+      backend: "container",
+      exitCode: 0,
+      stdout: "ok"
+    });
+    // The verdict line and the labelled stderr block were this plugin's.
+    expect(execText(part)).not.toContain("--- exit 0 ---");
+    expect(execText(part)).not.toContain("--- stderr ---");
   });
 });
 
-describe("the advisory gate on bash", () => {
+describe("the advisory gate on exec", () => {
   const gated = (
     advisories: SandboxAdvisory[],
     extra: Partial<ComputerToolsConfig> = {}
@@ -889,10 +964,10 @@ describe("the advisory gate on bash", () => {
 
   it("runs the command when there is nothing to say", async () => {
     const { tools, execs } = gated([]);
-    // The verdict line rides along on every result now, including this one.
-    expect(await run(tools, "bash", { command: "npm test" })).toBe(
-      "ok\n--- exit 0 ---"
-    );
+    expect(await exec(tools, { command: "npm test" })).toMatchObject({
+      exitCode: 0,
+      stdout: "ok"
+    });
     expect(execs).toHaveLength(1);
   });
 
@@ -912,7 +987,7 @@ describe("the advisory gate on bash", () => {
       }
     ]);
 
-    const out = await run(tools, "bash", { command: "npm test" });
+    const out = execText(await exec(tools, { command: "npm test" }));
     expect(out).toContain("still installing");
     expect(out).toContain("npm ci");
     expect(out).toContain("1m05s");
@@ -943,7 +1018,7 @@ describe("the advisory gate on bash", () => {
       }
     ]);
 
-    const out = await run(tools, "bash", { command: "npm test" });
+    const out = execText(await exec(tools, { command: "npm test" }));
     expect(execs).toHaveLength(1);
     // The real output is there...
     expect(out).toContain("ok");
@@ -965,7 +1040,7 @@ describe("the advisory gate on bash", () => {
       }
     ]);
 
-    await run(tools, "bash", { command: "npm ci --force" });
+    await exec(tools, { command: "npm ci --force" });
     expect(execs).toHaveLength(1);
     expect(execs[0]!.command).toBe("npm ci --force");
   });
@@ -985,7 +1060,7 @@ describe("the advisory gate on bash", () => {
       }
     ]);
 
-    const out = await run(tools, "bash", { command: "cat README.md" });
+    const out = execText(await exec(tools, { command: "cat README.md" }));
     expect(out).not.toContain("ERESOLVE");
     expect(execs).toHaveLength(1);
   });
@@ -1029,7 +1104,7 @@ describe("the advisory gate on bash", () => {
       ]
     );
 
-    const out = await run(tools, "bash", { command: "npm test" });
+    const out = execText(await exec(tools, { command: "npm test" }));
     expect(out).toContain("dependency install `npm ci` **failed**");
     expect(out).toContain("container unreachable");
     expect(execs).toHaveLength(0);
@@ -1047,7 +1122,7 @@ describe("the advisory gate on bash", () => {
     );
 
     const started = Date.now();
-    const out = await run(tools, "bash", { command: "npm test" });
+    const out = execText(await exec(tools, { command: "npm test" }));
     const elapsed = Date.now() - started;
 
     expect(out).toContain("still installing");
@@ -1062,9 +1137,10 @@ describe("the advisory gate on bash", () => {
     const tools = buildComputerTools(workspace, config, async () => {
       throw new Error("stub broken");
     });
-    await expect(run(tools, "bash", { command: "npm test" })).resolves.toBe(
-      "ok\n--- exit 0 ---"
-    );
+    await expect(exec(tools, { command: "npm test" })).resolves.toMatchObject({
+      exitCode: 0,
+      stdout: "ok"
+    });
     expect(execs).toHaveLength(1);
   });
 
@@ -1107,7 +1183,7 @@ describe("computer()", () => {
   it("offers its tools under Think's names, so they replace the built-ins", () => {
     const tools = computer(config).tools!(onWorkspace(sandboxed));
     // Think's `find` and `list` stay Think's, walking the workspace.
-    expect(Object.keys(tools).sort()).toEqual(["bash", "edit", "grep"]);
+    expect(Object.keys(tools).sort()).toEqual(["edit", "exec", "grep"]);
   });
 
   it("refuses to start on any other workspace, and says what to set", () => {
@@ -1127,13 +1203,19 @@ describe("computer()", () => {
   it("tells the model about its tools in a block the model cannot rewrite", async () => {
     const [block] = computer(config).context!;
     expect(block.provider && "set" in block.provider).toBe(false);
-    expect(await block.provider!.get()).toContain("`bash`");
+    expect(await block.provider!.get()).toContain("`exec`");
   });
 });
 
 /**
- * Cancellation, and the two acts it takes when the container runtime has no
- * signal of its own: stop waiting for the command, and stop the command.
+ * Cancellation, and what survives it now the tool is Computer's.
+ *
+ * Upstream kills the command when the call's signal fires, which is the part
+ * that matters: a container otherwise goes on running a command nobody is
+ * waiting for. What it has nowhere to say is *why* the call ended, so a command
+ * stopped at the time limit, one whose call was cancelled and one that simply
+ * failed all read alike to the model. The difference survives only in the log
+ * line {@link file://./tools-exec.ts} writes.
  */
 describe("a cancelled command", () => {
   function hungContainer() {
@@ -1143,10 +1225,27 @@ describe("a cancelled command", () => {
       runtime: {
         exec: async (command: string) => {
           execs.push(command);
+          let signalled: (() => void) | undefined;
+          // Settles when it is killed, as a signalled process does. A stub that
+          // never settled would hang the call rather than end it, which is the
+          // sequencing this tool now has: the result is awaited after the kill.
+          const ended = new Promise<void>((resolve) => {
+            signalled = resolve;
+          });
           return {
-            // Never settles: the command is still running when the call ends.
-            result: () => new Promise(() => {}),
-            kill: async (signal?: string) => void kills.push(signal),
+            result: async () => {
+              await ended;
+              return {
+                exitCode: 143,
+                stdout: "",
+                stderr: "",
+                status: "cancelled" as const
+              };
+            },
+            kill: async (signal?: string) => {
+              kills.push(signal);
+              signalled?.();
+            },
             [Symbol.dispose]: () => {}
           };
         }
@@ -1155,12 +1254,6 @@ describe("a cancelled command", () => {
     } as unknown as ComputerClient;
     return { workspace: async () => client, kills, execs };
   }
-
-  const execWith = (tools: ToolSet, input: unknown, abortSignal: AbortSignal) =>
-    (tools.bash!.execute as (i: unknown, o: unknown) => Promise<string>)(
-      input,
-      { abortSignal }
-    );
 
   /** Long enough for every microtask ahead of the exec to drain. */
   const started = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -1176,15 +1269,22 @@ describe("a cancelled command", () => {
 
     await started();
     controller.abort();
-    const out = await pending;
+    const part = await pending;
 
     // Disposing the handle only detaches this side. Without the kill the command
     // goes on running in the container after the call has given up on it.
-    expect(kills).toEqual(["SIGTERM"]);
-    expect(out).toContain("cancelled");
+    expect(kills).toHaveLength(1);
+    // And the call ends on the killed command's own result, not on a sentence
+    // of this plugin's.
+    expect(part).toMatchObject({ exitCode: 143 });
   });
 
-  it("says the time limit stopped it when that is what happened", async () => {
+  /**
+   * The cost of taking the tool as it comes, pinned so it cannot be mistaken
+   * for an oversight: the result has somewhere for an exit code and somewhere
+   * for an error, and nowhere for the reason the command stopped.
+   */
+  it("says nothing about why it stopped", async () => {
     const { workspace } = hungContainer();
     const controller = new AbortController();
     const pending = execWith(
@@ -1195,28 +1295,12 @@ describe("a cancelled command", () => {
 
     await started();
     controller.abort(new DOMException("tool deadline", "TimeoutError"));
+    const part = await pending;
 
-    // A model told only that something failed runs the same command again; one
-    // told it ran out of time can narrow it.
-    expect(await pending).toContain("it ran past this call's time limit");
-  });
-
-  it("says nothing ran when the time limit came before the command started", async () => {
-    const controller = new AbortController();
-    const pending = execWith(
-      buildComputerTools(() => new Promise<ComputerClient>(() => {}), config),
-      { command: "npm test" },
-      controller.signal
-    );
-
-    await started();
-    controller.abort(new DOMException("tool deadline", "TimeoutError"));
-
-    // Not "try something narrower": the command was never the problem, and a
-    // narrower one waits on the same workspace.
-    const out = await pending;
-    expect(out).toContain("did not run");
-    expect(out).toContain("nothing was changed");
+    expect(part).not.toHaveProperty("status");
+    const text = execText(part);
+    expect(text).not.toContain("cancelled");
+    expect(text).not.toContain("time limit");
   });
 
   it("does not start a command on a call that is already cancelled", async () => {
@@ -1239,16 +1323,6 @@ describe("a cancelled command", () => {
  * the waits a cancel has to reach before it does.
  */
 describe("cancellation before the command runs", () => {
-  const call = (
-    tools: ToolSet,
-    name: string,
-    input: unknown,
-    abortSignal: AbortSignal
-  ) =>
-    (tools[name]!.execute as (i: unknown, o: unknown) => Promise<string>)(
-      input,
-      { abortSignal }
-    );
   const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   it("stops waiting on an advisory read that never answers, without running the command", async () => {
@@ -1260,17 +1334,12 @@ describe("cancellation before the command runs", () => {
     );
     const controller = new AbortController();
 
-    const pending = call(
-      tools,
-      "bash",
-      { command: "npm test" },
-      controller.signal
-    );
+    const pending = execWith(tools, { command: "npm test" }, controller.signal);
     await tick();
     controller.abort();
 
     // Failing the gate open on a cancel would run the very command given up on.
-    expect(await pending).toContain("cancelled");
+    expect(execText(await pending)).toContain("cancelled");
     expect(execs).toHaveLength(0);
   });
 
@@ -1285,15 +1354,9 @@ describe("cancellation before the command runs", () => {
     );
     const controller = new AbortController();
 
-    const pending = call(
-      tools,
-      "bash",
-      { command: "npm test" },
-      controller.signal
-    );
+    const pending = execWith(tools, { command: "npm test" }, controller.signal);
     await tick();
     controller.abort();
-    expect(await pending).toContain("cancelled");
 
     let disposed = false;
     arrive?.({
@@ -1301,47 +1364,57 @@ describe("cancellation before the command runs", () => {
         disposed = true;
       }
     } as unknown as ComputerClient);
-    await tick();
-    // Nobody is left holding it, so it is released the moment it turns up.
+
+    // The call is waiting on the workspace, not on the signal, so it ends only
+    // once one turns up — and whatever it then fails on, nobody is left holding
+    // the client.
+    expect(execText(await pending)).not.toBe("");
     expect(disposed).toBe(true);
   });
 
   it("kills a process whose handle arrives only after the call gave up", async () => {
-    let started: ((handle: unknown) => void) | undefined;
+    let start: ((handle: unknown) => void) | undefined;
+    let disposed = false;
     const client = {
       runtime: {
         exec: () =>
           new Promise((resolve) => {
-            started = resolve;
+            start = resolve;
           })
       },
-      [Symbol.dispose]: () => {}
+      [Symbol.dispose]: () => {
+        disposed = true;
+      }
     } as unknown as ComputerClient;
     const tools = buildComputerTools(async () => client, config);
     const controller = new AbortController();
 
-    const pending = call(
-      tools,
-      "bash",
-      { command: "npm test" },
-      controller.signal
-    );
+    const pending = execWith(tools, { command: "npm test" }, controller.signal);
     await tick();
     controller.abort();
-    expect(await pending).toContain("cancelled");
 
     const kills: Array<string | undefined> = [];
-    let disposed = false;
-    started?.({
-      result: () => new Promise(() => {}),
-      kill: async (signal?: string) => void kills.push(signal),
-      [Symbol.dispose]: () => {
-        disposed = true;
-      }
+    let signalled: (() => void) | undefined;
+    const ended = new Promise<void>((resolve) => {
+      signalled = resolve;
     });
-    await tick();
-    // Disposing alone detaches this side and leaves the process running.
-    expect(kills).toEqual(["SIGTERM"]);
+    start?.({
+      result: async () => {
+        await ended;
+        return { exitCode: 143, stdout: "", stderr: "" };
+      },
+      kill: async (signal?: string) => {
+        kills.push(signal);
+        signalled?.();
+      },
+      [Symbol.dispose]: () => {}
+    });
+
+    // Upstream reads the signal once the handle is in hand, so a process that
+    // started while the call was being abandoned is still stopped, and the
+    // client it came from is released with it.
+    expect(await pending).toMatchObject({ exitCode: 143 });
+    expect(kills).toHaveLength(1);
     expect(disposed).toBe(true);
   });
 });

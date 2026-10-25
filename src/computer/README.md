@@ -18,9 +18,15 @@ class Coder extends StepAgent<Env> {
 }
 ```
 
-Tools: `bash`, `grep`, `edit` — under Think's own names, so they replace Think's
-built-ins. Think's `read`, `write`, `delete`, `find` and `list` stay Think's, and
+Tools: `exec`, `grep`, `edit` — under the names Think's own built-ins use, so they
+replace them. Think's `read`, `write`, `delete`, `find` and `ls` stay Think's, and
 reach the container's tree through the agent's workspace.
+
+`exec` is `@cloudflare/computer`'s own tool, taken as it comes: its schema, its
+description, its truncation and its result shape are that package's, and the only
+thing wrapped around it is the advisory gate below. What that costs is in
+`tools-exec.ts`, which names each one. The agent's workspace deliberately carries
+no `runtime`, so Think builds no second `exec` beside this one.
 
 The tools reach the sandbox over RPC, never through its object, so an agent
 holding them carries no container backend.
@@ -29,11 +35,11 @@ holding them carries no container backend.
 
 Think's `read`, `write`, `edit` and `delete` work on whatever the agent's
 `this.workspace` is. An agent that installed this plugin but kept Think's own
-workspace would run `bash` in the container and `write` in its own SQLite, and
+workspace would run `exec` in the container and `write` in its own SQLite, and
 nothing would say so. So the agent sets `workspace = computerWorkspace(config, …)`,
 and the plugin **refuses to start** on any other — a `PluginSetupError` naming what
 to set. Its tools then reach the container through that workspace rather than
-through their own config, so `bash` and Think's `write` always resolve the same one.
+through their own config, so `exec` and Think's `write` always resolve the same one.
 
 Every call resolves the sandbox the running turn names, so a sub-agent's reaches the
 checkout its parent prepared, and every call reaches the container: a file read
@@ -52,7 +58,7 @@ same lock.
 ## `node_modules` and `.git` are left out
 
 `node_modules` is installed output, not source: the file tools refuse its paths and
-route to `bash`. `.git` is refused as policy: reading it tells the model less than
+route to `exec`. `.git` is refused as policy: reading it tells the model less than
 [`/repo-github`](../repo-github/) does, and writing it corrupts the checkout. Walks
 skip both — `grep` and `find` are `ripgrep` in the container, as the agent, with the
 two pruned — so an excluded directory is never descended into at all. Hidden and
@@ -82,7 +88,7 @@ scripts, so "we only ran the install" is still running a stranger's code. Treat
 anything inside the container as reachable by both.
 
 **No secret belongs in `ComputerToolsConfig.env`.** It is merged into every command
-these tools run, and `bash`'s command is model-authored — `bash("printenv")` prints
+these tools run, and `exec`'s command is model-authored — `exec("printenv")` prints
 the lot, and so does a `postinstall`. Use it for a registry host or a `CI` flag, not
 a key. When an agent needs to _act_ with a credential, keep the credential on the
 Worker and give the agent one tool that makes the call:

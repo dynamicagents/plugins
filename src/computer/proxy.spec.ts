@@ -175,7 +175,7 @@ describe("routedWorkspace", () => {
    */
   it.each([
     ["/workspace/repo/.git/config", "repo_diff"],
-    ["/workspace/repo/node_modules/zod/index.ts", "bash"]
+    ["/workspace/repo/node_modules/zod/index.ts", "exec"]
   ])(
     "refuses %s for every call, without opening anything",
     async (path, route) => {

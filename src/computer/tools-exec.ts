@@ -1,47 +1,65 @@
+import { createExecTool } from "@cloudflare/computer/tools/ai-sdk";
 import { tool } from "ai";
 import type { ToolSet } from "ai";
-import { z } from "zod";
-import { withAbort } from "@dynamicagents/core";
-import { renderResult } from "./render.js";
+import type { CommandHandle, ComputerClient } from "./client.js";
+import type { ComputerContext } from "./context.js";
 import type { ExecGate } from "./gate.js";
 import { withShellTranscript } from "./shell.js";
-import type { ComputerContext } from "./context.js";
 
-/** Running one command in the container. */
+/** Running one command in the container, on Computer's own `exec` tool. */
 
 /**
- * Wait for a disposable resource without outliving `signal`.
+ * The one backend this workspace has, and the id the model never has to name.
  *
- * `withAbort` can abandon the wait but not the resource, and one that arrives
- * after its caller has given up has nobody left to dispose it. So it is released
- * on arrival instead — disposed by default, or handed to `release` where
- * disposing alone would leave work running.
+ * `createExecTool` refuses to build with no backend, and shows a `backend`
+ * parameter only when there is more than one. So naming exactly one is what
+ * keeps the model's call `{ command }` and nothing else.
  */
-function acquire<R extends Disposable>(
-  signal: AbortSignal | undefined,
-  opening: Promise<R>,
-  release: (resource: R) => unknown = (resource) => resource[Symbol.dispose]()
-): Promise<R> {
-  return withAbort(signal, opening, () => {
-    void opening.then(release).catch(() => {});
-  });
-}
+const BACKEND = "container";
+
+/** What the model is told the backend is, under Computer's own description. */
+const BACKEND_DESCRIPTION =
+  "A Linux container whose disk is the checkout, with a package manager and network access.";
 
 /**
- * How an exec handle that arrived too late is released. Disposing only detaches
- * this side, so the process is killed first.
+ * The container's shell, as Computer's `exec` tool.
+ *
+ * **The tool is upstream's, and deliberately not wrapped past the advisory
+ * gate.** Its schema, its description, its truncation and its result shape are
+ * `@cloudflare/computer`'s, so the model sees the same `exec` everywhere that
+ * package's tools are installed and this plugin has no second dialect to keep in
+ * step. What that costs, each of it accepted rather than overlooked:
+ *
+ * - **Truncation keeps the tail, not both ends.** Upstream cuts each stream to
+ *   its last lines, so a failure printed early in a long build is gone from what
+ *   the model reads. The exit code still reports it, and the model's recourse is
+ *   a narrower command.
+ * - **The description promises a file this workspace does not write.** Upstream
+ *   tells the model that truncated output is saved where `read` and `grep` can
+ *   open it. That holds for a Workspace whose runtime saves it; this one reports
+ *   no saved path, so the reply names none and the sentence is unfulfilled.
+ *   Nothing can be set to turn it off: the sentence is built into the generated
+ *   description.
+ * - **A command stopped at the time limit or cancelled reads as a plain
+ *   failure.** Upstream's result has somewhere for an exit code and somewhere
+ *   for an error, and nowhere for the difference between a command that outran
+ *   its limit, one whose call was cancelled, and one that simply failed.
+ *   {@link file://./client.ts CommandResult.status} still carries it for the log
+ *   line below, which is the only place it is read.
+ *
+ * What stays this plugin's, because neither belongs to a tool:
+ *
+ * - **The advisory gate**, below: a command waits out a running install, is
+ *   refused while something transient makes it pointless, and carries a note
+ *   about anything permanent. {@link file://./gate.ts ExecGate} is the contract.
+ * - **How the container runs a command**, in
+ *   {@link file://./sandbox.ts sandboxClient}: the launch-and-cancel handshake,
+ *   the time limit, and the shell transcript. A configured shell merges the two
+ *   streams onto one of them, so `stderr` arrives empty and the whole transcript
+ *   is in `stdout` — see {@link file://./shell.ts withShellTranscript} for why a
+ *   model reading output wants that, and why the plugin's context block rather
+ *   than the tool description is where the model is told.
  */
-async function killLate(handle: {
-  kill(signal?: "SIGTERM"): Promise<void>;
-  [Symbol.dispose](): void;
-}): Promise<void> {
-  try {
-    await handle.kill("SIGTERM");
-  } finally {
-    handle[Symbol.dispose]();
-  }
-}
-
 export function execTools(ctx: ComputerContext): ToolSet {
   const {
     config,
@@ -53,90 +71,66 @@ export function execTools(ctx: ComputerContext): ToolSet {
     definedEnv
   } = ctx;
 
-  return {
-    bash: tool({
-      /**
-       * States what the tool guarantees, rather than what it might withhold.
-       *
-       * A description that leads with "output is truncated if it is large" and
-       * gives no exit code hands the model two independent reasons to re-run a
-       * command and capture the output "properly" — at 60 seconds a go on a real
-       * gate, whose few hundred characters were never near the ceiling anyway.
-       *
-       * Two of these sentences are only true when a shell is configured, so the
-       * description says whichever is. `withShellTranscript` is a no-op without
-       * {@link file://./index.ts ComputerToolsConfig.shell}: no `2>&1`, so the
-       * streams arrive separate and {@link renderResult} labels them; no
-       * `-o pipefail`, so `/bin/sh` reports a pipeline's *last* stage. Promising
-       * a transcript and first-failure semantics there would be the lie
-       * `wrapped` explains the cost of.
-       */
-      description:
-        "Run a shell command in the container and return its output. Use this for builds, tests, package installs, git, and anything else a terminal can do. " +
-        (config.shell
-          ? "The result is the command's full transcript — stdout and stderr interleaved in the order they were written — followed by a line reporting the exit code, e.g. `--- exit 0 ---`. A command killed at the time limit says so on that line. " +
-            "You do not need to append `echo $?`, add `2>&1`, or redirect to a file to see any of this. " +
-            "Do not pipe into `head` or `tail` to shorten output: long output is already truncated from the middle, keeping the beginning and the end, and piping costs you the parts you wanted. Pipelines report the first failing stage, so a piped command reports its real failure rather than the pipe's — but `cmd | head` may report 141 when `head` closes the pipe early, which is not a failure of `cmd`. "
-          : "The result is the command's stdout, then any stderr under a `--- stderr ---` heading, then a line reporting the exit code, e.g. `--- exit 0 ---`. A command killed at the time limit says so on that line. " +
-            "You do not need to append `echo $?` to see the exit code. Add `2>&1` yourself if you need the two streams in the order they were written. " +
-            "Do not pipe into `head` or `tail` to shorten output: long output is already truncated from the middle, keeping the beginning and the end, and piping costs you the parts you wanted. A pipeline reports its **last** stage, so check the exit code of the command you care about rather than the pipe's. ") +
-        "Prefer targeted commands over ones that print everything.",
-      inputSchema: z.object({
-        command: z.string().describe("The shell command, e.g. 'npm test'"),
-        cwd: z
-          .string()
-          .optional()
-          .describe(`Working directory (default: ${cwd})`)
-      }),
-      execute: async ({ command, cwd: overrideCwd }, { abortSignal }) => {
+  const upstream = createExecTool({
+    workspace: {
+      runtime: {
         /**
-         * One line per command, and it is the only view of where a task's wall
-         * clock actually goes.
+         * Computer's tool asks for a command and a working directory; the rest
+         * of what a container command needs is this plugin's, and is filled in
+         * here rather than left to the model.
          *
-         * Everything on the Worker side of a container command is an `await`, so
-         * Workers Observability records the invocation at ~0% CPU and a long wall
-         * time and cannot say what ran. Without this line, diagnosing a 59-minute
-         * task means inferring the shape of each command from the *gaps between
-         * AI Gateway calls*. The three numbers below — how long the install gate
-         * held, how long the command took, what it exited with — answer it
-         * directly.
-         *
-         * Timed around the gate as well as the command, since an agent blocked
-         * waiting for `npm ci` and one running a slow test suite are
-         * indistinguishable from the outside and want opposite fixes.
+         * `output` is not forwarded: the sandbox has no way to cap a command's
+         * output at the source, so the ceiling is spent on this side, which is
+         * where it was spent before.
          */
+        exec: async (command, options) => {
+          const client = await workspace();
+          // Read once per command. This is the host's thunk, so calling it
+          // twice while building one command's options is two chances to
+          // disagree.
+          const env = definedEnv();
+          try {
+            const handle = await client.runtime.exec(
+              withShellTranscript(command, config.shell),
+              {
+                cwd: options.cwd ?? cwd,
+                encoding: "utf8",
+                timeoutMs,
+                ...(env ? { env } : {})
+              }
+            );
+            return held(handle, client, command);
+          } catch (err) {
+            client[Symbol.dispose]();
+            throw err;
+          }
+        },
+        backends: () => [
+          {
+            id: BACKEND,
+            protocol: "command",
+            callable: false,
+            description: BACKEND_DESCRIPTION
+          }
+        ]
+      }
+    },
+    // Characters, spent as bytes: upstream's ceiling is in bytes and there is
+    // no character form of it. The two coincide until the output is not ASCII,
+    // where the model is shown a little less than the host asked for.
+    // `maxLines` is left to upstream's own default.
+    maxBytes: maxChars
+  });
+
+  return {
+    exec: tool({
+      description: upstream.description,
+      inputSchema: upstream.inputSchema,
+      execute: async function* (input, options) {
+        const command = input.command;
         const startedAtMs = Date.now();
 
-        /**
-         * What the model is told when this call stops before the command
-         * finishes. Said plainly, because the likeliest next move after a bare
-         * error is the same command again — and whether that is right depends on
-         * where the call stopped. A command that outran the limit once will again;
-         * one that never started because the workspace did not answer may not.
-         *
-         * `bash` reads its call's signal rather than leaving the wait to Think,
-         * and this is why: an abandoned wait can say only that the command may
-         * still be running, and the kill below is what stops it.
-         */
-        const stopped = (gateMs: number, started: boolean): string => {
-          const timedOut =
-            (abortSignal?.reason as { name?: string } | undefined)?.name ===
-            "TimeoutError";
-          console.info("[computer] bash stopped", {
-            command,
-            gateMs,
-            durationMs: Date.now() - startedAtMs - gateMs,
-            started,
-            reason: timedOut ? "time limit" : "cancelled"
-          });
-          if (!timedOut)
-            return "the command was stopped because this call was cancelled. Anything it changed before then is still changed.";
-          return started
-            ? "the command was stopped: it ran past this call's time limit. Anything it changed before then is still changed. Try something narrower."
-            : "the command did not run: this call reached its time limit while the workspace was still getting ready, so nothing was changed. Try again; if it happens again, the workspace is not responding.";
-        };
-
-        // Only `bash` waits on an install. The file tools read and write
+        // Only the shell waits on an install. The file tools read and write
         // source, which is in the workspace and unaffected by an install in
         // flight — blocking them would stop the agent doing the reading it
         // could usefully do while it waits. They do consult `writeGate`, which
@@ -144,91 +138,180 @@ export function execTools(ctx: ComputerContext): ToolSet {
         // survive at all".
         let gate: ExecGate;
         try {
-          gate = await awaitAdvisories(command, abortSignal);
+          gate = await awaitAdvisories(command, options.abortSignal);
         } catch (err) {
           // Only a cancel gets out of the gate; a failed advisory read opens it.
-          if (abortSignal?.aborted)
-            return stopped(Date.now() - startedAtMs, false);
+          if (options.abortSignal?.aborted) {
+            yield {
+              command,
+              cwd: input.cwd ?? null,
+              backend: BACKEND,
+              error:
+                "the command was stopped because this call was cancelled before it ran."
+            };
+            return;
+          }
           throw err;
         }
-        const gateMsWaited = Date.now() - startedAtMs;
-        if (gate.block) {
-          console.info("[computer] bash blocked by a workspace advisory", {
+        const gateMs = Date.now() - startedAtMs;
+        if (gate.block !== undefined) {
+          console.info("[computer] exec blocked by a workspace advisory", {
             command,
-            gateMs: gateMsWaited
+            gateMs
           });
-          return gate.block;
-        }
-        // Prepended to whatever happens next, success or failure. The warning
-        // is context for the output, not a substitute for it — which is why it
-        // is carried through the catch as well.
-        const note = (body: string) =>
-          gate.warn ? `${gate.warn}\n\n${body}` : body;
-        // Set once the exec is sent. See `stopped`.
-        let started = false;
-
-        try {
-          // A workspace that stops answering would hold the call before any of the
-          // cancellation below is reached.
-          abortSignal?.throwIfAborted();
-          using ws = await acquire(abortSignal, workspace());
-          // Read once per command. This is the *host's* thunk, so calling it
-          // twice in the construction of one command's options is two chances to
-          // disagree — the check and the value would come from different reads.
-          const commandEnv = definedEnv();
-          const options = {
-            cwd: overrideCwd ?? cwd,
-            encoding: "utf8" as const,
-            timeoutMs,
-            ...(commandEnv ? { env: commandEnv } : {})
+          yield {
+            command,
+            cwd: input.cwd ?? null,
+            backend: BACKEND,
+            error: gate.block
           };
-          // Transcript, not two streams: this result goes to a model, which
-          // reads it as a terminal session rather than parsing it.
-          // Not started at all on a signal that has already fired: a process that
-          // is killed on the next line still ran long enough to change something.
-          abortSignal?.throwIfAborted();
-          // From here a stop cannot promise nothing ran: the exec may reach the
-          // container before its handle reaches this side.
-          started = true;
-          using handle = await acquire(
-            abortSignal,
-            ws.runtime.exec(
-              withShellTranscript(command, config.shell),
-              options
-            ),
-            killLate
-          );
-          // The runtime takes no signal, so stopping the wait and stopping the
-          // process are two acts. Disposing the handle is neither — it releases
-          // this side's attachment and leaves the command running.
-          const result = await withAbort(abortSignal, handle.result(), () =>
-            handle.kill("SIGTERM")
-          );
-          console.info("[computer] bash", {
-            command,
-            exitCode: result.exitCode,
-            // Split so a slow command and a slow *wait* never look alike.
-            gateMs: gateMsWaited,
-            durationMs: Date.now() - startedAtMs - gateMsWaited,
-            // The ceiling this was measured against — a duration sitting on it is
-            // a timeout wearing a normal-looking number.
-            timeoutMs
-          });
-          return note(renderResult(result, maxChars));
-        } catch (err) {
-          if (abortSignal?.aborted) return note(stopped(gateMsWaited, started));
-          console.warn("[computer] bash failed", {
-            command,
-            gateMs: gateMsWaited,
-            durationMs: Date.now() - startedAtMs - gateMsWaited,
-            timeoutMs,
-            err: String(err)
-          });
-          // Returned, not thrown: a failed command is usually the model's to
-          // recover from, and it can only recover from what it is told.
-          return note(`error running command: ${String(err)}`);
+          return;
         }
+        /**
+         * The one check kept in front of upstream's tool, and the reason is not
+         * reporting.
+         *
+         * Computer's executor launches the command and only then reads the
+         * signal, so a call already given up on would start `rm -rf build` in
+         * the container and kill it a moment later. Nothing downstream can
+         * undo that, so it is refused here instead.
+         */
+        if (options.abortSignal?.aborted) {
+          yield {
+            command,
+            cwd: input.cwd ?? null,
+            backend: BACKEND,
+            error:
+              "the command did not run: this call was cancelled before it started."
+          };
+          return;
+        }
+
+        // One line per command, and the only view of where a task's wall clock
+        // goes: everything on the Worker side of a container command is an
+        // `await`, so Workers Observability records the invocation at ~0% CPU
+        // and a long wall time and cannot say what ran. Split, since an agent
+        // blocked waiting for `npm ci` and one running a slow suite are
+        // indistinguishable from outside and want opposite fixes.
+        let last: unknown;
+        for await (const part of parts(upstream.execute, input, options)) {
+          last = part;
+          yield gate.warn === undefined ? part : noted(part, gate.warn);
+        }
+        console.info("[computer] exec", {
+          command,
+          gateMs,
+          durationMs: Date.now() - startedAtMs - gateMs,
+          timeoutMs,
+          ...summary(last)
+        });
       }
     })
   };
+}
+
+/**
+ * The handle, holding its workspace open until the command settles.
+ *
+ * Nothing upstream disposes a handle, so the client it came from is released
+ * here instead, once `result()` has answered or the command was killed. A
+ * `/sandbox` client holds nothing and its disposal is a no-op, but the type a
+ * host implements says `Disposable`, so one that does hold something is still
+ * released exactly once.
+ *
+ * It is also the one place the difference between a command that was stopped and
+ * one that merely failed is still visible. Upstream's result has nowhere to put
+ * it, so it goes to the log rather than to the model.
+ */
+function held(
+  handle: CommandHandle,
+  client: ComputerClient,
+  command: string
+): CommandHandle {
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    client[Symbol.dispose]();
+  };
+  return {
+    async result() {
+      try {
+        const result = await handle.result();
+        if (result.status !== undefined && result.status !== "completed")
+          console.info("[computer] exec stopped", {
+            command,
+            status: result.status,
+            exitCode: result.exitCode
+          });
+        return result;
+      } finally {
+        release();
+      }
+    },
+    async kill(signal) {
+      try {
+        await handle.kill(signal);
+      } finally {
+        release();
+      }
+    },
+    [Symbol.dispose]() {
+      handle[Symbol.dispose]();
+      release();
+    }
+  };
+}
+
+/**
+ * Whatever the wrapped executor produces, as something to iterate.
+ *
+ * Upstream's is an async generator that yields a snapshot while the command
+ * runs, and the AI SDK's tool type also admits one value awaited once. Both are
+ * handled here rather than asserted, so an upstream that stops streaming keeps
+ * working and the gate above keeps wrapping it.
+ */
+async function* parts<I, O>(
+  execute: ((input: I, options: O) => unknown) | undefined,
+  input: I,
+  options: O
+): AsyncGenerator<unknown> {
+  if (execute === undefined)
+    throw new Error("@cloudflare/computer's exec tool has no executor");
+  const produced = await execute(input, options);
+  if (
+    produced !== null &&
+    typeof produced === "object" &&
+    Symbol.asyncIterator in produced
+  ) {
+    yield* produced as AsyncIterable<unknown>;
+    return;
+  }
+  yield produced;
+}
+
+/** What a finished `exec` tells the log, whichever shape it came back in. */
+function summary(part: unknown): Record<string, unknown> {
+  if (part === null || typeof part !== "object") return {};
+  if ("error" in part) return { error: String(part.error) };
+  return "exitCode" in part ? { exitCode: part.exitCode } : {};
+}
+
+/**
+ * The gate's note, prepended to what the command said, which is the contract
+ * {@link file://./gate.ts ExecGate} states for `warn`.
+ *
+ * It goes on `stdout`, or on `error` when the command did not produce either:
+ * the note is context for whatever happened, not a substitute for it, so it
+ * cannot be the only thing the model gets back.
+ */
+function noted(part: unknown, warn: string): unknown {
+  if (part === null || typeof part !== "object") return part;
+  if ("stdout" in part && typeof part.stdout === "string") {
+    return { ...part, stdout: `${warn}\n\n${part.stdout}` };
+  }
+  if ("error" in part && typeof part.error === "string") {
+    return { ...part, error: `${warn}\n\n${part.error}` };
+  }
+  return part;
 }

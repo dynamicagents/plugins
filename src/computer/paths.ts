@@ -71,7 +71,7 @@ export function walkSkips(directory: string, root: string): string[] {
 function dependencyTreeNote(path: string, verb: string): string {
   return (
     `${path} is inside node_modules, which ${verb} leaves out: it is installed ` +
-    `output, not source. Use bash there — \`cat\`, \`ls\`, \`rg\`.`
+    `output, not source. Use exec there — \`cat\`, \`ls\`, \`rg\`.`
   );
 }
 
@@ -81,9 +81,9 @@ function dependencyTreeNote(path: string, verb: string): string {
  * Names a route deliberately: a refusal with no destination is worse than no
  * refusal, because the model retries and then works around it.
  *
- * What it must never name is `bash`. That hands back the exact capability
+ * What it must never name is `exec`. That hands back the exact capability
  * being withheld, in the one place the model is already looking for a way around
- * it, with the tool's own authority behind it. `bash` is unguarded because a
+ * it, with the tool's own authority behind it. `exec` is unguarded because a
  * shell takes an opaque command string and pattern-matching git out of one is
  * neither reliable nor this guard's job — a fact about the implementation, not a
  * route to advertise.
@@ -113,7 +113,7 @@ function gitInternalNote(path: string, verb: string): string {
  * actually happens is a model reaching into `.git/HEAD` to fix a merge.
  *
  * It is not containment, and this is the only place worth saying so. An agent
- * that can write files here almost always holds `bash` too, which reads and
+ * that can write files here almost always holds `exec` too, which reads and
  * writes `.git` directly.
  *
  * Symlinks are not resolved, for the same reason: a tracked
