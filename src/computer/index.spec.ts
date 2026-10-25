@@ -1303,6 +1303,54 @@ describe("a cancelled command", () => {
     expect(text).not.toContain("time limit");
   });
 
+  /**
+   * The ordering the handle wrapper exists for. Upstream kills the command and
+   * then reads its result, so releasing the workspace on the kill would hand
+   * that read a client somebody had already disposed.
+   */
+  it("holds the workspace open until the result has been read", async () => {
+    let disposed = false;
+    let disposedWhenRead: boolean | undefined;
+    let signalled: (() => void) | undefined;
+    const ended = new Promise<void>((resolve) => {
+      signalled = resolve;
+    });
+    const client = {
+      runtime: {
+        exec: async () => ({
+          result: async () => {
+            await ended;
+            // A real result is an RPC that takes time after the signal, so the
+            // read happens a turn later than the kill. Reading it in the same
+            // microtask would pass whichever order the wrapper used.
+            await started();
+            disposedWhenRead = disposed;
+            return { exitCode: 143, stdout: "", stderr: "" };
+          },
+          kill: async () => void signalled?.(),
+          [Symbol.dispose]: () => {}
+        })
+      },
+      [Symbol.dispose]: () => {
+        disposed = true;
+      }
+    } as unknown as ComputerClient;
+    const controller = new AbortController();
+
+    const pending = execWith(
+      buildComputerTools(async () => client, config),
+      { command: "npm test" },
+      controller.signal
+    );
+    await started();
+    controller.abort();
+    await pending;
+
+    expect(disposedWhenRead).toBe(false);
+    // And it is released once, after that read.
+    expect(disposed).toBe(true);
+  });
+
   it("does not start a command on a call that is already cancelled", async () => {
     const { workspace, execs } = hungContainer();
     const controller = new AbortController();

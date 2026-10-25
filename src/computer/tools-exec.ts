@@ -214,10 +214,11 @@ export function execTools(ctx: ComputerContext): ToolSet {
  * The handle, holding its workspace open until the command settles.
  *
  * Nothing upstream disposes a handle, so the client it came from is released
- * here instead, once `result()` has answered or the command was killed. A
- * `/sandbox` client holds nothing and its disposal is a no-op, but the type a
- * host implements says `Disposable`, so one that does hold something is still
- * released exactly once.
+ * here instead, when `result()` has answered or the handle is disposed, and
+ * never on the kill in between. A `/sandbox` client holds nothing and its
+ * disposal is a no-op, but the type a host implements says `Disposable`, so one
+ * that does hold something is released exactly once and not before the command's
+ * own result has been read.
  *
  * It is also the one place the difference between a command that was stopped and
  * one that merely failed is still visible. Upstream's result has nowhere to put
@@ -249,12 +250,14 @@ function held(
         release();
       }
     },
+    /**
+     * A kill does not release the client, and that ordering is the point: the
+     * caller reads `result()` straight after killing, so releasing here would
+     * hand the rest of the command's own result a client somebody had already
+     * disposed.
+     */
     async kill(signal) {
-      try {
-        await handle.kill(signal);
-      } finally {
-        release();
-      }
+      await handle.kill(signal);
     },
     [Symbol.dispose]() {
       handle[Symbol.dispose]();
