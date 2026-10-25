@@ -84,10 +84,11 @@
     "prepare": "husky || true && npm run build"
   },
   "peerDependencies": {
+    "@cloudflare/computer": "^0.5.1",
     "@cloudflare/sandbox": "^1.0.1",
-    "@cloudflare/think": ">=0.20.2 <0.21.0",
-    "@dynamicagents/core": ">=0.16.0 <0.17.0",
-    "agents": ">=0.28.0 <0.29.0",
+    "@cloudflare/think": ">=0.21.0 <0.22.0",
+    "@dynamicagents/core": ">=0.17.0 <0.18.0",
+    "agents": ">=0.30.0 <0.31.0",
     "ai": "^7.0.88",
     "zod": "^4.4.3"
   },
@@ -97,12 +98,13 @@
     }
   },
   "devDependencies": {
+    "@cloudflare/computer": "^0.5.1",
     "@cloudflare/sandbox": "^1.0.1",
-    "@cloudflare/think": "^0.20.2",
+    "@cloudflare/think": "^0.21.0",
     "@cloudflare/vitest-plugin": "^1.4.4",
-    "@dynamicagents/core": "^0.16.0",
+    "@dynamicagents/core": "^0.17.0",
     "@types/node": "^26.5.1",
-    "agents": "^0.28.0",
+    "agents": "^0.30.1",
     "ai": "^7.0.101",
     "eslint": "^10.10.0",
     "husky": "^9.1.7",

@@ -144,10 +144,11 @@ const CONTEXT = [
   "You have a Linux container with a shell, a package manager and network access:",
   "- `bash` runs any shell command — builds, tests, installs, git.",
   "- `read` / `write` / `edit` / `delete` work on files; `edit` replaces an exact unique string and is the right tool for a small change.",
-  "- `grep` searches file contents; `list` lists a directory; `find` finds files by glob.",
+  "- `grep` searches file contents; `ls` lists a directory; `find` finds files by glob.",
   "Search with `grep` and `find` rather than running them through `bash`: they come back with line numbers and a bounded result instead of a wall of text.",
   "Command output is truncated from the middle when large, so run targeted commands and read specific files rather than printing everything.",
   "The checkout is the container's own disk, and it is kept between tasks: a stopped container starts again from it, so it may already contain work from an earlier task — check before assuming it is empty.",
+  "`/workspace` holds one directory per checkout, plus directories of your own that are not part of any repository: `attachments/` keeps media taken out of the conversation, `fetched/` keeps fetched pages, `.agents/` keeps projected skills. A message that says a file was preserved at one of those paths means you can read it back. Searches from `/workspace` skip them; repository work happens inside a checkout.",
   "`node_modules` is on that disk beside the checkout and is kept with it. The file tools leave it out — use `bash` there.",
   "`.git` is off limits to these tools, and searches and recursive listings skip it. It is git's internal state — reading it tells you less than the repository tools do, and writing it corrupts the checkout. Repository work goes through the repo tools (`repo_status`, `repo_diff`, `repo_commit`, `repo_push`); if a task needs git state you cannot get that way, say so in your result rather than reaching into `.git` yourself."
 ].join("\n");

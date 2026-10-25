@@ -30,11 +30,42 @@ export function isGitInternal(path: string): boolean {
 }
 
 /**
- * What every walk steps over, as directory names. Both the workspace's `glob`
+ * What every walk steps over, as directory names. Both the workspace's `find`
  * and the `grep` tool hand these on as `**\/<name>` exclusions, which prunes
  * them: no directory named here is descended into, so none costs a read.
  */
 export const WALK_SKIPS = [".git", "node_modules"] as const;
+
+/**
+ * The directories Think writes on its own account, directly under the
+ * workspace root: evicted media under `attachments/evicted/`, a fetch tool's
+ * spilled responses under `fetched/`, projected skills under `.agents/skills`.
+ * Think builds those paths from a root of its own and offers no way to move
+ * them, so a walk of the root reaches them.
+ *
+ * Pruned from a walk of the root and from nowhere else, which is what
+ * {@link walkSkips} spells: these are *names at the root*, not names anywhere,
+ * so a checkout with its own `attachments/` is still searched. A direct read is
+ * not refused either, because an eviction marker hands the model one of these
+ * paths and expects it to be readable.
+ */
+export const AGENT_OWNED = ["attachments", "fetched", ".agents"] as const;
+
+/**
+ * The exclusions one walk hands on, for a walk rooted at `directory` inside a
+ * workspace whose root is `root`.
+ *
+ * Every pattern is matched against the walked directory's *relative* path, so a
+ * root-anchored absolute pattern would match nothing. {@link AGENT_OWNED} is
+ * therefore relative to `directory` and only added when the walk starts at the
+ * root; {@link WALK_SKIPS} is a name at any depth.
+ */
+export function walkSkips(directory: string, root: string): string[] {
+  const anywhere = WALK_SKIPS.map((segment) => `**/${segment}`);
+  return directory === root
+    ? [...anywhere, ...AGENT_OWNED.map((name) => `${name}/**`)]
+    : anywhere;
+}
 
 /** The sentence a `node_modules` path gets. */
 function dependencyTreeNote(path: string, verb: string): string {
