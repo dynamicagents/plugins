@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { ROOT_SESSION } from "agents/harness/container";
+import { sha256Hex } from "@dynamicagents/core";
 import { CONTROL_SESSION, EGRESS_READY } from "./constants.js";
 import {
   DEFAULT_INSTALL_PLAN,
@@ -12,6 +13,10 @@ import {
 /**
  * What an install into `dir` would mark itself as, in a test sandbox whose
  * files all read `{}`: its files' fingerprint and the environment's digest.
+ *
+ * The environment's digest is composed here rather than taken from the object,
+ * because a mark the object derived for itself could not tell this suite that
+ * the stored format had changed.
  */
 async function installKey(
   dir: string,
@@ -30,15 +35,7 @@ async function installKey(
   const sorted = Object.entries(env).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0
   );
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(JSON.stringify(sorted))
-  );
-  const hex = [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 16);
-  return `${fingerprint}:${hex}`;
+  return `${fingerprint}:${(await sha256Hex(JSON.stringify(sorted))).slice(0, 16)}`;
 }
 import {
   eventually,
@@ -457,6 +454,23 @@ describe("checkouts and installs", () => {
       await state.storage.delete("sandbox:runtime-ready");
     });
     expect(await sandbox.checkoutDir()).toBe("/workspace/repo");
+  });
+
+  // A mark is written to a container's disk and read by a later start, so its
+  // format is as persisted as the file holding it: a change on either side of
+  // the colon costs every sandbox already marked an install it does not need.
+  // Hence literals rather than a derivation, and one per half, because what
+  // each half is for decides its width. The files' fingerprint is whole; the
+  // environment's digest is cut to what tells two environments apart.
+  it("composes an install mark a stored one still reads", async () => {
+    const [fingerprint, env, ...rest] = (
+      await installKey("/workspace/a", { HOST_ENV: "host" })
+    ).split(":");
+    expect(rest).toEqual([]);
+    expect(fingerprint).toBe(
+      "723119becdc351f50744004e622521b31209b4008122b1ddda88b5acce8b7ce6"
+    );
+    expect(env).toBe("bb8d79864ac40dc3");
   });
 
   it("installs nothing a finished install already put on this disk", async () => {
