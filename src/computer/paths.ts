@@ -11,6 +11,8 @@
  * what lets {@link guardPath} run before a tool opens the workspace at all.
  */
 
+import { normalizeAbsolute } from "../sandbox/header.js";
+
 /** Whether any segment of `path` is exactly `segment`. */
 function hasSegment(path: string, segment: string): boolean {
   return path.split("/").includes(segment);
@@ -68,16 +70,20 @@ export function walkSkips(directory: string, root: string): string[] {
 }
 
 /**
- * Whether a walk starts at the workspace root, by a comparison a trailing
- * slash cannot defeat.
+ * Whether a walk starts at the workspace root, by what the two paths mean
+ * rather than by how they are spelled.
  *
- * The directory is the model's to spell, and `/workspace/` is a spelling it
- * produces. Compared verbatim, that one misses the root and the walk returns
- * the agent's own directories as if they were the repository's.
+ * The directory is the model's to spell, and `/workspace/`, `/workspace/.` and
+ * `/workspace/repo/..` are all spellings it produces. Every one of them is this
+ * root to the sandbox, which normalises before it confines, so a comparison
+ * here that read them literally would answer no to a walk that then went ahead
+ * from the root and came back with the agent's own directories in it. The
+ * normaliser is {@link file://../sandbox/header.ts normalizeAbsolute}, shared
+ * with that confinement so the two cannot disagree.
  */
 function atRoot(directory: string, root: string): boolean {
-  const bare = (path: string) => path.replace(/\/+$/, "");
-  return bare(directory) === bare(root);
+  const resolved = normalizeAbsolute(directory);
+  return resolved !== undefined && resolved === normalizeAbsolute(root);
 }
 
 /** The sentence a `node_modules` path gets. */

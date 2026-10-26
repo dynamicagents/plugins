@@ -98,19 +98,23 @@ export function execTools(ctx: ComputerContext): ToolSet {
             // Abandoning the wait is not abandoning the workspace: one that
             // arrives after this call gave up has nobody left to dispose it.
             const client = await acquire(signal, workspace());
+            const releaseClient = releaseOnce("workspace", client);
             /**
-             * The client, let go exactly once however this call ends.
+             * The launch, once it exists, and **what owns the client from then
+             * on**.
              *
-             * Two paths can reach it when a cancel lands on the launch: this
-             * one, and the late handle's own {@link killLate}. A host whose
-             * disposal frees something must not see both.
+             * A command's kill runs through this client, so the client has to
+             * outlive the launch whatever happens to it: a cancel that landed
+             * mid-launch is cleaned up by {@link killLate}, which kills first
+             * and releases after, and a launch that fails instead brings no
+             * handle to kill and releases from here. Releasing in the catch
+             * below would disconnect the very kill that stops the abandoned
+             * command.
+             *
+             * Before the launch exists there is nothing else to release it, so
+             * the catch does.
              */
-            let releasedClient = false;
-            const releaseClient = () => {
-              if (releasedClient) return;
-              releasedClient = true;
-              client[Symbol.dispose]();
-            };
+            let launch: Promise<CommandHandle> | undefined;
             try {
               // Read once per command, and inside the try: this is the host's
               // thunk, so it may throw, and a throw out here would leave the
@@ -121,24 +125,32 @@ export function execTools(ctx: ComputerContext): ToolSet {
               // without this a call cancelled while the workspace was opening
               // still starts its command.
               signal?.throwIfAborted();
+              launch = client.runtime.exec(
+                withShellTranscript(command, config.shell),
+                {
+                  cwd: options.cwd ?? cwd,
+                  encoding: "utf8",
+                  timeoutMs,
+                  ...(env ? { env } : {})
+                }
+              );
+              // A launch that fails has no handle for `killLate` to clean up,
+              // so its own failure is what releases the client. Attached here
+              // rather than in the catch, because an abandoned launch fails
+              // long after the catch has run.
+              void launch.catch(releaseClient);
               const handle = await acquire(
                 signal,
-                client.runtime.exec(
-                  withShellTranscript(command, config.shell),
-                  {
-                    cwd: options.cwd ?? cwd,
-                    encoding: "utf8",
-                    timeoutMs,
-                    ...(env ? { env } : {})
-                  }
-                ),
+                launch,
                 // Disposing a late handle only detaches this side, so the
                 // command is killed first and the workspace released after.
-                (late) => void killLate(late, releaseClient)
+                // Returned, not discarded: `acquire` adopts it, so a kill that
+                // fails is handled rather than left unhandled.
+                (late) => killLate(late, releaseClient)
               );
               return held(handle, releaseClient, command);
             } catch (err) {
-              releaseClient();
+              if (launch === undefined) releaseClient();
               throw err;
             }
           },
@@ -252,6 +264,30 @@ export function execTools(ctx: ComputerContext): ToolSet {
 }
 
 /**
+ * One resource, let go exactly once however a call ends, and never by throwing.
+ *
+ * Several paths can reach the same client: the launch's own failure, the late
+ * handle's cleanup, and the handle wrapper's release when a result settles. A
+ * host whose disposal frees something must see exactly one of them. It must
+ * also not throw, since most of those callers are a `finally` and a disposal
+ * that threw there would replace the result or the error the call was carrying.
+ */
+function releaseOnce(what: string, resource: Disposable): () => void {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    try {
+      resource[Symbol.dispose]();
+    } catch (err) {
+      console.warn(`[computer] releasing an exec ${what} failed`, {
+        err: String(err)
+      });
+    }
+  };
+}
+
+/**
  * Wait for a disposable resource without outliving `signal`.
  *
  * {@link withAbort} can abandon the wait but not the resource, and one that
@@ -278,14 +314,12 @@ async function killLate(
   handle: CommandHandle,
   releaseClient: () => void
 ): Promise<void> {
+  const releaseHandle = releaseOnce("handle", handle);
   try {
     await handle.kill("SIGTERM");
   } finally {
-    try {
-      handle[Symbol.dispose]();
-    } finally {
-      releaseClient();
-    }
+    releaseHandle();
+    releaseClient();
   }
 }
 
@@ -308,20 +342,15 @@ function held(
   releaseClient: () => void,
   command: string
 ): CommandHandle {
-  let done = false;
   /**
-   * The handle first and the client second, exactly once. Upstream disposes
-   * neither, and a host's handle may own an attachment or a subscription the
-   * client knows nothing about, so both are let go here.
+   * The handle first and the client second, each exactly once. Upstream
+   * disposes neither, and a host's handle may own an attachment or a
+   * subscription the client knows nothing about, so both are let go here.
    */
+  const releaseHandle = releaseOnce("handle", handle);
   const release = () => {
-    if (done) return;
-    done = true;
-    try {
-      handle[Symbol.dispose]();
-    } finally {
-      releaseClient();
-    }
+    releaseHandle();
+    releaseClient();
   };
   return {
     async result() {

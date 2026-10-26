@@ -105,17 +105,35 @@ function assertRunHeader(value: unknown): asserts value is RunHeader {
 
 /** Whether `path` is `root` or inside it, with no `..` escaping it. */
 export function isUnder(path: string, root: string): boolean {
-  if (!path.startsWith("/")) return false;
+  const normal = normalizeAbsolute(path);
+  return (
+    normal !== undefined && (normal === root || normal.startsWith(`${root}/`))
+  );
+}
+
+/**
+ * `path` with its dot segments and repeated separators resolved, or `undefined`
+ * for one that is not absolute or that climbs above `/`.
+ *
+ * Shared with the tools rather than kept here, because anything comparing a
+ * path against this root has to compare what the path *means*: `/workspace/.`
+ * and `/workspace/repo/..` are both this root, and a comparison that read them
+ * literally would answer no to a path the sandbox itself answers yes to.
+ *
+ * A `..` with nothing left to pop is refused rather than clamped at `/`: a
+ * clamp would turn an attempt to climb out into a valid root path.
+ */
+export function normalizeAbsolute(path: string): string | undefined {
+  if (!path.startsWith("/")) return undefined;
   const parts: string[] = [];
   for (const part of path.split("/")) {
     if (part === "" || part === ".") continue;
     if (part === "..") {
-      if (parts.length === 0) return false;
+      if (parts.length === 0) return undefined;
       parts.pop();
       continue;
     }
     parts.push(part);
   }
-  const normal = `/${parts.join("/")}`;
-  return normal === root || normal.startsWith(`${root}/`);
+  return `/${parts.join("/")}`;
 }

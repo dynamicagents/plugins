@@ -1565,8 +1565,16 @@ describe("cancellation before the command runs", () => {
     const pending = execWith(tools, { command: "npm test" }, controller.signal);
     await tick();
     controller.abort();
+    // A handle arrives turns later than the cancel in anything real, and that
+    // is the ordering that matters here: in the same microtask burst the
+    // kill can record before the abandoned call has released anything.
+    await tick();
 
     const kills: Array<string | undefined> = [];
+    // What the kill actually needs: the client is the connection it runs over,
+    // so a release that happened first would send it down a closed one.
+    let disposalsAtKill: number | undefined;
+    let handleDisposals = 0;
     let signalled: (() => void) | undefined;
     const ended = new Promise<void>((resolve) => {
       signalled = resolve;
@@ -1578,9 +1586,12 @@ describe("cancellation before the command runs", () => {
       },
       kill: async (signal?: string) => {
         kills.push(signal);
+        disposalsAtKill = disposals;
         signalled?.();
       },
-      [Symbol.dispose]: () => {}
+      [Symbol.dispose]: () => {
+        handleDisposals += 1;
+      }
     });
 
     // The call does not wait on a command it gave up on, and the command does
@@ -1589,6 +1600,87 @@ describe("cancellation before the command runs", () => {
     expect(await pending).not.toHaveProperty("exitCode");
     await tick();
     expect(kills).toEqual(["SIGTERM"]);
+    // Live for the kill, and let go after it. Both resources, once each.
+    expect(disposalsAtKill).toBe(0);
+    expect(disposals).toBe(1);
+    expect(handleDisposals).toBe(1);
+  });
+
+  /**
+   * A kill that fails is the likeliest failure on this path — the sandbox is
+   * often gone by the time a cancel reaches it — and it must not become an
+   * unhandled rejection. `acquire` adopts the cleanup's promise, so the
+   * rejection is handled there, and the release in its `finally` still runs.
+   */
+  it("survives a late kill that fails, and still releases both", async () => {
+    let start: ((handle: unknown) => void) | undefined;
+    let disposals = 0;
+    const client = {
+      runtime: {
+        exec: () =>
+          new Promise((resolve) => {
+            start = resolve;
+          })
+      },
+      [Symbol.dispose]: () => {
+        disposals += 1;
+      }
+    } as unknown as ComputerClient;
+    const tools = buildComputerTools(async () => client, config);
+    const controller = new AbortController();
+
+    const pending = execWith(tools, { command: "npm test" }, controller.signal);
+    await tick();
+    controller.abort();
+
+    await tick();
+
+    let handleDisposals = 0;
+    start?.({
+      result: () => new Promise(() => {}),
+      kill: async () => {
+        throw new Error("the sandbox is gone");
+      },
+      [Symbol.dispose]: () => {
+        handleDisposals += 1;
+      }
+    });
+
+    expect(await pending).not.toHaveProperty("exitCode");
+    await tick();
+    expect(handleDisposals).toBe(1);
+    expect(disposals).toBe(1);
+  });
+
+  /**
+   * A launch that fails after the call gave up brings no handle to clean up,
+   * so nothing in the late path releases the workspace — its own failure has
+   * to.
+   */
+  it("releases the workspace when an abandoned launch fails instead", async () => {
+    let fail: ((err: Error) => void) | undefined;
+    let disposals = 0;
+    const client = {
+      runtime: {
+        exec: () =>
+          new Promise((_resolve, reject) => {
+            fail = reject;
+          })
+      },
+      [Symbol.dispose]: () => {
+        disposals += 1;
+      }
+    } as unknown as ComputerClient;
+    const tools = buildComputerTools(async () => client, config);
+    const controller = new AbortController();
+
+    const pending = execWith(tools, { command: "npm test" }, controller.signal);
+    await tick();
+    controller.abort();
+    expect(await pending).not.toHaveProperty("exitCode");
+
+    fail?.(new Error("the container never started it"));
+    await tick();
     expect(disposals).toBe(1);
   });
 });

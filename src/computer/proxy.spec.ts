@@ -282,9 +282,30 @@ describe("routedWorkspace", () => {
   it("prunes them for the root however the path is spelled", async () => {
     const { workspace: ws, seen } = fake();
 
-    await ws.fs.find("/workspace/", "**/*.png");
+    // Every one of these is the root to the sandbox, which normalises before it
+    // confines: a comparison that read them literally would let the walk go
+    // ahead from the root with the agent's own directories in it.
+    for (const spelling of [
+      "/workspace/",
+      "/workspace/.",
+      "//workspace",
+      "/workspace/repo/..",
+      "/workspace/./repo/../."
+    ]) {
+      await ws.fs.find(spelling, "**/*.png");
+    }
 
-    expect(seen.finds[0]?.exclude).toContain("attachments/**");
+    for (const call of seen.finds)
+      expect(call.exclude).toContain("attachments/**");
+  });
+
+  /** And a directory that only looks like it: still a walk inside a checkout. */
+  it("does not prune them for a path that resolves below the root", async () => {
+    const { workspace: ws, seen } = fake();
+
+    await ws.fs.find("/workspace/repo/./src", "**/*.ts");
+
+    expect(seen.finds[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
   });
 
   /**
