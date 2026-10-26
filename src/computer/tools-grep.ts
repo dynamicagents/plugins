@@ -1,7 +1,8 @@
 import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
-import { guardPath, WALK_SKIPS } from "./paths.js";
+import { SANDBOX_ROOT } from "../sandbox/header.js";
+import { guardPath, walkSkips } from "./paths.js";
 import { renderGrepMatches } from "./render.js";
 import type { ComputerContext } from "./context.js";
 
@@ -122,7 +123,12 @@ export function grepTools(ctx: ComputerContext): ToolSet {
             context: around,
             limit: DEFAULT_MAX_MATCHES + 1,
             offset: from,
-            exclude: WALK_SKIPS.map((segment) => `**/${segment}`)
+            // The same skips the workspace's own walks hand on, anchored to
+            // the served root rather than to the target: this tool replaces
+            // Think's `grep`, so a search of the root that kept the agent's
+            // own directories would fill a bounded page with them before the
+            // checkout's matches. See `src/computer/paths.ts`.
+            exclude: walkSkips(target, SANDBOX_ROOT)
           });
           if (matches.length === 0)
             return `no matches for ${JSON.stringify(query)} in ${target}${

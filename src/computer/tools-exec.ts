@@ -1,4 +1,5 @@
 import { createExecTool } from "@cloudflare/computer/tools/ai-sdk";
+import { withAbort } from "@dynamicagents/core";
 import { tool } from "ai";
 import type { ToolSet } from "ai";
 import type { CommandHandle, ComputerClient } from "./client.js";
@@ -71,61 +72,87 @@ export function execTools(ctx: ComputerContext): ToolSet {
     definedEnv
   } = ctx;
 
-  const upstream = createExecTool({
-    workspace: {
-      runtime: {
-        /**
-         * Computer's tool asks for a command and a working directory; the rest
-         * of what a container command needs is this plugin's, and is filled in
-         * here rather than left to the model.
-         *
-         * `output` is not forwarded: the sandbox has no way to cap a command's
-         * output at the source, so the ceiling is spent on this side, which is
-         * where it was spent before.
-         */
-        exec: async (command, options) => {
-          const client = await workspace();
-          // Read once per command. This is the host's thunk, so calling it
-          // twice while building one command's options is two chances to
-          // disagree.
-          const env = definedEnv();
-          try {
-            const handle = await client.runtime.exec(
-              withShellTranscript(command, config.shell),
-              {
-                cwd: options.cwd ?? cwd,
-                encoding: "utf8",
-                timeoutMs,
-                ...(env ? { env } : {})
-              }
-            );
-            return held(handle, client, command);
-          } catch (err) {
-            client[Symbol.dispose]();
-            throw err;
-          }
-        },
-        backends: () => [
-          {
-            id: BACKEND,
-            protocol: "command",
-            callable: false,
-            description: BACKEND_DESCRIPTION
-          }
-        ]
-      }
-    },
-    // Characters, spent as bytes: upstream's ceiling is in bytes and there is
-    // no character form of it. The two coincide until the output is not ASCII,
-    // where the model is shown a little less than the host asked for.
-    // `maxLines` is left to upstream's own default.
-    maxBytes: maxChars
-  });
+  /**
+   * Computer's tool over one call's workspace and one call's signal.
+   *
+   * Built per call rather than once, because the signal belongs to the call and
+   * upstream's runtime interface has nowhere to pass one: holding it in a
+   * variable this closure shared would let two commands in one isolate read
+   * each other's cancellation. The instance below, built with no signal, is
+   * used for its description and its schema alone and never runs a command.
+   */
+  const execToolFor = (signal?: AbortSignal) =>
+    createExecTool({
+      workspace: {
+        runtime: {
+          /**
+           * Computer's tool asks for a command and a working directory; the
+           * rest of what a container command needs is this plugin's, and is
+           * filled in here rather than left to the model.
+           *
+           * `output` is not forwarded: the sandbox has no way to cap a
+           * command's output at the source, so the ceiling is spent on this
+           * side, which is where it was spent before.
+           */
+          exec: async (command, options) => {
+            // Abandoning the wait is not abandoning the workspace: one that
+            // arrives after this call gave up has nobody left to dispose it.
+            const client = await acquire(signal, workspace());
+            try {
+              // Read once per command, and inside the try: this is the host's
+              // thunk, so it may throw, and a throw out here would leave the
+              // client above held by nobody.
+              const env = definedEnv();
+              // The last moment before anything runs in the container.
+              // Upstream reads the signal only once it holds a handle, so
+              // without this a call cancelled while the workspace was opening
+              // still starts its command.
+              signal?.throwIfAborted();
+              const handle = await acquire(
+                signal,
+                client.runtime.exec(
+                  withShellTranscript(command, config.shell),
+                  {
+                    cwd: options.cwd ?? cwd,
+                    encoding: "utf8",
+                    timeoutMs,
+                    ...(env ? { env } : {})
+                  }
+                ),
+                // Disposing a late handle only detaches this side, so the
+                // command is killed first and the workspace released after.
+                (late) => void killLate(late, client)
+              );
+              return held(handle, client, command);
+            } catch (err) {
+              client[Symbol.dispose]();
+              throw err;
+            }
+          },
+          backends: () => [
+            {
+              id: BACKEND,
+              protocol: "command",
+              callable: false,
+              description: BACKEND_DESCRIPTION
+            }
+          ]
+        }
+      },
+      // Characters, spent as bytes: upstream's ceiling is in bytes and there is
+      // no character form of it. The two coincide until the output is not
+      // ASCII, where the model is shown a little less than the host asked for.
+      // `maxLines` is left to upstream's own default.
+      maxBytes: maxChars
+    });
+
+  /** For the description and the schema the model is shown, nothing else. */
+  const shape = execToolFor();
 
   return {
     exec: tool({
-      description: upstream.description,
-      inputSchema: upstream.inputSchema,
+      description: shape.description,
+      inputSchema: shape.inputSchema,
       execute: async function* (input, options) {
         const command = input.command;
         const startedAtMs = Date.now();
@@ -194,6 +221,7 @@ export function execTools(ctx: ComputerContext): ToolSet {
         // blocked waiting for `npm ci` and one running a slow suite are
         // indistinguishable from outside and want opposite fixes.
         let last: unknown;
+        const upstream = execToolFor(options.abortSignal);
         for await (const part of parts(upstream.execute, input, options)) {
           last = part;
           yield gate.warn === undefined ? part : noted(part, gate.warn);
@@ -211,14 +239,53 @@ export function execTools(ctx: ComputerContext): ToolSet {
 }
 
 /**
+ * Wait for a disposable resource without outliving `signal`.
+ *
+ * {@link withAbort} can abandon the wait but not the resource, and one that
+ * arrives after its caller has given up has nobody left to release it. So it is
+ * released on arrival instead: disposed by default, or handed to `release` where
+ * disposing alone would leave work running.
+ */
+function acquire<R>(
+  signal: AbortSignal | undefined,
+  opening: Promise<R>,
+  release: (resource: R) => unknown = (resource) =>
+    (resource as Disposable)[Symbol.dispose]()
+): Promise<R> {
+  return withAbort(signal, opening, () => {
+    void opening.then(release).catch(() => {});
+  });
+}
+
+/**
+ * How a command whose handle arrived too late is let go: killed, then its
+ * workspace released. Disposing only detaches this side, so without the kill
+ * the command runs on in the container after the call gave up on it.
+ */
+async function killLate(
+  handle: CommandHandle,
+  client: ComputerClient
+): Promise<void> {
+  try {
+    await handle.kill("SIGTERM");
+  } finally {
+    try {
+      handle[Symbol.dispose]();
+    } finally {
+      client[Symbol.dispose]();
+    }
+  }
+}
+
+/**
  * The handle, holding its workspace open until the command settles.
  *
- * Nothing upstream disposes a handle, so the client it came from is released
- * here instead, when `result()` has answered or the handle is disposed, and
- * never on the kill in between. A `/sandbox` client holds nothing and its
- * disposal is a no-op, but the type a host implements says `Disposable`, so one
- * that does hold something is released exactly once and not before the command's
- * own result has been read.
+ * Nothing upstream disposes either the handle or the client it came from, so
+ * both are let go here: when `result()` has answered or the handle is disposed,
+ * and never on the kill in between. A `/sandbox` handle and client hold nothing
+ * and their disposal is a no-op, but the types a host implements say
+ * `Disposable`, so one that does hold something is released exactly once and
+ * not before the command's own result has been read.
  *
  * It is also the one place the difference between a command that was stopped and
  * one that merely failed is still visible. Upstream's result has nowhere to put
@@ -229,11 +296,20 @@ function held(
   client: ComputerClient,
   command: string
 ): CommandHandle {
-  let released = false;
+  let done = false;
+  /**
+   * The handle first and the client second, exactly once. Upstream disposes
+   * neither, and a host's handle may own an attachment or a subscription the
+   * client knows nothing about, so both are let go here.
+   */
   const release = () => {
-    if (released) return;
-    released = true;
-    client[Symbol.dispose]();
+    if (done) return;
+    done = true;
+    try {
+      handle[Symbol.dispose]();
+    } finally {
+      client[Symbol.dispose]();
+    }
   };
   return {
     async result() {
@@ -260,7 +336,6 @@ function held(
       await handle.kill(signal);
     },
     [Symbol.dispose]() {
-      handle[Symbol.dispose]();
       release();
     }
   };

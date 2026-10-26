@@ -53,13 +53,34 @@ const page = <T>(items: T[], options?: Page): T[] => {
  * searching everything would let a tool that sends the wrong glob pass the very
  * tests written to catch it.
  */
-const pruned = (exclude?: string[]): ((path: string) => boolean) => {
-  const segments = (exclude ?? []).map((pattern) => {
+/**
+ * The store's own pruning, for the two pattern shapes this package hands it: a
+ * name at any depth (`**\/name`), and a name directly under the directory the
+ * walk started at (`name/**`). Both are modelled, because they mean different
+ * things and the difference is the point: one keeps a checkout's `attachments/`
+ * searchable while the other keeps the agent's own out of a search of the root.
+ */
+const pruned = (
+  exclude: string[] | undefined,
+  /** Where the walk started, which a root-anchored pattern is relative to. */
+  from = ""
+): ((path: string) => boolean) => {
+  const anywhere: string[] = [];
+  const atRoot: string[] = [];
+  for (const pattern of exclude ?? []) {
     const segment = /^\*\*\/([A-Za-z0-9_.-]+)$/.exec(pattern)?.[1];
-    if (!segment) throw new Error(`stub cannot model exclude: ${pattern}`);
-    return segment;
-  });
-  return (path) => path.split("/").some((part) => segments.includes(part));
+    if (segment) {
+      anywhere.push(segment);
+      continue;
+    }
+    const rooted = /^([A-Za-z0-9_.-]+)\/\*\*$/.exec(pattern)?.[1];
+    if (!rooted) throw new Error(`stub cannot model exclude: ${pattern}`);
+    atRoot.push(rooted);
+  }
+  const base = from.replace(/\/+$/, "");
+  return (path) =>
+    path.split("/").some((part) => anywhere.includes(part)) ||
+    atRoot.some((name) => path.startsWith(`${base}/${name}/`));
 };
 
 /**
@@ -129,7 +150,7 @@ function stub(
       grep: async (query: string, _path: string, options?: GrepOptions) => {
         greps.push({ query, path: _path, ...options });
         const context = options?.context ?? 0;
-        const skip = pruned(options?.exclude);
+        const skip = pruned(options?.exclude, _path);
         const out: Array<{
           path: string;
           line: number;
@@ -271,6 +292,25 @@ describe("what exec claims for itself", () => {
    * off; the reply never names one, which is why the context block tells the
    * model what truncation actually does.
    */
+  /**
+   * Two of the guarantees belong to the configured shell, and `-o pipefail` is
+   * the one a model acts on: without it a piped check reports the pipe's
+   * status, so a block promising first-failure reporting would have the model
+   * trust an exit code that says nothing.
+   */
+  it("promises first-failure reporting only when a shell carries it", async () => {
+    const [withShell] = computer({ shell: "bash" }).context!;
+    const [bare] = computer({}).context!;
+
+    expect(String(await withShell.provider!.get())).toContain(
+      "reports its first failing stage"
+    );
+    const without = String(await bare.provider!.get());
+    expect(without).not.toContain("reports its first failing stage");
+    // And says what happens instead, rather than going quiet about it.
+    expect(without).toContain("only its **last** stage");
+  });
+
   it("promises a saved output file that this workspace does not write", async () => {
     expect(descriptionOf()).toContain("saved to a file");
 
@@ -602,6 +642,46 @@ describe("grep", () => {
 describe("grep pruning", () => {
   const src = "/workspace/repo/src/a.ts";
 
+  /**
+   * The installed `grep` replaces Think's, so it has to prune what the
+   * workspace's own walks prune. It opens the client and searches directly
+   * rather than through `routedWorkspace`, so nothing else applies these for
+   * it: a search of the root without them fills a bounded page with the
+   * agent's own files before the checkout's matches.
+   */
+  it("keeps the agent's own directories out of a search of the root", async () => {
+    const evicted = "/workspace/attachments/evicted/msg-0.png";
+    const { workspace, greps } = stub({
+      [evicted]: "marker",
+      [src]: "const marker = 1;\n"
+    });
+
+    const out = await run(buildComputerTools(workspace, config), "grep", {
+      query: "marker"
+    });
+
+    expect(greps[0]?.exclude).toContain("attachments/**");
+    expect(out).toContain(src);
+    expect(out).not.toContain(evicted);
+  });
+
+  /**
+   * And only at the root: the exclusion is a name directly under it, so a
+   * repository that has an `attachments/` of its own is searched like any other
+   * directory.
+   */
+  it("still searches a checkout's own directory of that name", async () => {
+    const own = "/workspace/repo/attachments/note.md";
+    const { workspace } = stub({ [own]: "marker" });
+
+    const out = await run(buildComputerTools(workspace, config), "grep", {
+      query: "marker",
+      path: "/workspace/repo"
+    });
+
+    expect(out).toContain(own);
+  });
+
   it("asks the store to prune, in one search rather than two", async () => {
     const { workspace, greps } = stub({ [src]: "const marker = 1;\n" });
 
@@ -609,7 +689,14 @@ describe("grep pruning", () => {
       query: "marker"
     });
 
-    expect(greps[0]?.exclude).toEqual(["**/.git", "**/node_modules"]);
+    // A search of the root, so the agent's own directories are pruned too.
+    expect(greps[0]?.exclude).toEqual([
+      "**/.git",
+      "**/node_modules",
+      "attachments/**",
+      "fetched/**",
+      ".agents/**"
+    ]);
     // The point of the retirement: one round trip. A filter here needed a second
     // to refill a page its own skips had emptied, and a retry re-scanned every
     // file the first round had already read.
@@ -699,7 +786,13 @@ describe("grep pruning", () => {
     expect(pages).toBeGreaterThan(1);
     // Every page asked the store to prune, not just the first.
     for (const call of greps)
-      expect(call.exclude).toEqual(["**/.git", "**/node_modules"]);
+      expect(call.exclude).toEqual([
+        "**/.git",
+        "**/node_modules",
+        "attachments/**",
+        "fetched/**",
+        ".agents/**"
+      ]);
   });
 });
 
@@ -1391,7 +1484,13 @@ describe("cancellation before the command runs", () => {
     expect(execs).toHaveLength(0);
   });
 
-  it("disposes a workspace that opens only after the call gave up", async () => {
+  /**
+   * The window a check before the launch cannot cover on its own: the signal
+   * fires while the workspace is still opening. The call has to give up without
+   * waiting for it, and the workspace that then turns up has to be released by
+   * somebody — and its command must never start.
+   */
+  it("gives up on a workspace still opening, and runs nothing when it arrives", async () => {
     let arrive: ((client: ComputerClient) => void) | undefined;
     const tools = buildComputerTools(
       () =>
@@ -1402,21 +1501,44 @@ describe("cancellation before the command runs", () => {
     );
     const controller = new AbortController();
 
-    const pending = execWith(tools, { command: "npm test" }, controller.signal);
+    const pending = execWith(
+      tools,
+      { command: "rm -rf build" },
+      controller.signal
+    );
     await tick();
     controller.abort();
 
+    // Promptly, rather than once the workspace turns up: an unresolved one
+    // would otherwise hold the turn open for as long as it took. The sentence
+    // is upstream's, since this is a call it was given and could not finish,
+    // rather than one the plugin refused.
+    const part = await pending;
+    expect(part).not.toHaveProperty("exitCode");
+    expect(execText(part)).not.toBe("");
+
     let disposed = false;
+    const execs: string[] = [];
     arrive?.({
+      runtime: {
+        exec: async (command: string) => {
+          execs.push(command);
+          return {
+            result: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+            kill: async () => {},
+            [Symbol.dispose]: () => {}
+          };
+        }
+      },
       [Symbol.dispose]: () => {
         disposed = true;
       }
     } as unknown as ComputerClient);
+    await tick();
 
-    // The call is waiting on the workspace, not on the signal, so it ends only
-    // once one turns up — and whatever it then fails on, nobody is left holding
-    // the client.
-    expect(execText(await pending)).not.toBe("");
+    // A usable workspace, deliberately: the point is that nothing was run on
+    // it, not that running failed.
+    expect(execs).toEqual([]);
     expect(disposed).toBe(true);
   });
 
@@ -1458,11 +1580,12 @@ describe("cancellation before the command runs", () => {
       [Symbol.dispose]: () => {}
     });
 
-    // Upstream reads the signal once the handle is in hand, so a process that
-    // started while the call was being abandoned is still stopped, and the
-    // client it came from is released with it.
-    expect(await pending).toMatchObject({ exitCode: 143 });
-    expect(kills).toHaveLength(1);
+    // The call does not wait on a command it gave up on, and the command does
+    // not run on without it: the handle that arrives late is killed, disposed
+    // and its workspace released.
+    expect(await pending).not.toHaveProperty("exitCode");
+    await tick();
+    expect(kills).toEqual(["SIGTERM"]);
     expect(disposed).toBe(true);
   });
 });

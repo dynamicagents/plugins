@@ -8,6 +8,7 @@ import type {
   GrepOptions
 } from "./client.js";
 import { RUN_DIR } from "../sandbox/constants.js";
+import { SANDBOX_ROOT } from "../sandbox/header.js";
 import { sandboxNameFromRuntime } from "../sandbox/name.js";
 import { routedWorkspace } from "./proxy.js";
 
@@ -106,7 +107,9 @@ export function computerWorkspace(
       open: async (name) => sandboxClient(host(name)),
       advisories: (name) => host(name).advisories()
     },
-    config.cwd ?? "/workspace"
+    // The served root, not `config.cwd`: a host may point the tools at a
+    // checkout, and Think's own directories stay where Think puts them.
+    SANDBOX_ROOT
   );
 }
 

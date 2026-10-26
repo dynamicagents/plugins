@@ -57,9 +57,16 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
 }
 
 /** Think's file tools over `route`, carrying it for the computer tools to find. */
+/**
+ * `root` is the sandbox's served root and never a working directory. The
+ * directories Think writes its own files into are fixed under that root, so
+ * anchoring their exclusions anywhere else both hides a checkout's own
+ * `attachments/` and leaves Think's in a search of the root: see
+ * {@link file://./paths.ts walkSkips}.
+ */
 export function routedWorkspace(
   route: WorkspaceRoute,
-  cwd: string
+  root: string
 ): ThinkWorkspace {
   /** One call, against the workspace this turn names. */
   const withFs = async <T>(
@@ -154,7 +161,7 @@ export function routedWorkspace(
       withFs(directory, "find", (fs) =>
         fs.find(directory, pattern, {
           ...options,
-          exclude: [...walkSkips(directory, cwd), ...(options?.exclude ?? [])]
+          exclude: [...walkSkips(directory, root), ...(options?.exclude ?? [])]
         })
       ),
 
@@ -163,7 +170,7 @@ export function routedWorkspace(
         fs.grep(pattern, path, {
           ...options,
           exclude: [
-            ...walkSkips(path, cwd),
+            ...walkSkips(path, root),
             ...((options as { exclude?: string[] } | undefined)?.exclude ?? [])
           ]
         })
