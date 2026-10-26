@@ -545,9 +545,12 @@ export abstract class SandboxObjectBase<
     );
   }
 
-  async stat(
-    path: string
-  ): Promise<{ type: string; size: number; modifiedAt: number } | null> {
+  async stat(path: string): Promise<{
+    type: string;
+    size: number;
+    modifiedAt: number;
+    mode: number;
+  } | null> {
     this.#confine(path);
     await this.ensureRunning();
     return this.#hold(async () => {
@@ -558,7 +561,11 @@ export abstract class SandboxObjectBase<
         return {
           type: stat.type,
           size: Number(stat.size),
-          modifiedAt: stat.modifiedAt.getTime()
+          modifiedAt: stat.modifiedAt.getTime(),
+          // Reported because the file tools' own contract asks for one, and
+          // the container knows it. Nothing can set it back: the sandbox's
+          // write takes no mode.
+          mode: stat.mode
         };
       } catch (err) {
         if (isNotFound(err)) return null;

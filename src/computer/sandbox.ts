@@ -1,4 +1,4 @@
-import type { WorkspaceLike } from "@cloudflare/think";
+import type { ThinkWorkspace } from "@cloudflare/think";
 import type { SandboxAdvisory } from "../sandbox/advisory.js";
 import type {
   ComputerClient,
@@ -8,6 +8,7 @@ import type {
   GrepOptions
 } from "./client.js";
 import { RUN_DIR } from "../sandbox/constants.js";
+import { SANDBOX_ROOT } from "../sandbox/header.js";
 import { sandboxNameFromRuntime } from "../sandbox/name.js";
 import { routedWorkspace } from "./proxy.js";
 
@@ -37,10 +38,13 @@ export interface SandboxComputerHost extends Rpc.DurableObjectBranded {
     }
   ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
   readFile(path: string): Promise<Uint8Array | null>;
-  writeFile(path: string, content: string): Promise<void>;
-  stat(
-    path: string
-  ): Promise<{ type: string; size: number; modifiedAt: number } | null>;
+  writeFile(path: string, content: string | Uint8Array): Promise<void>;
+  stat(path: string): Promise<{
+    type: string;
+    size: number;
+    modifiedAt: number;
+    mode: number;
+  } | null>;
   readDir(path: string): Promise<{ name: string; type: string }[]>;
   mkdir(path: string): Promise<void>;
   rm(path: string, options?: { recursive?: boolean }): Promise<void>;
@@ -94,7 +98,7 @@ const MAX_FOUND = 10_000;
 export function computerWorkspace(
   config: SandboxComputerConfig,
   runtime?: () => unknown
-): WorkspaceLike {
+): ThinkWorkspace {
   const host = (name: string) =>
     config.binding.getByName(name) as unknown as SandboxComputerHost;
   return routedWorkspace(
@@ -103,7 +107,9 @@ export function computerWorkspace(
       open: async (name) => sandboxClient(host(name)),
       advisories: (name) => host(name).advisories()
     },
-    config.cwd ?? "/workspace"
+    // The served root, not `config.cwd`: a host may point the tools at a
+    // checkout, and Think's own directories stay where Think puts them.
+    SANDBOX_ROOT
   );
 }
 
@@ -130,8 +136,10 @@ export function sandboxClient(host: SandboxComputerHost): ComputerClient {
       const stat = await host.stat(path);
       if (!stat) throw missing(path);
       return {
+        name: path.slice(path.lastIndexOf("/") + 1),
         size: stat.size,
         mtime: stat.modifiedAt,
+        mode: stat.mode,
         isFile: stat.type === "file",
         isDirectory: stat.type === "directory",
         isSymbolicLink: stat.type === "symlink"
@@ -147,7 +155,8 @@ export function sandboxClient(host: SandboxComputerHost): ComputerClient {
         .map((entry) => ({
           name: entry.name,
           isFile: entry.type === "file",
-          isDirectory: entry.type === "directory"
+          isDirectory: entry.type === "directory",
+          isSymbolicLink: entry.type === "symlink"
         }));
     },
     find: (directory, pattern, options = {}) =>

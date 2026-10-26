@@ -185,7 +185,7 @@ describe("computer()", () => {
   it("runs on a sandbox's workspace, and refuses any other", () => {
     expect(
       Object.keys(computer({}).tools!(onWorkspace(sandboxed))).sort()
-    ).toEqual(["bash", "edit", "grep"]);
+    ).toEqual(["edit", "exec", "grep"]);
     expect(() => computer({}).tools!(onWorkspace({}))).toThrow(
       PluginSetupError
     );

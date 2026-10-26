@@ -40,7 +40,7 @@ export interface InstallProbe {
  * Where the install has got to, as the host reports it and the tools read it.
  *
  * Declared here rather than in the host because both sides depend on it and
- * neither owns the other: the Durable Object runs the job, and `bash` refuses
+ * neither owns the other: the Durable Object runs the job, and the shell tool refuses
  * to run against a tree that is still being built. A shape they agreed on
  * informally would drift, and the drift would show up as a shell command running
  * halfway through an `npm ci`.

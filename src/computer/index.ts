@@ -11,7 +11,7 @@ import { grepTools } from "./tools-grep.js";
 
 /**
  * `@dynamicagents/plugins/computer` — an agent's tools over a `/sandbox`
- * container: `bash`, `grep` and `edit`, and `computerWorkspace`, the agent's own
+ * container: `exec`, `grep` and `edit`, and `computerWorkspace`, the agent's own
  * `this.workspace`, which Think's `read`, `write`, `delete`, `find` and `list`
  * go through.
  *
@@ -21,7 +21,7 @@ import { grepTools } from "./tools-grep.js";
  * backend.
  *
  * The agent's own workspace has to be the sandbox's — `computerWorkspace` — or
- * Think's `read` and `write` would work on a different tree from `bash`. The
+ * Think's `read` and `write` would work on a different tree from `exec`. The
  * plugin refuses to start otherwise; see `./proxy.ts`. `paths.ts` owns what a
  * path may be and what walks drop.
  */
@@ -32,7 +32,7 @@ import { grepTools } from "./tools-grep.js";
  * exports must not move when the files behind it do.
  */
 export { isGitInternal, WALK_SKIPS } from "./paths.js";
-export { packBlocks, renderGrepMatches, renderResult } from "./render.js";
+export { packBlocks, renderGrepMatches } from "./render.js";
 export {
   execGate,
   needsDependencies,
@@ -79,10 +79,14 @@ export interface ComputerToolsConfig {
    * characters far better than they track UTF-8 bytes. So the name moved to meet
    * the implementation rather than the other way round.
    *
+   * `exec` is the exception, and spends this as **bytes**: the ceiling there is
+   * Computer's own tool's, which takes no character form. The two coincide
+   * until the output is not ASCII, where the model is shown a little less than
+   * this asked for.
    */
   maxOutputChars?: number;
   /**
-   * How long `bash` waits for a running dependency install before giving the
+   * How long `exec` waits for a running dependency install before giving the
    * turn back. Defaults to 90 seconds.
    *
    * Bounded rather than open-ended because the wait happens inside a turn, and
@@ -97,8 +101,8 @@ export interface ComputerToolsConfig {
    *
    * ## Put no secret here
    *
-   * *Every* command gets this environment, and `bash`'s command is written by
-   * the model: `bash("printenv")` prints all of it, and so does a
+   * *Every* command gets this environment, and `exec`'s command is written by
+   * the model: `exec("printenv")` prints all of it, and so does a
    * `postinstall` script in a repository the agent was asked to clone, which
    * nobody vetted.
    *
@@ -139,18 +143,35 @@ export function buildComputerTools(
   };
 }
 
-/** What the model is told about the container, once per turn. */
-const CONTEXT = [
-  "You have a Linux container with a shell, a package manager and network access:",
-  "- `bash` runs any shell command — builds, tests, installs, git.",
-  "- `read` / `write` / `edit` / `delete` work on files; `edit` replaces an exact unique string and is the right tool for a small change.",
-  "- `grep` searches file contents; `list` lists a directory; `find` finds files by glob.",
-  "Search with `grep` and `find` rather than running them through `bash`: they come back with line numbers and a bounded result instead of a wall of text.",
-  "Command output is truncated from the middle when large, so run targeted commands and read specific files rather than printing everything.",
-  "The checkout is the container's own disk, and it is kept between tasks: a stopped container starts again from it, so it may already contain work from an earlier task — check before assuming it is empty.",
-  "`node_modules` is on that disk beside the checkout and is kept with it. The file tools leave it out — use `bash` there.",
-  "`.git` is off limits to these tools, and searches and recursive listings skip it. It is git's internal state — reading it tells you less than the repository tools do, and writing it corrupts the checkout. Repository work goes through the repo tools (`repo_status`, `repo_diff`, `repo_commit`, `repo_push`); if a task needs git state you cannot get that way, say so in your result rather than reaching into `.git` yourself."
-].join("\n");
+/**
+ * What the model is told about the container, once per turn.
+ *
+ * A function of the config rather than a constant, because two of the
+ * guarantees here are the configured shell's: without one, a pipeline reports
+ * its last stage and a promise of first-failure reporting would be false.
+ */
+function contextFor(config: ComputerToolsConfig): string {
+  return [
+    "You have a Linux container with a shell, a package manager and network access:",
+    "- `exec` runs any shell command — builds, tests, installs, git.",
+    "- `read` / `write` / `edit` / `delete` work on files; `edit` replaces an exact unique string and is the right tool for a small change.",
+    "- `grep` searches file contents; `ls` lists a directory; `find` finds files by glob.",
+    "Search with `grep` and `find` rather than running them through `exec`: they come back with line numbers and a bounded result instead of a wall of text.",
+    "A command's output is cut to its last lines when it is large, so an error printed early in a long run is gone from what you read: run targeted commands, and read specific files rather than printing everything.",
+    // Two of these are the configured shell's, not this plugin's: `-o pipefail`
+    // is what makes a pipeline report its first failing stage, and without a
+    // shell the wrapper that would carry it does not exist. Promising it anyway
+    // is the failure `./shell.ts` documents at length — a model that cannot
+    // trust a piped exit code re-runs the whole gate to get one.
+    config.shell
+      ? "Do not pipe into `head` or `tail` to shorten output: it is already cut, and piping costs you the end you wanted. A pipeline reports its first failing stage, so a piped command reports its real failure — but `cmd | head` may report 141 when `head` closes the pipe early, which is not a failure of `cmd`."
+      : "Do not pipe into `head` or `tail` to shorten output: it is already cut, and piping costs you the end you wanted. A pipeline reports only its **last** stage, so `npm run check | cat` reports the `cat` and says nothing about the check: read the exit code of the command you care about rather than the pipe's.",
+    "The checkout is the container's own disk, and it is kept between tasks: a stopped container starts again from it, so it may already contain work from an earlier task — check before assuming it is empty.",
+    "`/workspace` holds one directory per checkout, plus directories of your own that are not part of any repository: `attachments/` keeps media taken out of the conversation, `fetched/` keeps fetched pages, `.agents/` keeps projected skills. A message that says a file was preserved at one of those paths means you can read it back. Searches from `/workspace` skip them; repository work happens inside a checkout.",
+    "`node_modules` is on that disk beside the checkout and is kept with it. The file tools leave it out — use `exec` there.",
+    "`.git` is off limits to these tools, and searches and recursive listings skip it. It is git's internal state — reading it tells you less than the repository tools do, and writing it corrupts the checkout. Repository work goes through the repo tools (`repo_status`, `repo_diff`, `repo_commit`, `repo_push`); if a task needs git state you cannot get that way, say so in your result rather than reaching into `.git` yourself."
+  ].join("\n");
+}
 
 /**
  * The container plugin over a `/sandbox` object. Its tools reach the sandbox
@@ -168,7 +189,7 @@ export function computer(config: ComputerToolsConfig): AgentPlugin {
       const route = workspaceRoute(ctx.workspace());
       if (!route)
         throw new PluginSetupError(
-          `plugin "computer" runs \`bash\` in a container, but ${ctx.agentName}'s ` +
+          `plugin "computer" runs \`exec\` in a container, but ${ctx.agentName}'s ` +
             "workspace is not that container's, so Think's `read` and `write` " +
             "would work on a different tree. Set it on the agent class: " +
             "`override workspace = computerWorkspace(config, () => this.pluginContext().runtime())`."
@@ -188,6 +209,6 @@ export function computer(config: ComputerToolsConfig): AgentPlugin {
       );
     },
 
-    context: [{ provider: { get: async () => CONTEXT } }]
+    context: [{ provider: { get: async () => contextFor(config) } }]
   });
 }

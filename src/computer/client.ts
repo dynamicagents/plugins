@@ -27,8 +27,11 @@ export interface FoundEntry {
 }
 
 export interface StatResult {
+  name: string;
   size: number;
   mtime: number;
+  /** The file's Linux mode, as the container reports it. */
+  mode: number;
   isFile: boolean;
   isDirectory: boolean;
   isSymbolicLink: boolean;
@@ -40,6 +43,7 @@ export interface DirEntry {
   mtime?: number;
   isFile: boolean;
   isDirectory: boolean;
+  isSymbolicLink?: boolean;
 }
 
 export interface ComputerFs {
@@ -60,7 +64,11 @@ export interface ComputerFs {
     path: string,
     options?: GrepOptions
   ): Promise<GrepMatch[]>;
-  writeFile(path: string, content: string): Promise<void>;
+  /**
+   * Bytes as well as text: Think writes evicted media through this, and the
+   * `read` tool hands the model back an image it can look at again.
+   */
+  writeFile(path: string, content: string | Uint8Array): Promise<void>;
   mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
   rm(
     path: string,

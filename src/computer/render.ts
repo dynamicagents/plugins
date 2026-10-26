@@ -1,5 +1,4 @@
-import type { CommandResult, GrepMatch } from "./client.js";
-import { truncateOutput } from "@dynamicagents/core";
+import type { GrepMatch } from "./client.js";
 
 /**
  * Turning a result into the text a model reads.
@@ -36,12 +35,12 @@ function capLine(text: string): string {
 /**
  * Emit whole items until the byte budget is spent, and report exactly how many.
  *
- * {@link truncateOutput} is wrong for every list this module produces, and is
+ * Core's `truncateOutput` is wrong for every list this module produces, and is
  * deliberately not used by them. It keeps both ends and drops the middle, which is
- * right for a build log — first error, final summary — and destructive for a match
- * list or a directory listing, where the middle is a whole file's worth of hits or a
- * whole subtree that silently vanishes. So the budget is spent item by item, in
- * order, and the caller learns where it stopped.
+ * right for a build log and destructive for a match list or a directory listing,
+ * where the middle is a whole file's worth of hits or a whole subtree that silently
+ * vanishes. So the budget is spent item by item, in order, and the caller learns
+ * where it stopped.
  *
  * `shown` is the load-bearing return value: it is what makes the next page's offset
  * exact rather than a guess. A block is committed whole or not at all, because half
@@ -121,50 +120,4 @@ export function renderGrepMatches(
   const { body, shown } = packBlocks(blocks, maxChars);
   // Only a line that actually made it out is worth explaining.
   return { body, shown, capped: hasLongLine.slice(0, shown).includes(true) };
-}
-
-/**
- * Render a completed command the way a terminal would, minus the noise.
- *
- * ## Every command ends with its verdict, including the successful ones
- *
- * Printing the exit code only when it is non-zero looks like saving noise and is
- * not: a model with no verdict appends `; echo "EXIT_CODE=$?"` itself, and
- * reaches for `${PIPESTATUS[0]}` to read a piped one — which dash does not
- * implement, so the whole line fails after the command it wrapped has run.
- *
- * ## `status` is not the exit code
- *
- * A `status` is `completed | failed | cancelled`. Dropping it
- * renders a command killed at the `timeoutMs` ceiling exactly like one that ran
- * to completion and failed — "your test suite was killed at ten minutes" and
- * "your test suite has a failing test", which want opposite responses. Anything
- * other than `completed` is stated.
- *
- * ## One budget, applied once
- *
- * Truncating per stream makes `maxOutputChars` mean "up to twice this". The bound
- * is on the rendered transcript, which is what reaches the context window.
- */
-export function renderResult(
-  result: {
-    exitCode: number;
-    stdout: string;
-    stderr: string;
-    status?: CommandResult["status"];
-  },
-  maxChars: number
-): string {
-  const parts: string[] = [];
-  if (result.stdout) parts.push(result.stdout);
-  // Empty whenever the host configured a `shell`, which merges the streams at the
-  // source so the transcript keeps its causal order. Kept for hosts that did not:
-  // two labelled blocks beat silently dropping half the output.
-  if (result.stderr) parts.push(`--- stderr ---\n${result.stderr}`);
-
-  const body = truncateOutput(parts.join("\n"), maxChars);
-  const state =
-    result.status && result.status !== "completed" ? ` (${result.status})` : "";
-  const verdict = `--- exit ${result.exitCode}${state} ---`;
-  return body ? `${body}\n${verdict}` : `(no output)\n${verdict}`;
 }

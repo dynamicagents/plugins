@@ -33,12 +33,12 @@ describe("guardPath", () => {
    * The tree is on the container's disk, so the workspace these tools read has
    * nothing there. Unlike `.git`, `bash` is the right route.
    */
-  it("routes a node_modules path to bash", () => {
+  it("routes a node_modules path to exec", () => {
     const note = guardPath(
       "/workspace/repo/node_modules/zod/index.js",
       "read"
     )!;
-    expect(note).toContain("bash");
+    expect(note).toContain("exec");
     expect(
       guardPath("/workspace/repo/src/node_modules_old/a.ts", "read")
     ).toBeUndefined();
@@ -53,7 +53,7 @@ describe("guardPath", () => {
   it("redirects a .git path to the repo tools, and never to bash", () => {
     const note = guardPath("/workspace/repo/.git/config", "write")!;
     expect(note).toContain("repo_status");
-    expect(note).not.toContain("bash");
+    expect(note).not.toContain("exec");
   });
 
   /**

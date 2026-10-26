@@ -11,6 +11,8 @@
  * what lets {@link guardPath} run before a tool opens the workspace at all.
  */
 
+import { normalizeAbsolute } from "../sandbox/header.js";
+
 /** Whether any segment of `path` is exactly `segment`. */
 function hasSegment(path: string, segment: string): boolean {
   return path.split("/").includes(segment);
@@ -30,17 +32,65 @@ export function isGitInternal(path: string): boolean {
 }
 
 /**
- * What every walk steps over, as directory names. Both the workspace's `glob`
+ * What every walk steps over, as directory names. Both the workspace's `find`
  * and the `grep` tool hand these on as `**\/<name>` exclusions, which prunes
  * them: no directory named here is descended into, so none costs a read.
  */
 export const WALK_SKIPS = [".git", "node_modules"] as const;
 
+/**
+ * The directories Think writes on its own account, directly under the
+ * workspace root: evicted media under `attachments/evicted/`, a fetch tool's
+ * spilled responses under `fetched/`, projected skills under `.agents/skills`.
+ * Think builds those paths from a root of its own and offers no way to move
+ * them, so a walk of the root reaches them.
+ *
+ * Pruned from a walk of the root and from nowhere else, which is what
+ * {@link walkSkips} spells: these are *names at the root*, not names anywhere,
+ * so a checkout with its own `attachments/` is still searched. A direct read is
+ * not refused either, because an eviction marker hands the model one of these
+ * paths and expects it to be readable.
+ */
+export const AGENT_OWNED = ["attachments", "fetched", ".agents"] as const;
+
+/**
+ * The exclusions one walk hands on, for a walk rooted at `directory` inside a
+ * workspace whose root is `root`.
+ *
+ * Every pattern is matched against the walked directory's *relative* path, so a
+ * root-anchored absolute pattern would match nothing. {@link AGENT_OWNED} is
+ * therefore relative to `directory` and only added when the walk starts at the
+ * root; {@link WALK_SKIPS} is a name at any depth.
+ */
+export function walkSkips(directory: string, root: string): string[] {
+  const anywhere = WALK_SKIPS.map((segment) => `**/${segment}`);
+  return atRoot(directory, root)
+    ? [...anywhere, ...AGENT_OWNED.map((name) => `${name}/**`)]
+    : anywhere;
+}
+
+/**
+ * Whether a walk starts at the workspace root, by what the two paths mean
+ * rather than by how they are spelled.
+ *
+ * The directory is the model's to spell, and `/workspace/`, `/workspace/.` and
+ * `/workspace/repo/..` are all spellings it produces. Every one of them is this
+ * root to the sandbox, which normalises before it confines, so a comparison
+ * here that read them literally would answer no to a walk that then went ahead
+ * from the root and came back with the agent's own directories in it. The
+ * normaliser is {@link file://../sandbox/header.ts normalizeAbsolute}, shared
+ * with that confinement so the two cannot disagree.
+ */
+function atRoot(directory: string, root: string): boolean {
+  const resolved = normalizeAbsolute(directory);
+  return resolved !== undefined && resolved === normalizeAbsolute(root);
+}
+
 /** The sentence a `node_modules` path gets. */
 function dependencyTreeNote(path: string, verb: string): string {
   return (
     `${path} is inside node_modules, which ${verb} leaves out: it is installed ` +
-    `output, not source. Use bash there — \`cat\`, \`ls\`, \`rg\`.`
+    `output, not source. Use exec there — \`cat\`, \`ls\`, \`rg\`.`
   );
 }
 
@@ -50,9 +100,9 @@ function dependencyTreeNote(path: string, verb: string): string {
  * Names a route deliberately: a refusal with no destination is worse than no
  * refusal, because the model retries and then works around it.
  *
- * What it must never name is `bash`. That hands back the exact capability
+ * What it must never name is `exec`. That hands back the exact capability
  * being withheld, in the one place the model is already looking for a way around
- * it, with the tool's own authority behind it. `bash` is unguarded because a
+ * it, with the tool's own authority behind it. `exec` is unguarded because a
  * shell takes an opaque command string and pattern-matching git out of one is
  * neither reliable nor this guard's job — a fact about the implementation, not a
  * route to advertise.
@@ -82,7 +132,7 @@ function gitInternalNote(path: string, verb: string): string {
  * actually happens is a model reaching into `.git/HEAD` to fix a merge.
  *
  * It is not containment, and this is the only place worth saying so. An agent
- * that can write files here almost always holds `bash` too, which reads and
+ * that can write files here almost always holds `exec` too, which reads and
  * writes `.git` directly.
  *
  * Symlinks are not resolved, for the same reason: a tracked

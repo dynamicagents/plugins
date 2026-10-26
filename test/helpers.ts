@@ -1,4 +1,4 @@
-import type { WorkspaceLike } from "@cloudflare/think";
+import type { ThinkWorkspace } from "@cloudflare/think";
 import type { PluginContext } from "@dynamicagents/core";
 import type { Tool, ToolSet } from "ai";
 
@@ -80,7 +80,7 @@ export function testPluginContext(
     storage: {} as DurableObjectStorage,
     agentName: "test-agent",
     callerKey: () => "test-caller",
-    workspace: () => ({}) as WorkspaceLike,
+    workspace: () => ({}) as ThinkWorkspace,
     runtime: () => undefined,
     ...overrides
   };
