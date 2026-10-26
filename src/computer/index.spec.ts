@@ -1544,7 +1544,10 @@ describe("cancellation before the command runs", () => {
 
   it("kills a process whose handle arrives only after the call gave up", async () => {
     let start: ((handle: unknown) => void) | undefined;
-    let disposed = false;
+    // Counted, not flagged: two paths reach the client here — the launch that
+    // was abandoned and the late handle's own cleanup — and a host whose
+    // disposal frees something must not see both.
+    let disposals = 0;
     const client = {
       runtime: {
         exec: () =>
@@ -1553,7 +1556,7 @@ describe("cancellation before the command runs", () => {
           })
       },
       [Symbol.dispose]: () => {
-        disposed = true;
+        disposals += 1;
       }
     } as unknown as ComputerClient;
     const tools = buildComputerTools(async () => client, config);
@@ -1586,6 +1589,6 @@ describe("cancellation before the command runs", () => {
     expect(await pending).not.toHaveProperty("exitCode");
     await tick();
     expect(kills).toEqual(["SIGTERM"]);
-    expect(disposed).toBe(true);
+    expect(disposals).toBe(1);
   });
 });

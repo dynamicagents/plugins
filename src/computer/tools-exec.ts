@@ -2,7 +2,7 @@ import { createExecTool } from "@cloudflare/computer/tools/ai-sdk";
 import { withAbort } from "@dynamicagents/core";
 import { tool } from "ai";
 import type { ToolSet } from "ai";
-import type { CommandHandle, ComputerClient } from "./client.js";
+import type { CommandHandle } from "./client.js";
 import type { ComputerContext } from "./context.js";
 import type { ExecGate } from "./gate.js";
 import { withShellTranscript } from "./shell.js";
@@ -98,6 +98,19 @@ export function execTools(ctx: ComputerContext): ToolSet {
             // Abandoning the wait is not abandoning the workspace: one that
             // arrives after this call gave up has nobody left to dispose it.
             const client = await acquire(signal, workspace());
+            /**
+             * The client, let go exactly once however this call ends.
+             *
+             * Two paths can reach it when a cancel lands on the launch: this
+             * one, and the late handle's own {@link killLate}. A host whose
+             * disposal frees something must not see both.
+             */
+            let releasedClient = false;
+            const releaseClient = () => {
+              if (releasedClient) return;
+              releasedClient = true;
+              client[Symbol.dispose]();
+            };
             try {
               // Read once per command, and inside the try: this is the host's
               // thunk, so it may throw, and a throw out here would leave the
@@ -121,11 +134,11 @@ export function execTools(ctx: ComputerContext): ToolSet {
                 ),
                 // Disposing a late handle only detaches this side, so the
                 // command is killed first and the workspace released after.
-                (late) => void killLate(late, client)
+                (late) => void killLate(late, releaseClient)
               );
-              return held(handle, client, command);
+              return held(handle, releaseClient, command);
             } catch (err) {
-              client[Symbol.dispose]();
+              releaseClient();
               throw err;
             }
           },
@@ -246,11 +259,10 @@ export function execTools(ctx: ComputerContext): ToolSet {
  * released on arrival instead: disposed by default, or handed to `release` where
  * disposing alone would leave work running.
  */
-function acquire<R>(
+function acquire<R extends Disposable>(
   signal: AbortSignal | undefined,
   opening: Promise<R>,
-  release: (resource: R) => unknown = (resource) =>
-    (resource as Disposable)[Symbol.dispose]()
+  release: (resource: R) => unknown = (resource) => resource[Symbol.dispose]()
 ): Promise<R> {
   return withAbort(signal, opening, () => {
     void opening.then(release).catch(() => {});
@@ -264,7 +276,7 @@ function acquire<R>(
  */
 async function killLate(
   handle: CommandHandle,
-  client: ComputerClient
+  releaseClient: () => void
 ): Promise<void> {
   try {
     await handle.kill("SIGTERM");
@@ -272,7 +284,7 @@ async function killLate(
     try {
       handle[Symbol.dispose]();
     } finally {
-      client[Symbol.dispose]();
+      releaseClient();
     }
   }
 }
@@ -280,7 +292,7 @@ async function killLate(
 /**
  * The handle, holding its workspace open until the command settles.
  *
- * Nothing upstream disposes either the handle or the client it came from, so
+ * Nothing upstream disposes either the handle or the workspace it came from, so
  * both are let go here: when `result()` has answered or the handle is disposed,
  * and never on the kill in between. A `/sandbox` handle and client hold nothing
  * and their disposal is a no-op, but the types a host implements say
@@ -293,7 +305,7 @@ async function killLate(
  */
 function held(
   handle: CommandHandle,
-  client: ComputerClient,
+  releaseClient: () => void,
   command: string
 ): CommandHandle {
   let done = false;
@@ -308,7 +320,7 @@ function held(
     try {
       handle[Symbol.dispose]();
     } finally {
-      client[Symbol.dispose]();
+      releaseClient();
     }
   };
   return {
