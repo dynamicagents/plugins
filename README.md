@@ -38,7 +38,7 @@ export class Coder extends StepAgent<Env> {
 
   override getPlugins() {
     return [
-      browser({ binding: this.env.BROWSER }),
+      browser({ binding: this.env.BROWSER, loader: this.env.LOADER }),
       computer({ shell: "bash" }),
       repo(repoConfig(this.env))
     ];
@@ -66,7 +66,7 @@ plugin to the tools an install names.
 
 | Subpath                            | What it adds                                                                                              | Needs                                              |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| [`/browser`](src/browser/)         | Read web pages via Browser Rendering Quick Actions                                                        | `BROWSER` (paid plan)                              |
+| [`/browser`](src/browser/)         | Drive a persistent browser by writing code, over Browser Run                                              | `BROWSER` (paid plan), `LOADER`                    |
 | [`/claude-code`](src/claude-code/) | Sub-agents whose model is a Claude Code session in a sandbox                                              | one or more `claude setup-token` credentials       |
 | [`/computer`](src/computer/)       | An agent's tools over a sandbox — `exec`, `grep`, `edit` — and the workspace Think's file tools use       | a `/sandbox` object                                |
 | [`/repo-github`](src/repo-github/) | Clone, commit, push a branch, open a pull request on GitHub — over any container                          | `GITHUB_TOKEN`                                     |

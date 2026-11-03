@@ -65,7 +65,7 @@ jobs:
           # `.git/config` outlives the step that needed it.
           persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           # One source of truth with local dev; `engines` requires >=24.
           node-version-file: .nvmrc
