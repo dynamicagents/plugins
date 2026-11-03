@@ -57,7 +57,11 @@ export interface GitHubSandboxEgressOptions {
   tokenBinding: string;
   /** Absent: any repository and any work branch the token reaches. */
   push?: GitPushPolicy;
-  /** Intercept `api.github.com` as well, so `gh` works as the deployment's account. */
+  /**
+   * Intercept `api.github.com` as well, so `gh` works as the deployment's
+   * account. Nothing here reads those requests, so GitHub alone bounds them:
+   * `./README.md`, under "Protect the repositories", says how to set that up.
+   */
   api?: boolean;
 }
 
@@ -119,10 +123,18 @@ async function githubEgress(
   }
 
   const policy = options.push;
-  const git =
-    new URL(call.request.url).hostname === GIT_HOST
-      ? gitTarget(call.target.pathname)
-      : undefined;
+  const onGitHost = new URL(call.request.url).hostname === GIT_HOST;
+  const git = onGitHost ? gitTarget(call.target.pathname) : undefined;
+  // GitHub serves spellings of a git path that `gitTarget` does not read, and a
+  // push it cannot read is one it cannot hold to the rules below, so what it
+  // does not recognise never gets the token. Git LFS is on such a path: a
+  // sandbox that needs it has to have it recognised first.
+  if (onGitHost && !git) {
+    return githubError(
+      `this sandbox may use ${GIT_HOST} as the deployment's account for git alone, and ${call.target.pathname} is not a path git uses`,
+      403
+    );
+  }
   let body: ReadableStream | undefined;
   if (git) {
     if (
