@@ -31,10 +31,15 @@ changes a decision. Not what changed, not when, not what a previous version said
   spec counts. Every one of these was wrong within a release. Name the thing, not
   how many there are.
 - **Cross-file references name a real path**, and a path in a comment is
-  checkable — so check it before you write it. Nothing in `check` verifies these
-  for you here. A path into another repo of the train is not checkable from a
-  consumer's checkout: name the module in prose instead of writing a path that
-  resolves only in a full workspace.
+  checkable — so `check` checks it, through `npm run verify:references`. That is
+  core's `da-verify-references`, and core is where what it reads is explained;
+  this package scans what `references.config.mjs` says and allows what it lists,
+  each entry with its reason. Both classes are covered now, a relative reference
+  and one from the repository root, so a path in a README example of a
+  consumer's layout needs an entry rather than passing unseen. A path into
+  another repo of the train is not checkable from a consumer's checkout: name
+  the module in prose instead of writing a path that resolves only in a full
+  workspace.
 
 If a comment is longer than the code it explains, ask what decision it is
 protecting. Usually one paragraph of that is doing the work.
@@ -71,6 +76,13 @@ run that `prepare` — drop either and every core subpath resolves to a missing 
 The release PR puts the devDependency back on a range and drops the `allowScripts`
 entry, and Release refuses to publish while any dependency still names a git ref. The
 workspace AGENTS.md has the why.
+
+**`check` runs a bin from core, so taking the ref off needs a core that carries it.**
+`verify:references` is `da-verify-references`, published by core, and the ref is how it
+got here before a release. So the release PR that puts the devDependency back on a
+range needs a published core with that bin in it, which is any core release once it is
+on core's `main`. Nothing has to be scheduled for that; until then this package does
+not release.
 
 `verify:peer-ranges` still holds that range honest: it reads the **installed** copy,
 and a git-installed core reports its real version. What it cannot see is that core's

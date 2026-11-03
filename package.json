@@ -75,7 +75,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:exports": "node scripts/verify-exports.mjs",
-    "verify:references": "node scripts/verify-references.mjs",
+    "verify:references": "da-verify-references",
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
     "probe:claude-code": "npm run build && node scripts/probe-claude-code.mjs",
     "probe:github-mcp": "node scripts/probe-github-mcp.mjs",
@@ -102,7 +102,7 @@
     "@cloudflare/sandbox": "^1.0.1",
     "@cloudflare/think": "^0.21.0",
     "@cloudflare/vitest-plugin": "^1.4.4",
-    "@dynamicagents/core": "^0.17.1",
+    "@dynamicagents/core": "git+https://github.com/dynamicagents/core.git#main",
     "@types/node": "^26.5.1",
     "agents": "^0.30.1",
     "ai": "^7.0.101",
@@ -129,6 +129,7 @@
     "sharp": false,
     "workerd": false,
     "core-js-pure": false,
-    "@mongodb-js/zstd": false
+    "@mongodb-js/zstd": false,
+    "github:dynamicagents/core": true
   }
 }
