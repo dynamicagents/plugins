@@ -5,81 +5,137 @@ import {
   PluginSetupError
 } from "@dynamicagents/core";
 import { browser } from "./index.js";
-import type { QuickActionBinding } from "agents/browser";
+import type { BrowserConfig } from "./index.js";
+import type { BrowserBinding } from "agents/browser";
+import type { BrowserToolOutput } from "agents/browser/ai-sdk";
 import { testPluginContext } from "../../test/helpers.js";
 
 /**
- * The tools themselves are the Agents SDK's, and testing them here would be
- * testing someone else's package. What is this plugin's own is the *wiring*:
- * that the binding is closed over rather than model input, and that a missing
- * binding fails at startup instead of inside a request.
+ * The tool itself is the Agents SDK's, and testing it here would be testing
+ * someone else's package. What is this plugin's own is the *wiring*: that
+ * neither binding is model input, that a missing one fails at startup rather
+ * than inside a request, and the character ceiling this plugin puts over the
+ * SDK's own.
  */
 
-/** Enough of the binding to build tools against; nothing here ever calls it. */
-const fakeBinding = {} as QuickActionBinding;
+/** Enough of each binding to build a tool against; nothing here ever calls one. */
+const fakeConfig: BrowserConfig = {
+  binding: {} as BrowserBinding,
+  loader: {} as WorkerLoader
+};
 
-const tools = (plugin: ReturnType<typeof browser>) =>
-  plugin.tools!(testPluginContext());
+const tools = (config: BrowserConfig = fakeConfig) =>
+  browser(config).tools!(testPluginContext());
+
+/** The one tool, as the model is offered it. */
+const theTool = (config: BrowserConfig = fakeConfig) => tools(config).browser;
+
+/** A completed run carrying `result`, as the SDK hands it to `toModelOutput`. */
+const completed = (result: unknown, notice?: string) =>
+  ({
+    status: "completed",
+    executionId: "execution-1",
+    result,
+    ...(notice === undefined ? {} : { notice })
+  }) as BrowserToolOutput;
+
+/** What the model is shown for `output`, as a string whatever its shape. */
+const shown = (config: BrowserConfig, output: BrowserToolOutput): string => {
+  const rendered = theTool(config).toModelOutput!({
+    output
+  } as never) as unknown as
+    { type: "text"; value: string } | { type: "json"; value: unknown };
+  return rendered.type === "text"
+    ? rendered.value
+    : JSON.stringify(rendered.value);
+};
 
 describe("browser()", () => {
-  it("exposes the text-returning set and keeps raw HTML opt-in", () => {
-    // `content` is large and rarely what a model wants, so it is not in the
-    // default set — a page of raw HTML can cost a small model its whole context.
-    const names = Object.keys(tools(browser({ binding: fakeBinding })));
-
-    expect(names.sort()).toEqual([
-      "browser_extract",
-      "browser_links",
-      "browser_markdown",
-      "browser_scrape"
-    ]);
+  it("offers one tool, which is the whole browser", () => {
+    // Four declarative tools became one general one when Quick Actions were
+    // deprecated: the model writes the code now, so there is no subset to pick
+    // and no `actions` option left to pick it with.
+    expect(Object.keys(tools())).toEqual(["browser"]);
   });
 
-  it("narrows to the actions the host asked for", () => {
-    const plugin = browser({ binding: fakeBinding, actions: ["markdown"] });
-    expect(Object.keys(tools(plugin))).toEqual(["browser_markdown"]);
+  it("takes neither binding from the model — only from config", () => {
+    // The whole reason config-at-instantiation exists. The input schema must
+    // describe the code to run and nothing else; one naming the binding, the
+    // loader or an account would be one the model could fill in.
+    const schema = theTool().inputSchema as unknown as {
+      "~standard": { jsonSchema: { input: (options: unknown) => unknown } };
+    };
+    const json = schema["~standard"].jsonSchema.input({}) as {
+      properties: Record<string, unknown>;
+      additionalProperties: boolean;
+    };
+
+    expect(Object.keys(json.properties)).toEqual(["code"]);
+    expect(json.additionalProperties).toBe(false);
   });
 
-  it("takes no binding from the model — only from config", () => {
-    // The whole reason config-at-instantiation exists. Every tool's input schema
-    // must describe a page and nothing else; a schema naming a binding, an
-    // account, or a header would be one the model could fill in.
-    for (const [name, tool] of Object.entries(
-      tools(browser({ binding: fakeBinding }))
-    )) {
-      const keys = Object.keys(
-        (tool.inputSchema as { shape?: Record<string, unknown> }).shape ?? {}
-      );
-      expect(keys, `${name} input`).not.toContain("browser");
-      expect(keys, `${name} input`).not.toContain("binding");
-    }
+  it("holds a result to the host's ceiling", () => {
+    // The SDK truncates first, at about 24,000 characters, so this asserts the
+    // tighter host ceiling bites below that. It is the only thing this plugin
+    // adds to the rendering and the only part a host can set.
+    const value = shown(
+      { ...fakeConfig, maxChars: 500 },
+      completed("x".repeat(50_000))
+    );
+
+    expect(value.length).toBeLessThanOrEqual(500);
   });
 
-  it("tells the model about its tools in a block the model cannot rewrite", async () => {
+  it("keeps the browser's notice out of the truncated middle", () => {
+    // The notice is how the model learns its browser restarted or that its tab
+    // was closed by someone else. Losing it to a middle-out cut leaves the
+    // model believing the page it navigated to is still there.
+    const notice = "The browser restarted, so the page you opened is gone.";
+    const value = shown(
+      { ...fakeConfig, maxChars: 500 },
+      completed("x".repeat(50_000), notice)
+    );
+
+    expect(value).toContain(notice);
+    expect(value.length).toBeLessThanOrEqual(500);
+  });
+
+  it("leaves a result under the ceiling alone", () => {
+    // Truncating what fits would cost the structured shape the SDK preserved,
+    // for nothing. Under the ceiling this plugin must be invisible.
+    const value = shown({ ...fakeConfig, maxChars: 20_000 }, completed("tiny"));
+
+    expect(value).toContain("tiny");
+    expect(value).not.toContain("omitted from the middle");
+  });
+
+  it("tells the model about its tool in a block the model cannot rewrite", async () => {
     // A block with no provider is wired as writable, and `set_context` could
     // then overwrite the plugin's own description of itself.
-    const [block] = browser({ binding: fakeBinding }).context!;
+    const [block] = browser(fakeConfig).context!;
     expect(block.provider).toBeDefined();
     expect(block.provider && "set" in block.provider).toBe(false);
-    expect(await block.provider!.get()).toContain("browser_markdown");
+    expect(await block.provider!.get()).toContain("`browser` tool");
   });
 
-  it("fails at startup when the host never declared BROWSER", () => {
+  it("fails at startup when the host never declared a binding", () => {
     // The point of `requires`. Without it the first tool call fails instead —
     // inside a request a user is waiting on, several layers from the cause.
+    // Both bindings, because the loader is as load-bearing as the browser now.
+    expect(() => assemblePlugins([browser(fakeConfig)], {})).toThrow(
+      PluginSetupError
+    );
+    expect(() => assemblePlugins([browser(fakeConfig)], {})).toThrow(
+      /BROWSER.*browser/s
+    );
     expect(() =>
-      assemblePlugins([browser({ binding: fakeBinding })], {})
-    ).toThrow(PluginSetupError);
-    expect(() =>
-      assemblePlugins([browser({ binding: fakeBinding })], {})
-    ).toThrow(/BROWSER.*browser/s);
+      assemblePlugins([browser(fakeConfig)], { BROWSER: {} })
+    ).toThrow(/LOADER.*browser/s);
   });
 
   it("registers against the contract version it compiled against", () => {
     // Never a literal — the point is that it moves with the core the plugin was
     // built against, so a version train that leaves one repo behind says so.
-    expect(browser({ binding: fakeBinding }).contractVersion).toBe(
-      PLUGIN_CONTRACT_VERSION
-    );
+    expect(browser(fakeConfig).contractVersion).toBe(PLUGIN_CONTRACT_VERSION);
   });
 });

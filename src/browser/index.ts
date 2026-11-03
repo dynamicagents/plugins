@@ -1,34 +1,50 @@
-import { definePlugin } from "@dynamicagents/core";
+import { definePlugin, truncateOutput } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
-import { createQuickActionTools } from "agents/browser/ai";
-import type { QuickActionToolName } from "agents/browser/ai";
-import type {
-  QuickActionBinding,
-  QuickActionCommonOptions
+import {
+  Browser,
+  DurableBrowserSessionStore,
+  browserRun
 } from "agents/browser";
+import type { BrowserBinding, BrowserRunOptions } from "agents/browser";
+import { browserTool } from "agents/browser/ai-sdk";
+import type { BrowserTool } from "agents/browser/ai-sdk";
 
 /**
- * `@dynamicagents/plugins/browser` — read the web, via Cloudflare Browser Rendering
- * Quick Actions.
+ * `@dynamicagents/plugins/browser` — drive a real browser, via Cloudflare
+ * Browser Run.
  *
- * Four tools (`browser_markdown`, `browser_extract`, `browser_links`,
- * `browser_scrape`), the same for whichever agent installs the plugin: a parent
- * reads a page to answer a question directly, and a research sub-agent reads a
- * dozen of them.
+ * One tool, `browser`: the model writes JavaScript that drives a persistent
+ * browser over CDP, and that code runs in a Dynamic Worker with no network of
+ * its own. The browser outlives each call, so tabs, cookies and logins carry
+ * over between them, and the model never starts, closes or resets it.
  *
- * The binding is closed over at instantiation, so it is never model input.
+ * The binding and the loader are closed over at instantiation, so neither is
+ * ever model input.
  */
 
-/** How many characters of a page result the model is allowed to see. */
+/** How many characters of a result the model is allowed to see. */
 const DEFAULT_MAX_CHARS = 20_000;
 
+/**
+ * The browser's name in its own store. Two `Browser` objects on one Durable
+ * Object need different names, so this says which one is the plugin's rather
+ * than taking the SDK's default and colliding with a host that also built one.
+ */
+const BROWSER_NAME = "browser";
+
+/**
+ * What the model is told about the domain. Deliberately *not* the `browser.*`
+ * function reference: `browserTool` puts that in the tool's own description and
+ * keeps it in step with the SDK, and a copy here would be a second home for
+ * someone else's text. What is left is what this plugin knows and the SDK
+ * cannot: when reaching for a browser is the right move at all.
+ */
 const CONTEXT = [
-  "You can read web pages directly:",
-  "- `browser_markdown` fetches a page and returns it as Markdown. This is the default — use it first.",
-  "- `browser_extract` pulls structured fields out of a page when you know what you are looking for.",
-  "- `browser_links` lists a page's links, for following a trail.",
-  "- `browser_scrape` returns the text of specific CSS selectors.",
-  "Results are truncated to protect your context window, so prefer a specific page over a search-results page, and extract rather than reading in full when you already know the fields you need."
+  "You can drive a real browser by writing JavaScript, with the `browser` tool. The tool's own description carries the API; what matters in choosing it:",
+  "- The browser is **persistent**. A later call lands on the same page, logged in, with the same cookies. Navigate in one call and read in the next rather than rebuilding state each time.",
+  "- Prefer one call that does several steps over several calls that each do one: every call pays a round trip to the browser, and the page is still there either way.",
+  "- Results are truncated to protect your context window, so return the part of the page you need rather than its whole text or markup.",
+  "- A plain HTTP fetch is cheaper than a browser. Reach for this when a page needs rendering, a session, or interaction."
 ].join("\n");
 
 export interface BrowserConfig {
@@ -36,47 +52,122 @@ export interface BrowserConfig {
    * The `BROWSER` binding. Browser Rendering is a **paid-plan** feature, and
    * `wrangler dev` needs `remote: true` to reach it.
    */
-  binding: QuickActionBinding;
+  binding: BrowserBinding;
   /**
-   * Character ceiling per result. Defaults to 20,000 — well under the SDK's own
-   * 50,000, because a page that fills a small chat model's context window costs
-   * it the conversation it was reading the page for.
+   * The `LOADER` binding, declared as `"worker_loaders": [{ "binding":
+   * "LOADER" }]`. Each call gets a fresh Dynamic Worker to run the model's
+   * code in, with no network access of its own.
+   */
+  loader: WorkerLoader;
+  /**
+   * Character ceiling per result, defaulting to 20,000.
+   *
+   * **This is a second, tighter ceiling, not the only one.** `browserTool`
+   * already bounds what it hands the model, at about 24,000 characters, and it
+   * does it *structurally*: the model gets valid JSON of the original shape
+   * with the largest values cut first and markers where content went. This
+   * ceiling only bites below that, and when it does the shape is lost, because
+   * the SDK's structural truncation is internal and a flat cut is all that is
+   * left. So lower it for a small model that cannot afford 24,000 characters,
+   * and otherwise leave it alone.
    */
   maxChars?: number;
+  /** How long one call may take, in milliseconds. The SDK defaults to 60,000. */
+  timeoutMs?: number;
   /**
-   * Which tools to expose. Defaults to the SDK's text-returning set; `content`
-   * (raw HTML) stays opt-in because it is large and rarely what a model wants.
+   * Browser Run launch options: how long an idle browser lives, hostname
+   * guardrails, session recording, internal hostnames. Fixed when the browser
+   * starts rather than per call, and host-supplied, so the model never sees or
+   * chooses any of it.
    */
-  actions?: QuickActionToolName[];
-  /**
-   * Browser Rendering options merged into every request — cookies, auth headers,
-   * viewport. Host-supplied and never exposed to the model, which only ever
-   * chooses the page and the action-specific fields.
-   */
-  options?: QuickActionCommonOptions;
+  provider?: BrowserRunOptions;
+}
+
+/**
+ * The host's character ceiling, over the SDK's own.
+ *
+ * `toModelOutput` is where the SDK renders a result for the model, and where it
+ * truncates. Wrapping it rather than `execute` keeps the untruncated result
+ * available to anything else reading the tool's output, which is what `execute`
+ * is for.
+ *
+ * The notice is kept whole and outside the cut. It is the sentence saying the
+ * browser restarted or that its tab was closed by someone else, so a model that
+ * loses it to a middle-out truncation goes on believing the page it navigated
+ * to is still there.
+ */
+function bounded(tool: BrowserTool, maxChars: number): BrowserTool {
+  return {
+    ...tool,
+    toModelOutput: ({ output }) => {
+      const rendered = tool.toModelOutput({ output });
+      const text =
+        rendered.type === "text"
+          ? rendered.value
+          : JSON.stringify(rendered.value);
+      if (text === undefined || text.length <= maxChars) return rendered;
+
+      const notice = output.notice === undefined ? "" : `\n\n${output.notice}`;
+      return {
+        type: "text",
+        value:
+          truncateOutput(text, Math.max(0, maxChars - notice.length)) + notice
+      };
+    }
+  };
 }
 
 export function browser(config: BrowserConfig): AgentPlugin {
-  const { binding, maxChars = DEFAULT_MAX_CHARS, actions, options } = config;
+  const {
+    binding,
+    loader,
+    maxChars = DEFAULT_MAX_CHARS,
+    timeoutMs,
+    provider
+  } = config;
 
   return definePlugin({
     name: "browser",
 
-    // Built per call: the SDK returns a fresh ToolSet each time, and a tool
-    // object is not obviously safe to share across two concurrent executions.
-    tools: () =>
-      createQuickActionTools({
-        browser: binding,
-        maxChars,
-        ...(actions ? { actions } : {}),
-        ...(options ? { options } : {})
-      }),
+    // Built per call, as the Quick Action tools were: a tool object is not
+    // obviously safe to share across two concurrent executions, and the
+    // `Browser` is a handle over its store rather than a connection, so
+    // building one per turn costs nothing and reattaches to the same browser.
+    //
+    // **The store is what keeps this out of the host's Lifecycle.** A `Browser`
+    // with no store defaults to one over the host object's storage and requires
+    // `Lifecycle.use()` to install it, which a plugin has no way to ask for:
+    // the contract offers tools, actions, context and `requires` and nothing
+    // else. Passing the store explicitly is the SDK's own answer to that, and
+    // it is why this capability stays whole inside the plugin.
+    //
+    // **No `scope`.** A scope separates callers sharing one browser, and there
+    // is only ever one here: the record lives in the installing object's own
+    // storage, a parent object is keyed by its caller, and a sub-agent runs in
+    // its own facet with storage of its own. Naming a scope would imply an
+    // isolation the store already provides. What a scope would not fix either
+    // way is two parallel tool calls in one turn driving the same tab; that
+    // wants a session lock, which `browserTool` does not expose.
+    tools: (ctx) => ({
+      browser: bounded(
+        browserTool({
+          browser: new Browser({
+            name: BROWSER_NAME,
+            provider: browserRun(binding, provider),
+            store: new DurableBrowserSessionStore(ctx.storage)
+          }),
+          loader,
+          ...(timeoutMs === undefined ? {} : { timeoutMs })
+        }),
+        maxChars
+      )
+    }),
 
     context: [{ provider: { get: async () => CONTEXT } }],
 
-    // A plugin cannot add its own wrangler binding, so declaring it turns a
+    // A plugin cannot add its own wrangler binding, so declaring them turns a
     // missing one into a startup error naming this plugin, rather than a failed
     // tool call inside a request someone is waiting on.
-    requires: { bindings: ["BROWSER"] }
+    requires: { bindings: ["BROWSER", "LOADER"] }
   });
 }
