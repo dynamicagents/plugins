@@ -23,20 +23,15 @@ the `browser.*` API the model writes against.
 | `timeoutMs` | `60000` | How long one call may take.                                                                                              |
 | `provider`  | —       | Browser Run launch options: `keepAliveMs`, `guardrails`, `recording`, `internalHosts`. Host-supplied, never the model's. |
 
-**There is no result ceiling to set here, deliberately.** `browserTool` bounds
-its own output and does it _structurally_: `execute` cuts the result and the
-error to valid JSON of the original shape, largest values cut first, with
-markers where content went, and `toModelOutput` then redacts base64 payloads,
-renders a screenshot as a note, and bounds the logs the same way. A flat ceiling
-layered on top would collapse that JSON into a string, which is worse than the
-bound it would be enforcing, so this plugin adds none.
+**There is no result ceiling to set here, deliberately.** The Agents SDK already
+bounds what the tool hands the model, and it cuts structurally rather than
+flatly, so a ceiling of this plugin's own would make the output worse rather
+than smaller. `index.ts` says where the SDK does it and why nothing wraps it.
 
-**One browser per installing object.** `browserTool` opens every run as a
-locking session, so overlapping runs wait for each other instead of driving one
-tab at once — but the SDK keys those locks by the `Browser` object itself. This
-plugin therefore shares one `Browser` per installing Durable Object, built over
-that object's own storage, so two turns in one object really do serialise and a
-sub-agent in its own facet still gets a browser of its own.
+**One browser per installing object**, built over that object's own storage, so
+two turns in one object serialise against each other and a sub-agent in its own
+facet gets a browser of its own. The comment on `browserFor` in `index.ts` is
+the home of why that sharing is load-bearing rather than an optimisation.
 
 ## wrangler.jsonc
 

@@ -1,9 +1,11 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import { runInDurableObject } from "cloudflare:test";
 import {
   assemblePlugins,
   PLUGIN_CONTRACT_VERSION,
   PluginSetupError
 } from "@dynamicagents/core";
+import { freshSandbox } from "../../test/sandbox/do.js";
 import { browser } from "./index.js";
 import type { BrowserConfig } from "./index.js";
 import type { BrowserBinding } from "agents/browser";
@@ -59,6 +61,13 @@ const completed = (result: unknown, logs?: string[]) =>
   }) as BrowserToolOutput;
 
 describe("browser()", () => {
+  // Reset here rather than in each spec that asserts on it: every spec in
+  // this file builds a tool, so a shared counter is only readable if the
+  // order cannot matter.
+  beforeEach(() => {
+    built.length = 0;
+  });
+
   it("offers one tool, which is the whole browser", () => {
     // Four declarative tools became one general one when Quick Actions were
     // deprecated: the model writes the code now, so there is no subset to pick
@@ -90,11 +99,35 @@ describe("browser()", () => {
     const plugin = browser(fakeConfig);
     const ctx = testPluginContext();
 
-    built.length = 0;
     plugin.tools!(ctx);
     plugin.tools!(ctx);
 
     expect(built).toEqual(["browser"]);
+  });
+
+  it("shares it against a real object's storage, not just a fake one", async () => {
+    // The two specs around this one key the map on a fake `{}`, where identity
+    // is stable because nothing else could happen. In production the key is
+    // `DurableObjectState.storage`, read fresh out of a new `PluginContext` on
+    // every turn — core builds one per `getTools()` call — so the sharing holds
+    // only while workerd hands back the same reference each time. It does, and
+    // this is where that is measured: if it ever stopped, the memoisation would
+    // degrade to one browser per turn and the SDK's per-instance lock would
+    // quietly stop serialising anything, with no test failing.
+    //
+    // A sandbox object only because it is the Durable Object this package's
+    // test worker binds; nothing here touches the sandbox.
+    const plugin = browser(fakeConfig);
+
+    await runInDurableObject(
+      freshSandbox("browser-key"),
+      (_instance, state) => {
+        plugin.tools!(testPluginContext({ storage: state.storage }));
+        plugin.tools!(testPluginContext({ storage: state.storage }));
+
+        expect(built).toEqual(["browser"]);
+      }
+    );
   });
 
   it("keeps a different object's browser separate", () => {
@@ -102,7 +135,6 @@ describe("browser()", () => {
     // own facet gets its own browser rather than reaching into its parent's.
     const plugin = browser(fakeConfig);
 
-    built.length = 0;
     plugin.tools!(testPluginContext({ storage: {} as DurableObjectStorage }));
     plugin.tools!(testPluginContext({ storage: {} as DurableObjectStorage }));
 
