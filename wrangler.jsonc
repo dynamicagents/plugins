@@ -30,6 +30,14 @@
     ]
   },
 
+  // The Dynamic Worker the browser plugin's tool runs the model's code in.
+  // `/browser` declares it in `requires`, so a consumer that leaves it out
+  // fails at agent start; this entry is what lets the specs exercise that.
+  //
+  // Not inherited by a named environment: wrangler's own schema says so, so a
+  // named environment here would need its own copy.
+  "worker_loaders": [{ "binding": "LOADER" }],
+
   // `new_sqlite_classes`, not `new_classes`: the harness keeps its sessions in
   // `ctx.storage.sql`, which only exists on a SQLite-backed Durable Object.
   // Never deployed, so one tag.
