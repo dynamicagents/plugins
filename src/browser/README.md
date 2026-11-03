@@ -20,17 +20,23 @@ the `browser.*` API the model writes against.
 | ----------- | ------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `binding`   | —       | The `BROWSER` binding. **Paid plan.**                                                                                    |
 | `loader`    | —       | The `LOADER` binding: the Dynamic Worker each call's code runs in.                                                       |
-| `maxChars`  | `20000` | A second ceiling under the SDK's own ~24,000. Lower it for a small model; read below before raising it.                  |
 | `timeoutMs` | `60000` | How long one call may take.                                                                                              |
 | `provider`  | —       | Browser Run launch options: `keepAliveMs`, `guardrails`, `recording`, `internalHosts`. Host-supplied, never the model's. |
 
-**`maxChars` is not the only ceiling.** `browserTool` already bounds what it
-hands the model, at about 24,000 characters, and it does so _structurally_: the
-model gets valid JSON of the original shape, largest values cut first, with
-markers where content went. This field only bites below that, and when it does
-the shape is lost, because the SDK's structural truncation is internal and a
-flat middle-out cut is all that is left. The browser's `notice` is kept whole
-and outside the cut either way.
+**There is no result ceiling to set here, deliberately.** `browserTool` bounds
+its own output and does it _structurally_: `execute` cuts the result and the
+error to valid JSON of the original shape, largest values cut first, with
+markers where content went, and `toModelOutput` then redacts base64 payloads,
+renders a screenshot as a note, and bounds the logs the same way. A flat ceiling
+layered on top would collapse that JSON into a string, which is worse than the
+bound it would be enforcing, so this plugin adds none.
+
+**One browser per installing object.** `browserTool` opens every run as a
+locking session, so overlapping runs wait for each other instead of driving one
+tab at once — but the SDK keys those locks by the `Browser` object itself. This
+plugin therefore shares one `Browser` per installing Durable Object, built over
+that object's own storage, so two turns in one object really do serialise and a
+sub-agent in its own facet still gets a browser of its own.
 
 ## wrangler.jsonc
 

@@ -1,4 +1,4 @@
-import { definePlugin, truncateOutput } from "@dynamicagents/core";
+import { definePlugin } from "@dynamicagents/core";
 import type { AgentPlugin } from "@dynamicagents/core";
 import {
   Browser,
@@ -7,7 +7,6 @@ import {
 } from "agents/browser";
 import type { BrowserBinding, BrowserRunOptions } from "agents/browser";
 import { browserTool } from "agents/browser/ai-sdk";
-import type { BrowserTool } from "agents/browser/ai-sdk";
 
 /**
  * `@dynamicagents/plugins/browser` — drive a real browser, via Cloudflare
@@ -21,9 +20,6 @@ import type { BrowserTool } from "agents/browser/ai-sdk";
  * The binding and the loader are closed over at instantiation, so neither is
  * ever model input.
  */
-
-/** How many characters of a result the model is allowed to see. */
-const DEFAULT_MAX_CHARS = 20_000;
 
 /**
  * The browser's name in its own store. Two `Browser` objects on one Durable
@@ -42,8 +38,9 @@ const BROWSER_NAME = "browser";
 const CONTEXT = [
   "You can drive a real browser by writing JavaScript, with the `browser` tool. The tool's own description carries the API; what matters in choosing it:",
   "- The browser is **persistent**. A later call lands on the same page, logged in, with the same cookies. Navigate in one call and read in the next rather than rebuilding state each time.",
+  "- Because it is persistent, read the page before acting on it. A call that submits a form or clicks through a checkout may be a repeat of one that already succeeded, and the page in front of you is the evidence of which.",
   "- Prefer one call that does several steps over several calls that each do one: every call pays a round trip to the browser, and the page is still there either way.",
-  "- Results are truncated to protect your context window, so return the part of the page you need rather than its whole text or markup.",
+  "- Return the part of the page you need rather than its whole text or markup. The tool's rules say where the ceiling is.",
   "- A plain HTTP fetch is cheaper than a browser. Reach for this when a page needs rendering, a session, or interaction."
 ].join("\n");
 
@@ -59,19 +56,6 @@ export interface BrowserConfig {
    * code in, with no network access of its own.
    */
   loader: WorkerLoader;
-  /**
-   * Character ceiling per result, defaulting to 20,000.
-   *
-   * **This is a second, tighter ceiling, not the only one.** `browserTool`
-   * already bounds what it hands the model, at about 24,000 characters, and it
-   * does it *structurally*: the model gets valid JSON of the original shape
-   * with the largest values cut first and markers where content went. This
-   * ceiling only bites below that, and when it does the shape is lost, because
-   * the SDK's structural truncation is internal and a flat cut is all that is
-   * left. So lower it for a small model that cannot afford 24,000 characters,
-   * and otherwise leave it alone.
-   */
-  maxChars?: number;
   /** How long one call may take, in milliseconds. The SDK defaults to 60,000. */
   timeoutMs?: number;
   /**
@@ -83,84 +67,69 @@ export interface BrowserConfig {
   provider?: BrowserRunOptions;
 }
 
-/**
- * The host's character ceiling, over the SDK's own.
- *
- * `toModelOutput` is where the SDK renders a result for the model, and where it
- * truncates. Wrapping it rather than `execute` keeps the untruncated result
- * available to anything else reading the tool's output, which is what `execute`
- * is for.
- *
- * The notice is kept whole and outside the cut. It is the sentence saying the
- * browser restarted or that its tab was closed by someone else, so a model that
- * loses it to a middle-out truncation goes on believing the page it navigated
- * to is still there.
- */
-function bounded(tool: BrowserTool, maxChars: number): BrowserTool {
-  return {
-    ...tool,
-    toModelOutput: ({ output }) => {
-      const rendered = tool.toModelOutput({ output });
-      const text =
-        rendered.type === "text"
-          ? rendered.value
-          : JSON.stringify(rendered.value);
-      if (text === undefined || text.length <= maxChars) return rendered;
-
-      const notice = output.notice === undefined ? "" : `\n\n${output.notice}`;
-      return {
-        type: "text",
-        value:
-          truncateOutput(text, Math.max(0, maxChars - notice.length)) + notice
-      };
-    }
-  };
-}
-
 export function browser(config: BrowserConfig): AgentPlugin {
-  const {
-    binding,
-    loader,
-    maxChars = DEFAULT_MAX_CHARS,
-    timeoutMs,
-    provider
-  } = config;
+  const { binding, loader, timeoutMs, provider } = config;
+
+  /**
+   * One `Browser` per installing object, and the lock is why.
+   *
+   * `browserTool` opens every run as a locking session, so runs in one scope
+   * wait for each other rather than driving one tab at once. But the SDK keeps
+   * its lock queues in a `WeakMap` keyed by the **`Browser` object itself**, so
+   * two instances over the same stored session hold two unrelated locks and
+   * serialise nothing. `getTools()` runs per turn, so a fresh `Browser` each
+   * time would leave overlapping turns in one object free to navigate each
+   * other's page.
+   *
+   * Keyed on the installing object's storage, which is the same granularity the
+   * SDK's locks have ("per isolate, which is per Durable Object"), and weak so
+   * an evicted object's browser handle goes with it. A `WeakMap` rather than one
+   * slot because nothing stops a host from hoisting this plugin to module scope
+   * and sharing it between objects in one isolate.
+   */
+  const browsers = new WeakMap<DurableObjectStorage, Browser>();
+  const browserFor = (storage: DurableObjectStorage): Browser => {
+    const known = browsers.get(storage);
+    if (known !== undefined) return known;
+
+    const made = new Browser({
+      name: BROWSER_NAME,
+      provider: browserRun(binding, provider),
+      // **The store is what keeps this out of the host's Lifecycle.** A
+      // `Browser` with no store defaults to one over the host object's storage
+      // and requires `Lifecycle.use()` to install it, which a plugin has no way
+      // to ask for: the contract offers tools, actions, context and `requires`
+      // and nothing else. Passing the store explicitly is the SDK's own answer,
+      // and it is what lets this capability stay whole inside the plugin.
+      store: new DurableBrowserSessionStore(storage)
+    });
+    browsers.set(storage, made);
+    return made;
+  };
 
   return definePlugin({
     name: "browser",
 
-    // Built per call, as the Quick Action tools were: a tool object is not
-    // obviously safe to share across two concurrent executions, and the
-    // `Browser` is a handle over its store rather than a connection, so
-    // building one per turn costs nothing and reattaches to the same browser.
-    //
-    // **The store is what keeps this out of the host's Lifecycle.** A `Browser`
-    // with no store defaults to one over the host object's storage and requires
-    // `Lifecycle.use()` to install it, which a plugin has no way to ask for:
-    // the contract offers tools, actions, context and `requires` and nothing
-    // else. Passing the store explicitly is the SDK's own answer to that, and
-    // it is why this capability stays whole inside the plugin.
-    //
     // **No `scope`.** A scope separates callers sharing one browser, and there
     // is only ever one here: the record lives in the installing object's own
     // storage, a parent object is keyed by its caller, and a sub-agent runs in
     // its own facet with storage of its own. Naming a scope would imply an
-    // isolation the store already provides. What a scope would not fix either
-    // way is two parallel tool calls in one turn driving the same tab; that
-    // wants a session lock, which `browserTool` does not expose.
+    // isolation the store already provides, and the default one still locks.
+    //
+    // **Nothing truncates here**, and the tool is handed over as the SDK built
+    // it. `browserTool` bounds its own output in two places: `execute` cuts the
+    // result and the error *structurally*, leaving valid JSON of the original
+    // shape with the largest values cut first and markers where content went,
+    // and `toModelOutput` then redacts base64 payloads, renders a screenshot as
+    // a note, and bounds the logs the same way. Wrapping either to add a flat
+    // ceiling of our own would collapse that JSON into a string, which is
+    // strictly worse than the bound it would be enforcing.
     tools: (ctx) => ({
-      browser: bounded(
-        browserTool({
-          browser: new Browser({
-            name: BROWSER_NAME,
-            provider: browserRun(binding, provider),
-            store: new DurableBrowserSessionStore(ctx.storage)
-          }),
-          loader,
-          ...(timeoutMs === undefined ? {} : { timeoutMs })
-        }),
-        maxChars
-      )
+      browser: browserTool({
+        browser: browserFor(ctx.storage),
+        loader,
+        ...(timeoutMs === undefined ? {} : { timeoutMs })
+      })
     }),
 
     context: [{ provider: { get: async () => CONTEXT } }],

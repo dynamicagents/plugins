@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   assemblePlugins,
   PLUGIN_CONTRACT_VERSION,
@@ -14,9 +14,28 @@ import { testPluginContext } from "../../test/helpers.js";
  * The tool itself is the Agents SDK's, and testing it here would be testing
  * someone else's package. What is this plugin's own is the *wiring*: that
  * neither binding is model input, that a missing one fails at startup rather
- * than inside a request, and the character ceiling this plugin puts over the
- * SDK's own.
+ * than inside a request, that one `Browser` is shared per installing object so
+ * the SDK's per-instance lock actually serialises overlapping runs, and that
+ * nothing here gets between the SDK and the result it renders.
  */
+
+/**
+ * Only `Browser` is wrapped, and only to count how many this plugin builds.
+ * Everything downstream is the real class, so no SDK behaviour is simulated.
+ */
+const built: string[] = [];
+vi.mock("agents/browser", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("agents/browser")>();
+  return {
+    ...actual,
+    Browser: class extends actual.Browser {
+      constructor(options: ConstructorParameters<typeof actual.Browser>[0]) {
+        super(options);
+        built.push(this.name);
+      }
+    }
+  };
+});
 
 /** Enough of each binding to build a tool against; nothing here ever calls one. */
 const fakeConfig: BrowserConfig = {
@@ -24,31 +43,20 @@ const fakeConfig: BrowserConfig = {
   loader: {} as WorkerLoader
 };
 
-const tools = (config: BrowserConfig = fakeConfig) =>
-  browser(config).tools!(testPluginContext());
+const tools = (config: BrowserConfig = fakeConfig, ctx = testPluginContext()) =>
+  browser(config).tools!(ctx);
 
 /** The one tool, as the model is offered it. */
 const theTool = (config: BrowserConfig = fakeConfig) => tools(config).browser;
 
-/** A completed run carrying `result`, as the SDK hands it to `toModelOutput`. */
-const completed = (result: unknown, notice?: string) =>
+/** A completed run, as the SDK's own `execute` hands it to `toModelOutput`. */
+const completed = (result: unknown, logs?: string[]) =>
   ({
     status: "completed",
     executionId: "execution-1",
     result,
-    ...(notice === undefined ? {} : { notice })
+    ...(logs === undefined ? {} : { logs })
   }) as BrowserToolOutput;
-
-/** What the model is shown for `output`, as a string whatever its shape. */
-const shown = (config: BrowserConfig, output: BrowserToolOutput): string => {
-  const rendered = theTool(config).toModelOutput!({
-    output
-  } as never) as unknown as
-    { type: "text"; value: string } | { type: "json"; value: unknown };
-  return rendered.type === "text"
-    ? rendered.value
-    : JSON.stringify(rendered.value);
-};
 
 describe("browser()", () => {
   it("offers one tool, which is the whole browser", () => {
@@ -74,39 +82,59 @@ describe("browser()", () => {
     expect(json.additionalProperties).toBe(false);
   });
 
-  it("holds a result to the host's ceiling", () => {
-    // The SDK truncates first, at about 24,000 characters, so this asserts the
-    // tighter host ceiling bites below that. It is the only thing this plugin
-    // adds to the rendering and the only part a host can set.
-    const value = shown(
-      { ...fakeConfig, maxChars: 500 },
-      completed("x".repeat(50_000))
-    );
+  it("shares one browser per installing object, which is what makes the lock bite", () => {
+    // `browserTool` opens every run as a locking session, but the SDK keeps its
+    // lock queues keyed by the `Browser` object itself. `getTools()` runs per
+    // turn, so a fresh `Browser` per call would hold a lock nobody else waits
+    // for and let two overlapping turns drive one tab.
+    const plugin = browser(fakeConfig);
+    const ctx = testPluginContext();
 
-    expect(value.length).toBeLessThanOrEqual(500);
+    built.length = 0;
+    plugin.tools!(ctx);
+    plugin.tools!(ctx);
+
+    expect(built).toEqual(["browser"]);
   });
 
-  it("keeps the browser's notice out of the truncated middle", () => {
-    // The notice is how the model learns its browser restarted or that its tab
-    // was closed by someone else. Losing it to a middle-out cut leaves the
-    // model believing the page it navigated to is still there.
-    const notice = "The browser restarted, so the page you opened is gone.";
-    const value = shown(
-      { ...fakeConfig, maxChars: 500 },
-      completed("x".repeat(50_000), notice)
-    );
+  it("keeps a different object's browser separate", () => {
+    // Weak and keyed on the installing object's storage, so a sub-agent in its
+    // own facet gets its own browser rather than reaching into its parent's.
+    const plugin = browser(fakeConfig);
 
-    expect(value).toContain(notice);
-    expect(value.length).toBeLessThanOrEqual(500);
+    built.length = 0;
+    plugin.tools!(testPluginContext({ storage: {} as DurableObjectStorage }));
+    plugin.tools!(testPluginContext({ storage: {} as DurableObjectStorage }));
+
+    expect(built).toEqual(["browser", "browser"]);
   });
 
-  it("leaves a result under the ceiling alone", () => {
-    // Truncating what fits would cost the structured shape the SDK preserved,
-    // for nothing. Under the ceiling this plugin must be invisible.
-    const value = shown({ ...fakeConfig, maxChars: 20_000 }, completed("tiny"));
+  it("leaves the SDK's structured truncation alone", () => {
+    // The ceiling is the SDK's and it cuts *structurally*, leaving valid JSON
+    // of the original shape with markers where content went. This plugin used
+    // to wrap `toModelOutput` with a flat middle-out cut of its own, which
+    // collapsed that JSON into a string. Nothing here may do that again.
+    //
+    // Asserted on `logs`, because that is what `toModelOutput` itself bounds:
+    // the result and the error are already cut by the time it sees them, inside
+    // the SDK's `execute`, which this spec cannot reach without a real browser.
+    const rendered = theTool().toModelOutput!({
+      output: completed("a short page", [
+        "lorem ipsum dolor sit amet. ".repeat(2_000)
+      ])
+    } as never) as unknown as {
+      type: string;
+      value: { result: string; logs: string[] };
+    };
 
-    expect(value).toContain("tiny");
-    expect(value).not.toContain("omitted from the middle");
+    expect(rendered.type).toBe("json");
+    // Still JSON, still an array of strings, still carrying the untouched
+    // result beside it: a flat cut over the whole rendering would lose all of
+    // that.
+    expect(rendered.value.result).toBe("a short page");
+    expect(Array.isArray(rendered.value.logs)).toBe(true);
+    expect(rendered.value.logs.join("")).toContain("--- TRUNCATED ---");
+    expect(JSON.stringify(rendered.value).length).toBeLessThan(56_000);
   });
 
   it("tells the model about its tool in a block the model cannot rewrite", async () => {
