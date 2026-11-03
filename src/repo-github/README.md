@@ -144,9 +144,12 @@ entrypoint, outside the container — swaps the token in. Every process in the
 container can present the placeholder, so the egress holds every credentialed push to
 what `repo_push` would: no tag, no protected name, and never the repository's default
 branch, which it reads from GitHub with the token. The refs are read from the request
-before GitHub sees it. A `push` policy narrows that further, to named repositories
-and branches, for a sandbox that knows them. A planted hook reads only the
-placeholder, and can do with it only what those rules allow.
+before GitHub sees it, and a credentialed request to `github.com` on any path but git's
+own is refused, since GitHub serves spellings of a git path the egress cannot read. A
+`push` policy narrows that further, to named repositories and branches, for a sandbox
+that knows them. A planted hook reads only the placeholder, and over git can do with it
+only what those rules allow. A sandbox given the API as well is bounded there by GitHub
+alone, which is what [Protect the repositories](#protect-the-repositories) is for.
 
 Everything else still runs in the container through `exec`, because none of it needs
 to authenticate: `status`, `diff`, `add`, `commit`, `checkout`. That is the whole
@@ -206,6 +209,41 @@ What remains is not zero, and is worth naming precisely:
   question rather than deleting it. A host that implements `git` by shelling out
   inside the container with the real token has undone all of the above, and this
   plugin cannot tell.
+- **With `api: true`, the API is not bounded here.** The egress reads nothing on
+  `api.github.com`, so any process in the container can do through it whatever the
+  account may: merge, approve, move a tag, write to the default branch.
+
+## Protect the repositories
+
+What holds a compromised agent is what GitHub holds its account to. The rules above
+bound a sandbox's git, and with `api: true` everything else is open to whatever that
+account may do, so make that as little as the work allows:
+
+- **The agent has its own account, and it is a contributor.** The `write` role, not
+  admin, never on a ruleset's bypass list and never a code owner.
+- **Its token is fine-grained, on selected repositories**, with no `administration`,
+  `workflows` or `secrets` permission. An account can often reach more than its token
+  does, and the token's list is the bound that applies here.
+- **`CODEOWNERS` names a person for every path**: `* @someone`.
+- **A ruleset on the default branch**: require a pull request, require review from Code
+  Owners, dismiss stale approvals, require status checks and resolved conversations,
+  block force pushes, restrict deletions. Code owner review is what keeps the agent from
+  merging its own work. Dismissing stale approvals is what keeps it from adding commits
+  after a person has approved and then merging those too.
+- **A ruleset on every tag**: restrict updates and deletions, block force pushes. Leave
+  creation open, or a release workflow that cuts tags needs a bypass.
+- **Auto-merge off**, so that an approval never doubles as a merge.
+
+All of it applies to every repository the token can write, not only the ones the agent
+works on. A package something installs from a Git tag is a way in from a repository
+nobody thought of as part of the work.
+
+For further protection, separate the agent that triages issues and advisories from the
+one that develops. The first reads text anyone can write and holds no write access to
+code, and the second works from its brief. An unpublished advisory also stays out of a
+container that runs whatever it cloned. A developer still reads pull request comments,
+CI logs and that code, so this narrows what a compromised agent can reach rather than
+closing it.
 
 ## Guardrails are in the tool, not the prompt
 

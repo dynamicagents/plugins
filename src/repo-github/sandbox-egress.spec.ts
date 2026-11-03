@@ -244,6 +244,50 @@ describe("githubSandboxEgress", () => {
     expect(response.status).toBe(401);
     expect(calls).toHaveLength(0);
   });
+
+  it("refuses a credentialed request to the git host on any path it cannot read as git's own", async () => {
+    const { calls, lookups } = upstream();
+    // With a push policy and without one: most sandboxes have none, and the
+    // rules every push is held to apply to those as well.
+    const rules = [RULE, githubSandboxEgress({ tokenBinding: "GITHUB_TOKEN" })];
+    const paths = [
+      "//dynamicagents/plugins/git-receive-pack",
+      "/dynamicagents/plugins//git-receive-pack",
+      "//dynamicagents/plugins.git/git-receive-pack",
+      "//dynamicagents/plugins/info/refs",
+      "/dynamicagents/plugins/info/refs/",
+      "/dynamicagents/plugins.git/info/lfs/objects/batch",
+      "/dynamicagents/plugins/pulls"
+    ];
+    for (const rule of rules) {
+      const plan = egressPlan([rule], "SANDBOX/caller");
+      for (const path of paths) {
+        const response = await sandboxEgress(
+          new Request(`https://github.com${path}`, {
+            method: "POST",
+            headers: { authorization: basic(GITHUB_TOKEN_PLACEHOLDER) },
+            body: receivePack(["refs/heads/main"])
+          }),
+          [...plan.http, ...plan.https],
+          ENV,
+          [rule]
+        );
+        expect(response.status, path).toBe(403);
+      }
+    }
+    expect(calls).toHaveLength(0);
+    expect(lookups).toHaveLength(0);
+  });
+
+  it("leaves anonymous traffic to the git host alone, whatever its path", async () => {
+    const { calls } = upstream();
+    const url =
+      "https://github.com/mongodb-js/zstd/releases/download/v7.0.0/zstd.tar.gz";
+    const response = await send(new Request(url));
+    expect(response.status).toBe(200);
+    expect(calls[0]?.url).toBe(url);
+    expect(calls[0]?.headers.get("authorization")).toBeNull();
+  });
 });
 
 describe("the rule a sandbox carries", () => {
