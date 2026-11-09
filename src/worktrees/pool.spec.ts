@@ -535,6 +535,31 @@ describe("reconciling the pool against the worktrees that are left", () => {
     expect(store.all(REPO)[0]).toEqual(held(0));
   });
 
+  /**
+   * The answer comes over an RPC, and a claim can land meanwhile: a slot
+   * emptied under it is one the next claim hands to a second session.
+   */
+  it("keeps a row claimed while its checkout was being asked about", async () => {
+    const store = memoryPoolStore();
+    store.put(held(0));
+
+    await reconcileWorktrees(store, async () => {
+      claim(
+        store,
+        REPO,
+        { taskId: "task-2", runId: "detached:1", continue: "agent/task-1/0" },
+        99
+      );
+      return false;
+    });
+
+    expect(store.all(REPO)[0]).toMatchObject({
+      branch: "agent/task-1/0",
+      live: { taskId: "task-2", runId: "detached:1" },
+      usedAt: 99
+    });
+  });
+
   /** A session cannot be in a workspace that is gone, and is not asked about. */
   it("leaves a worktree a session is working in alone", async () => {
     const store = memoryPoolStore();

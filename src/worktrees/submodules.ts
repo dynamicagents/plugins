@@ -1,4 +1,4 @@
-import { parseRepo } from "../repo-github/url.js";
+import { isBranchName, parseRepo } from "../repo-github/url.js";
 
 /**
  * A superproject's submodules: which repositories it carries, and where a
@@ -125,8 +125,23 @@ function assertSubmodulePath(path: string): void {
 }
 
 /**
+ * Refuse a submodule branch git would not take. Like a path, it is repository
+ * content, and it reaches the branch script's tab- and newline-separated rows:
+ * `main\n../out` would add a row that runs git outside the checkout. `.` is
+ * git's own spelling of "the superproject's branch".
+ */
+function assertSubmoduleBranch(sub: Submodule): void {
+  if (sub.branch === undefined || sub.branch === ".") return;
+  if (!isBranchName(sub.branch)) {
+    throw new Error(
+      `refusing a submodule branch git would not take, at ${JSON.stringify(sub.path)}: ${JSON.stringify(sub.branch)}`
+    );
+  }
+}
+
+/**
  * The submodules a checkout declares — one level, never theirs — each with a
- * path that stays inside it.
+ * path that stays inside it and a branch git would take.
  *
  * Nested submodules are left alone: each level would be another clone in front
  * of the session, and the superprojects this has met have none.
@@ -147,7 +162,10 @@ export async function readSubmodules(
     );
   }
   const submodules = parseGitmodules(listed.stdout);
-  for (const sub of submodules) assertSubmodulePath(sub.path);
+  for (const sub of submodules) {
+    assertSubmodulePath(sub.path);
+    assertSubmoduleBranch(sub);
+  }
   return submodules;
 }
 
@@ -182,25 +200,27 @@ export function submoduleCloneUrl(sub: Submodule, parentUrl: string): string {
 }
 
 /**
- * Which submodules a previous attempt already cloned, clearing any it left
- * half-done.
+ * Which submodules a previous attempt already cloned, and the origin each was
+ * cloned from, clearing any it left half-done.
  *
  * Present means a repository of its own with a commit checked out, asked of its
  * own `.git` — `git -C` there would walk up to the superproject and answer for
  * it. A `.git` with no commit behind it is a clone that failed part-way, and is
- * cleared so the next one is not refused as "already exists".
+ * cleared so the next one is not refused as "already exists". The origin is
+ * where its push goes, so a caller checks it against what `.gitmodules` names
+ * now.
  */
 export async function populated(
   run: CheckoutShell,
   dir: string,
   submodules: readonly Submodule[]
-): Promise<Set<string>> {
-  if (submodules.length === 0) return new Set();
+): Promise<Map<string, string>> {
+  if (submodules.length === 0) return new Map();
   const found = await run(
     `while IFS= read -r p; do
   [ -n "$p" ] || continue
   if [ -e "$p/.git" ] && git --git-dir="$p/.git" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
-    printf '%s\\n' "$p"
+    printf '%s\\t%s\\n' "$p" "$(git --git-dir="$p/.git" config --get remote.origin.url)"
   elif [ -e "$p/.git" ]; then
     rm -rf "$p" || exit 1
   fi
@@ -217,5 +237,13 @@ EOF`,
       `could not read which submodules are cloned: ${found.stderr || found.stdout}`
     );
   }
-  return new Set(found.stdout.split("\n").filter(Boolean));
+  return new Map(
+    found.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [path = "", origin = ""] = line.split("\t");
+        return [path, origin] as const;
+      })
+  );
 }

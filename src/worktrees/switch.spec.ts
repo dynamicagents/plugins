@@ -44,7 +44,14 @@ const HELD: Worktree = {
   ]
 };
 
-function setup(opts: { selected?: string | null; checkoutDir?: string } = {}) {
+function setup(
+  opts: {
+    selected?: string | null;
+    checkoutDir?: string;
+    /** What lands on the pool while the sandbox is being asked. */
+    whileAsked?: (pool: ReturnType<typeof memoryPoolStore>) => void;
+  } = {}
+) {
   let selected =
     opts.selected === null ? undefined : (opts.selected ?? "acme/super");
   const active = {
@@ -64,8 +71,10 @@ function setup(opts: { selected?: string | null; checkoutDir?: string } = {}) {
     pool,
     binding: {
       getByName: () => ({
-        checkoutDir: async () =>
-          "checkoutDir" in opts ? opts.checkoutDir : CHECKOUT.dir
+        checkoutDir: async () => {
+          opts.whileAsked?.(pool);
+          return "checkoutDir" in opts ? opts.checkoutDir : CHECKOUT.dir;
+        }
       })
     } as unknown as Parameters<typeof worktreeSwitch>[0]["binding"],
     callerKey: () => "caller",
@@ -123,6 +132,39 @@ describe("the parent's way into a worktree", () => {
     expect(await worktrees.use(BRANCH)).toMatch(
       /still being prepared; try again once its session has started/
     );
+    expect(selected()).toBe("acme/super");
+  });
+
+  /**
+   * A slot handed to a new branch keeps its checkout, still on the branch it
+   * held before, until the session's placement finishes.
+   */
+  it("does not switch into a reused worktree its new branch is not on yet", async () => {
+    const { worktrees, pool, selected } = setup();
+    pool.put({
+      ...HELD,
+      live: { taskId: "task-a", runId: "detached:3" },
+      ready: false
+    });
+    expect(await worktrees.use(BRANCH)).toMatch(/still being prepared/);
+    expect(selected()).toBe("acme/super");
+  });
+
+  /** The answer comes over an RPC, and a claim can land meanwhile. */
+  it("does not act on a worktree claimed while its sandbox was being asked", async () => {
+    const claimed = {
+      ...HELD,
+      usedAt: 2,
+      live: { taskId: "task-b", runId: "detached:1" }
+    };
+    const { worktrees, pool, selected } = setup({
+      checkoutDir: undefined,
+      whileAsked: (pool) => pool.put(claimed)
+    });
+    expect(await worktrees.use(BRANCH)).toMatch(
+      /changed while it was being looked up/
+    );
+    expect(pool.all("acme/super")).toEqual([claimed]);
     expect(selected()).toBe("acme/super");
   });
 

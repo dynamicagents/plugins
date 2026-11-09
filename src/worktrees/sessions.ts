@@ -1,4 +1,4 @@
-import { isBranchName } from "../repo-github/url.js";
+import { isBranchName, sameRepoUrl } from "../repo-github/url.js";
 import {
   sandboxRepoGit,
   type SandboxGitHost
@@ -515,10 +515,15 @@ export function subtaskWorkspaces(config: {
           );
         }
       }
-      // A worktree whose sandbox went — reclaimed after a week untouched — no
+      // A worktree whose sandbox went (reclaimed after its idle window) no
       // longer holds the branch it is recorded with. What the remote has of it
-      // is all that is left.
-      if (mode === "continue") mode = "adopt";
+      // is all that is left. Recorded before the checkout is: a repeat finds the
+      // checkout, and would otherwise take this worktree for one that holds the
+      // branch, placing it at the base it was first given.
+      if (mode === "continue") {
+        mode = "adopt";
+        config.pool.put({ ...worktree, mode });
+      }
     }
     // Straight after the clone, so a repeat that fails later finds a recorded
     // checkout and does not clone over it — and before the install, which is
@@ -529,6 +534,41 @@ export function subtaskWorkspaces(config: {
       kind: "repo",
       repo: worktree.repo
     });
+
+    /**
+     * A worktree held because what a stopped session left could not be
+     * secured (its tips unknown: see `keep`) may hold the only copy of an
+     * edit, and continuing it runs `checkout -f` and `clean`. So what is
+     * uncommitted is committed first, and a worktree where that fails is not
+     * placed at all.
+     */
+    if (
+      reused &&
+      mode === "continue" &&
+      worktree.repos.some((repo) => repo.tip === "")
+    ) {
+      const paths = worktree.repos.map((repo) => repo.path);
+      const secured = await run(KEEP_INTERRUPTED, {
+        cwd: "/",
+        env: {
+          WORKTREE_DIR: worktree.dir ?? checkout.dir,
+          WORKTREE_KEEP_PATHS: paths.join("\n"),
+          WORKTREE_KEEP_SUBMODULES: paths
+            .filter((path) => path !== ".")
+            .join("\n"),
+          WIP_MESSAGE
+        }
+      }).catch((err: unknown) => ({
+        success: false,
+        stdout: "",
+        stderr: String(err)
+      }));
+      if (!secured.success) {
+        throw refuse(
+          `could not commit what an earlier session left uncommitted in the worktree holding ${worktree.branch}, so it was not touched: ${secured.stderr.trim() || secured.stdout.trim()}`
+        );
+      }
+    }
 
     const fetch = async (url: string, dir: string, what: string) => {
       const fetched = await git.fetch({ url, dir, allowedHosts: [host] });
@@ -590,6 +630,31 @@ export function subtaskWorkspaces(config: {
     for (const sub of submodules) {
       const url = submoduleCloneUrl(sub, checkout.url);
       const dir = `${checkout.dir}/${sub.path}`;
+      /**
+       * A clone of the repository `.gitmodules` named before. A fetch would
+       * fill it from the new one, but its push still goes to its origin. A
+       * worktree held on its branch may have work in it that belongs there,
+       * so it is refused; any other has nothing worth keeping, and is cloned
+       * again.
+       */
+      const origin = present.get(sub.path);
+      if (origin !== undefined && !sameRepoUrl(origin, url)) {
+        if (mode === "continue") {
+          throw refuse(
+            `the submodule at ${sub.path} in the worktree holding ${worktree.branch} was cloned from ${origin || "nowhere"}, and .gitmodules now names ${url}. Its pushes would go to the first: release the worktree once nothing in it is needed, and continue the branch again.`
+          );
+        }
+        const cleared = await run('rm -rf -- "$SUBMODULE_DIR"', {
+          cwd: checkout.dir,
+          env: { SUBMODULE_DIR: sub.path }
+        });
+        if (!cleared.success) {
+          throw refuse(
+            `could not clear the submodule at ${sub.path}, cloned from ${origin}: ${cleared.stderr || cleared.stdout}`
+          );
+        }
+        present.delete(sub.path);
+      }
       // `.` means "the superproject's branch", in git's own reading of it.
       const branch = sub.branch === "." ? checkout.branch : sub.branch;
       refs.set(sub.path, branch ? `origin/${branch}` : "@pinned");

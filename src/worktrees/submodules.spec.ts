@@ -96,6 +96,44 @@ describe("which submodule paths are accepted", () => {
   });
 });
 
+/**
+ * A branch reaches the same rows a path does, so it is refused on the same
+ * terms: one value read as two rows is git run outside the checkout.
+ */
+describe("which submodule branches are accepted", () => {
+  const read = (branch: string) =>
+    readSubmodules(
+      async () => ({
+        success: true,
+        stdout: gitmodules({
+          "submodule.x.path": "x",
+          "submodule.x.url": "https://github.com/acme/x",
+          "submodule.x.branch": branch
+        }),
+        stderr: ""
+      }),
+      "/workspace/super"
+    );
+
+  it("accepts a branch, and `.` for the superproject's own", async () => {
+    for (const branch of ["main", "release/2", "."]) {
+      await expect(read(branch)).resolves.toEqual([
+        { path: "x", url: "https://github.com/acme/x", branch }
+      ]);
+    }
+  });
+
+  it.each([
+    ["one with a newline", "main\n../other\torigin/main"],
+    ["one with a tab", "main\tx"],
+    ["one git would refuse", "a..b"]
+  ])("refuses %s", async (_label, branch) => {
+    await expect(read(branch)).rejects.toThrow(
+      /submodule branch git would not take/
+    );
+  });
+});
+
 describe("the repositories a superproject carries", () => {
   it("reads them from `.gitmodules` as text, resolving relative urls and leaving out other hosts", () => {
     const gitmodules = [

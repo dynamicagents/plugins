@@ -295,8 +295,14 @@ export async function reconcileWorktrees(
     if (!named) continue;
     // An empty row describes no checkout, so there is nothing about it to be
     // wrong, and asking would cost an RPC per slot per sweep to learn that.
-    if (!slotOf(store, named.repo, named.slot)?.repos.length) continue;
+    const asked = slotOf(store, named.repo, named.slot);
+    if (!asked?.repos.length) continue;
     if (await hasCheckout(sentinel)) continue;
+    // Claimed while the answer was on its way, which writes `usedAt`: the
+    // answer is about a checkout the new claim is about to make, and emptying
+    // the row would free a slot a session is being placed in.
+    const now = slotOf(store, named.repo, named.slot);
+    if (!now || now.live || now.usedAt !== asked.usedAt) continue;
     forgetWorktree(store, sentinel);
   }
 }

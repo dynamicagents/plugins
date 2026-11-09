@@ -133,8 +133,10 @@ export function worktreeSwitch(config: {
         );
       }
 
-      // Claimed, and not yet cloned onto: there is nothing to switch into.
-      if (row.dir === undefined) {
+      // Claimed, and not yet on its branch: nothing to switch into, or a
+      // reused slot still holding the branch it held before. A row released
+      // since carries no `ready` at all.
+      if (row.dir === undefined || row.ready === false) {
         return `The worktree for \`${branch}\` is still being prepared; try again once its session has started.`;
       }
 
@@ -142,7 +144,15 @@ export function worktreeSwitch(config: {
       const stub = config.binding.getByName(
         sandboxName(config.callerKey(), sentinel)
       );
-      if (!(await stub.checkoutDir())) {
+      const present = Boolean(await stub.checkoutDir());
+      // Claimed or released while the answer was on its way, which writes
+      // `usedAt`: the answer is about a row that is gone, and acting on it would
+      // empty a slot a session is being placed in, or name the wrong branch.
+      const now = slotOf(config.pool, repo, row.slot);
+      if (now?.branch !== branch || now.usedAt !== row.usedAt) {
+        return `The worktree that held \`${branch}\` changed while it was being looked up; ask again.`;
+      }
+      if (!present) {
         // Its storage is gone, so the row describes nothing; the slot is free
         // for the next session to clone into again.
         config.pool.put({

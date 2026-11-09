@@ -84,8 +84,8 @@ function harness(opts: {
   dirs?: Record<string, string>;
   /** What `.gitmodules` declares, in `--null` form. */
   submodules?: string;
-  /** Submodule paths a previous attempt already cloned. */
-  populated?: string[];
+  /** Submodules a previous attempt already cloned, and the origin each has. */
+  populated?: Record<string, string>;
   /** Fail every clone whose target ends with this. */
   cloneFails?: { dir: string; message: string };
   /** Each repository's HEAD when release reads it. */
@@ -205,6 +205,9 @@ function harness(opts: {
       if (command.includes('rm -rf "$CHECKOUT_DIR"')) {
         calls.push(`clear ${env.CHECKOUT_DIR}`);
       }
+      if (command.includes('rm -rf -- "$SUBMODULE_DIR"')) {
+        calls.push(`clear ${env.SUBMODULE_DIR}`);
+      }
       if (command.includes('test -d "$CHECKOUT_DIR/.git"')) {
         return { success: !opts.seedLacksCheckout, stdout: "", stderr: "" };
       }
@@ -218,7 +221,9 @@ function harness(opts: {
       if (command.includes("SUBMODULE_PATHS")) {
         return {
           success: true,
-          stdout: (opts.populated ?? []).map((p) => `${p}\n`).join(""),
+          stdout: Object.entries(opts.populated ?? {})
+            .map(([path, origin]) => `${path}\t${origin}\n`)
+            .join(""),
           stderr: ""
         };
       }
@@ -726,6 +731,8 @@ describe("handing a worktree to the next session", () => {
       )
     ).toBe(SLOT0);
     expect(calls).toContain("place continue");
+    // Its tips were read, so nothing it left is unsecured.
+    expect(calls.some((call) => call.startsWith("keep "))).toBe(false);
     // Measured against where the branch started, not where the remote is now.
     expect(placed[1]).toMatchObject({
       WORKTREE_BRANCH: BRANCH_1,
@@ -759,6 +766,90 @@ describe("handing a worktree to the next session", () => {
     });
     expect(reclaimed.calls).toContain(`clone ${CHECKOUT.dir}@main`);
     expect(reclaimed.placed[0]?.WORKTREE_MODE).toBe("adopt");
+  });
+
+  /**
+   * Held because what a stopped session left could not be secured, so it may
+   * hold the only copy of an edit, and placing it runs `checkout -f` and
+   * `clean`: what is uncommitted is committed first.
+   */
+  it("secures what a held worktree left uncommitted before continuing it", async () => {
+    const { subtasks, calls } = harness({
+      selected: "acme/api",
+      checkout: CHECKOUT
+    });
+    await subtasks.resolve(ctx);
+    await subtasks.release(ctx, { hold: true });
+    calls.length = 0;
+
+    await subtasks.resolve({ ...ctx, runId: "detached:2", continue: BRANCH_1 });
+    const kept = calls.indexOf("keep .");
+    expect(kept).toBeGreaterThanOrEqual(0);
+    expect(kept).toBeLessThan(calls.indexOf("place continue"));
+  });
+
+  it("leaves a held worktree as it is when what it left cannot be secured", async () => {
+    const { subtasks, calls } = harness({
+      selected: "acme/api",
+      checkout: CHECKOUT,
+      keepFails: true
+    });
+    await subtasks.resolve(ctx);
+    await subtasks.release(ctx, { hold: true });
+    calls.length = 0;
+
+    await expect(
+      subtasks.resolve({ ...ctx, runId: "detached:2", continue: BRANCH_1 })
+    ).rejects.toThrow(
+      /could not commit what an earlier session left uncommitted/
+    );
+    expect(calls).not.toContain("place continue");
+  });
+
+  /**
+   * Cloned again and then failed: the repeat finds a checkout, and has to
+   * know it is adopting rather than continuing a branch this worktree never
+   * held, which would start it at its old base.
+   */
+  it("still adopts on a repeat after a failure that followed the clone", async () => {
+    const held = harness({
+      selected: "acme/api",
+      checkout: CHECKOUT,
+      tips: { ".": "c1" }
+    });
+    await held.subtasks.resolve(ctx);
+    await held.subtasks.release(ctx);
+    const reclaimed = harness({
+      selected: "acme/api",
+      checkout: CHECKOUT,
+      remote: ["."],
+      submodules: gitmodules({
+        "submodule.core.path": "core",
+        "submodule.core.url": "../core.git"
+      }),
+      cloneFails: { dir: "/core", message: "network" }
+    });
+    reclaimed.pool.put(held.pool.rows()[0]!);
+    const first = { ...ctx, runId: "detached:2" };
+
+    await expect(
+      reclaimed.subtasks.resolve({ ...first, continue: BRANCH_1 })
+    ).rejects.toThrow(/could not clone the submodule at core/);
+    // A host frees a claim whose run will never start.
+    await reclaimed.subtasks.release(first);
+    reclaimed.heal();
+    const before = reclaimed.placed.length;
+
+    await reclaimed.subtasks.resolve({
+      ...ctx,
+      runId: "detached:3",
+      continue: BRANCH_1
+    });
+    const repeat = reclaimed.placed.slice(before);
+    expect(repeat.length).toBeGreaterThan(0);
+    expect(repeat.map((env) => env.WORKTREE_MODE)).toEqual(
+      repeat.map(() => "adopt")
+    );
   });
 
   /** Starting it from the base would report the lost work as there. */
@@ -1280,7 +1371,11 @@ describe("a worktree of a superproject", () => {
 
   it("does not clone a submodule a previous attempt already cloned", async () => {
     const { subtasks, calls } = superHarness({
-      populated: ["core", "starter"]
+      // `.git` or not, it is the repository `.gitmodules` names.
+      populated: {
+        core: "https://github.com/acme/core.git",
+        starter: "https://github.com/acme/starter"
+      }
     });
 
     await subtasks.resolve(ctx);
@@ -1289,6 +1384,45 @@ describe("a worktree of a superproject", () => {
       `clone ${SUPER.dir}@main`,
       `clone ${SUPER.dir}/vendor/pinned@`
     ]);
+  });
+
+  /**
+   * A clone of the repository `.gitmodules` named before pushes there, whatever
+   * a fetch fills it with. In a free worktree nothing in it is worth keeping.
+   */
+  it("clones again a submodule whose repository `.gitmodules` has changed", async () => {
+    const { subtasks, calls } = superHarness({
+      populated: {
+        core: "https://github.com/acme/old-core.git",
+        starter: "https://github.com/acme/starter.git"
+      }
+    });
+
+    await subtasks.resolve(ctx);
+
+    const cleared = calls.indexOf("clear core");
+    expect(cleared).toBeGreaterThanOrEqual(0);
+    expect(cleared).toBeLessThan(calls.indexOf(`clone ${SUPER.dir}/core@main`));
+    expect(calls).not.toContain("clear starter");
+  });
+
+  /** One held on its branch may have work in that clone that belongs there. */
+  it("refuses to continue a worktree whose submodule's repository has changed", async () => {
+    const { subtasks } = superHarness({
+      populated: {
+        core: "https://github.com/acme/old-core.git",
+        starter: "https://github.com/acme/starter.git"
+      },
+      tips: { ".": "s1", core: "c1", starter: "n1", "vendor/pinned": "p1" }
+    });
+    await subtasks.resolve(ctx);
+    await subtasks.release(ctx);
+
+    await expect(
+      subtasks.resolve({ ...ctx, runId: "detached:2", continue: BRANCH_1 })
+    ).rejects.toThrow(
+      /submodule at core .* was cloned from https:\/\/github\.com\/acme\/old-core\.git, and \.gitmodules now names/
+    );
   });
 
   /** `.gitmodules` is repository content, so a url in it has passed nothing. */
