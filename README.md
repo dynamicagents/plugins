@@ -72,6 +72,7 @@ plugin to the tools an install names.
 | [`/repo-github`](src/repo-github/) | Clone, commit, push a branch, open a pull request on GitHub — over any container                          | `GITHUB_TOKEN`                                     |
 | [`/sandbox`](src/sandbox/)         | A container whose disk is the checkout, driven from a Durable Object through `agents`' `ContainerHarness` | `@cloudflare/sandbox`, an image running its daemon |
 | [`/scratch`](src/scratch/)         | A throwaway git repository with no remote, for work that needs a container but no checkout                | —                                                  |
+| [`/worktrees`](src/worktrees/)     | A checkout of its own for each writing sub-agent, kept on its branch for the parent to read and push      | a `/sandbox` object, the parent's SQLite           |
 
 Each directory has its own README with the config shape and a paste-ready `wrangler.jsonc`
 snippet — a plugin cannot add its own binding, which is why it declares what it needs.

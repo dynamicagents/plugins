@@ -139,7 +139,9 @@ const BUILDS_ON = {
   // On a sandbox: its run header, its egress routes and its RPCs' shapes.
   "./claude-code": ["./sandbox"],
   // The Claude Code CLI in a sandbox image: this plugin's parser and cards.
-  "./claude-code/daemon": ["./claude-code", "./sandbox"]
+  "./claude-code/daemon": ["./claude-code", "./sandbox"],
+  // A worktree is a sandbox cloned with `/repo-github`'s git, by its branch rule.
+  "./worktrees": ["./repo-github", "./sandbox"]
 };
 
 /** `./browser` → `dist/browser` — the directory a subpath's files must stay in. */
