@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/plugins",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Optional, composable capabilities for a Dynamic Agent: browser rendering, a Linux container, git and pull requests on GitHub, a scratchpad, and Claude Code sessions. One subpath per plugin, so a bundle grows only with what it imports.",
   "keywords": [
     "ai-agents",
@@ -87,7 +87,7 @@
     "@cloudflare/computer": "^0.8.0",
     "@cloudflare/sandbox": "^1.0.1",
     "@cloudflare/think": ">=0.23.0 <0.24.0",
-    "@dynamicagents/core": ">=0.18.0 <0.19.0",
+    "@dynamicagents/core": ">=0.19.0 <0.20.0",
     "agents": ">=0.33.0 <0.34.0",
     "ai": "^7.0.88",
     "just-bash": "^3.0.1",
@@ -103,7 +103,7 @@
     "@cloudflare/sandbox": "^1.0.1",
     "@cloudflare/think": "^0.23.0",
     "@cloudflare/vitest-plugin": "^1.4.4",
-    "@dynamicagents/core": "^0.18.0",
+    "@dynamicagents/core": "^0.19.0",
     "@types/node": "^26.5.1",
     "agents": "^0.33.0",
     "ai": "^7.0.101",
