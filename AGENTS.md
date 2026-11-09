@@ -54,9 +54,10 @@ batch on `main` until someone decides to release them, and a bump is a deliberat
 rather than something that rides every merge.
 
 A version bump reaching `main` is what ships it: on the first green Test run for
-a commit carrying that version, `.github/workflows/release.yml` publishes it to
-npm over OIDC and only then cuts the tag. The bump is the decision to ship. The workflow comments hold
-the rest.
+a commit carrying that version, `.github/workflows/release.yml` calls the train's
+release protocol, which publishes it to npm over OIDC and only then cuts the tag.
+The bump is the decision to ship. The protocol is dev-agents'
+`.github/workflows/npm-release.yml`, and its comments hold the rest.
 
 Core ships first. A version here whose peer range admits a core that is not yet
 on the registry is one nobody can install.
