@@ -28,7 +28,6 @@
  */
 
 import { sha256Hex } from "@dynamicagents/core";
-import type { JobState } from "@dynamicagents/core/job";
 
 /** Just enough of a workspace filesystem to inspect a checkout. */
 export interface InstallProbe {
@@ -45,21 +44,41 @@ export interface InstallProbe {
  * informally would drift, and the drift would show up as a shell command running
  * halfway through an `npm ci`.
  *
- * ## Why it is the host's `JobState` with one field intersected in
+ * Each variant says something the others cannot:
  *
- * Core's `/job` owns the *choreography* around a job a Durable Object drives
- * through its alarm — arming, the single-flight guard, the staleness bound, the
- * generation a drain writes under. This package owns what an install
- * specifically **is**: which package manager, which lockfile, what counts as
- * skippable. Splitting them along that line is what lets a second job on the
- * same object — a coding-agent run, say — reuse every rule without inheriting
- * `npm ci`.
+ * - `idle`: nothing has ever run, so there is nothing to re-drive.
+ * - `skipped`: something looked and found nothing to install. Terminal and
+ *   correct, which is why it is not `done`: a gate must not retry a deliberate
+ *   no-op.
+ * - `running`: in flight, or believed to be. The host's install poll is what
+ *   settles one whose container, or whose shell, went away.
+ * - `done` and `failed`: terminal, carrying enough to explain the outcome
+ *   without the caller reaching for the transcript.
  *
- * `JobState` intersects `TExtra` into its `running`/`done`/`failed` variants
- * rather than nesting it under `meta`, so a reader spells `status.command` at
- * the top level.
+ * Flat rather than nesting the install's own fields under a key, so a stored
+ * record and its type agree without a mapping and a reader spells
+ * `status.command` at the top level.
  */
-export type InstallState = JobState<{ command: string }>;
+export type InstallState =
+  | { state: "idle" }
+  | { state: "skipped"; reason: string }
+  | { state: "running"; command: string; startedAt: number; tail?: string }
+  | {
+      state: "done";
+      command: string;
+      exitCode: number;
+      finishedAt: number;
+      ms: number;
+      tail?: string;
+    }
+  | {
+      state: "failed";
+      command: string;
+      finishedAt: number;
+      error: string;
+      exitCode?: number;
+      tail?: string;
+    };
 
 export interface InstallRule {
   /** How `package.json#packageManager` spells this one, e.g. `pnpm`. */

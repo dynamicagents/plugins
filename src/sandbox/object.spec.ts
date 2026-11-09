@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { ROOT_SESSION } from "agents/harness/container";
 import { sha256Hex } from "@dynamicagents/core";
+import type { LifecycleJob } from "@dynamicagents/core/alarm";
 import { CONTROL_SESSION, EGRESS_READY } from "./constants.js";
 import {
   DEFAULT_INSTALL_PLAN,
@@ -648,5 +649,69 @@ describe("files", () => {
       );
     });
     expect((await sandbox.fake()).starts).toBe(0);
+  });
+});
+
+describe("wakes", () => {
+  /**
+   * The object's own jobs, read from the queue's table: the lifecycle that owns
+   * them is private to the object, and a spec that reached it through a
+   * test-only accessor would assert the accessor.
+   */
+  const wakes = (state: DurableObjectState) =>
+    state.storage.sql
+      .exec<{ id: string; fn: string; time: number }>(
+        "SELECT id, fn, time FROM cf_agents_jobs WHERE capability = 'host'"
+      )
+      .toArray();
+
+  /** A due job as the lifecycle hands it to `onJob`, with only what it reads. */
+  const due = (id: string, fn: string) => ({
+    job: { id, fn } as LifecycleJob,
+    attempt: 1
+  });
+
+  /**
+   * Every use moves the idle stop, so it is the busiest deadline the object
+   * has: each move must replace the one before rather than add another.
+   */
+  it("keeps one idle stop however often it is touched, and moves it", async () => {
+    const sandbox = freshSandbox("idle-moves");
+    await sandbox.ensureRunning();
+    const [first] = await runInDurableObject(sandbox, (_, state) =>
+      wakes(state)
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await sandbox.ensureRunning();
+    const after = await runInDurableObject(sandbox, (_, state) => wakes(state));
+    expect(after).toEqual([
+      { id: "sandbox:idle", fn: "sandboxIdle", time: expect.any(Number) }
+    ]);
+    expect(after[0]!.time).toBeGreaterThan(first!.time);
+  });
+
+  it("stops an idle sandbox when its idle stop comes due", async () => {
+    const sandbox = freshSandbox("idle-due");
+    await sandbox.ensureRunning();
+    await runInDurableObject(sandbox, (instance) =>
+      instance.onJob(due("sandbox:idle", "sandboxIdle"))
+    );
+    expect((await sandbox.fake()).running).toBe(false);
+    expect(
+      await runInDurableObject(sandbox, (_, state) => wakes(state))
+    ).toEqual([]);
+  });
+
+  /**
+   * A job whose `fn` names no wake has nothing to run. Thrown, it would be
+   * retried to no end and then deleted all the same; returned, it completes.
+   */
+  it("completes a job no wake answers to, rather than throwing", async () => {
+    const sandbox = freshSandbox("unknown-wake");
+    await runInDurableObject(sandbox, async (instance) => {
+      await expect(
+        instance.onJob(due("sandbox:gone", "gone"))
+      ).resolves.toBeUndefined();
+    });
   });
 });

@@ -6,9 +6,8 @@ import { humanMs } from "./format.js";
  *
  * ## Why this is not `InstallState`
  *
- * `InstallState` is the durable record of **a job the host ran** — core's
- * `JobState`, which owns arming, the single-flight guard, the staleness bound
- * and the generation marker. It is right for that and unchanged by this file.
+ * `InstallState` is the durable record of **an install the host ran**. It is
+ * right for that and unchanged by this file.
  *
  * Every *reader*, though, is asking a different question: **can I rely on this
  * workspace right now?** The two diverge, and expressing the second through the

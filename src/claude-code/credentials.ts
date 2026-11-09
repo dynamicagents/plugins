@@ -33,10 +33,10 @@
  * ## Everything here is pure
  *
  * No storage, no `fetch`, no Durable Object — the host passes a
- * {@link CredentialStore} and the clock. That is the discipline `JobLifecycle`
- * and `InstallProbe` already set in this repository, and it is what lets the
- * rotation rules be specified without a container: a pool with a fake store is
- * two object literals.
+ * {@link CredentialStore} and the clock. That is the discipline `InstallProbe`
+ * already sets in this repository, and it is what lets the rotation rules be
+ * specified without a container: a pool with a fake store is two object
+ * literals.
  */
 import { sha256Hex } from "@dynamicagents/core";
 

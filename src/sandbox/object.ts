@@ -9,9 +9,9 @@ import {
 } from "agents/harness/container";
 import { sha256Hex } from "@dynamicagents/core";
 import {
-  installScheduler,
-  namedDeadline,
-  type ScheduledHost
+  installLifecycle,
+  type GuardedLifecycle,
+  type LifecycleJobContext
 } from "@dynamicagents/core/alarm";
 import {
   DirectoryBackup,
@@ -163,11 +163,18 @@ export interface SnapshotSeed {
   snapshot: { id: string };
 }
 
-type WakeHandlers = {
-  sandboxIdle: () => Promise<void>;
-  egressWatch: () => Promise<void>;
-  installPoll: () => Promise<void>;
-};
+/**
+ * What the object wakes for, each a host job under its own id, so pushing the id
+ * again moves it. Prefixed because a job id is unique across every owner on the
+ * lifecycle, the harness included; `@dynamicagents/core/alarm` says why.
+ */
+const WAKES = {
+  sandboxIdle: "sandbox:idle",
+  egressWatch: "sandbox:egress-watch",
+  installPoll: "sandbox:install-poll"
+} as const;
+
+type Wake = keyof typeof WAKES;
 
 export abstract class SandboxObjectBase<
   Env extends object = Cloudflare.Env
@@ -188,10 +195,9 @@ export abstract class SandboxObjectBase<
   readonly #egress: EgressPlan;
   readonly #container: Container;
   readonly #harness: ContainerHarness;
-  readonly #wake: ScheduledHost<WakeHandlers, Env>;
-  readonly #idle;
-  readonly #egressWatch;
-  readonly #installPoll;
+  readonly #wake: GuardedLifecycle<Env>;
+  /** What each wake runs. Keyed by every {@link Wake}, so one with no handler does not compile. */
+  readonly #wakes: Record<Wake, () => Promise<void>>;
   #runtimePreparing: Promise<void> | undefined;
   /** Commands, file calls and submissions under way: each holds the container up. */
   #running = 0;
@@ -231,33 +237,13 @@ export abstract class SandboxObjectBase<
       idleTimeoutMs: HARNESS_IDLE_MS,
       onContainerLost: "fail"
     });
-    this.#wake = installScheduler<WakeHandlers, Env>(this, {
-      callbacks: {
-        sandboxIdle: () => this.#onIdle(),
-        egressWatch: () => this.#onEgressWatch(),
-        installPoll: () => this.#onInstallPoll()
-      },
-      onError: (err: unknown) => {
-        console.error(
-          `[${this.#cfg.label}] a scheduled callback failed for good`,
-          {
-            id: this.ctx.id.toString(),
-            err: String(err)
-          }
-        );
-      }
-    });
+    this.#wake = installLifecycle<Env>(this);
     this.#wake.lifecycle.use(this.#harness);
-    const deadline = (key: string, callback: keyof WakeHandlers) =>
-      namedDeadline({
-        storage: this.ctx.storage,
-        scheduler: this.#wake.scheduler,
-        key,
-        callback
-      });
-    this.#idle = deadline("sandbox:idle-id", "sandboxIdle");
-    this.#egressWatch = deadline("sandbox:egress-watch-id", "egressWatch");
-    this.#installPoll = deadline("sandbox:install-poll-id", "installPoll");
+    this.#wakes = {
+      sandboxIdle: () => this.#onIdle(),
+      egressWatch: () => this.#onEgressWatch(),
+      installPoll: () => this.#onInstallPoll()
+    };
     /**
      * Started here rather than on first use. A request that wakes a fresh
      * instance and reaches the container without starting the harness's
@@ -269,6 +255,46 @@ export abstract class SandboxObjectBase<
       this.#migrate();
       await this.#wake.start();
     });
+  }
+
+  /** Move a wake to `at`, in epoch ms, replacing wherever it stood. */
+  async #arm(wake: Wake, at: number): Promise<void> {
+    await this.#wake.jobs.push({ id: WAKES[wake], fn: wake, time: at });
+  }
+
+  async #disarm(wake: Wake): Promise<void> {
+    await this.#wake.jobs.cancel(WAKES[wake]);
+  }
+
+  /**
+   * A wake come due. Public because the lifecycle finds it by name.
+   *
+   * A failure is logged here because nothing else reports it: the lifecycle
+   * retries within the alarm and then deletes the job without a word.
+   */
+  async onJob({ job, attempt }: LifecycleJobContext): Promise<void> {
+    const run = Object.hasOwn(this.#wakes, job.fn)
+      ? this.#wakes[job.fn as Wake]
+      : undefined;
+    if (!run) {
+      console.error(`[${this.#cfg.label}] a job no wake answers to`, {
+        id: this.ctx.id.toString(),
+        job: job.id,
+        fn: job.fn
+      });
+      return;
+    }
+    try {
+      await run();
+    } catch (err) {
+      console.error(`[${this.#cfg.label}] a wake failed`, {
+        id: this.ctx.id.toString(),
+        wake: job.fn,
+        attempt,
+        err: String(err)
+      });
+      throw err;
+    }
   }
 
   #image(): string {
@@ -397,7 +423,7 @@ export abstract class SandboxObjectBase<
           err: String(err)
         });
       });
-    await this.#egressWatch.set(new Date(Date.now() + EGRESS_WATCH_MS));
+    await this.#arm("egressWatch", Date.now() + EGRESS_WATCH_MS);
   }
 
   /** A command as the agent, with no capabilities: the host's `env`, its own over that, and every egress rule's over both. */
@@ -740,7 +766,7 @@ export abstract class SandboxObjectBase<
       await session.abort(receipt.operationId);
       throw new Error(`run ${runId} was stopped, so it takes no more turns`);
     }
-    await this.#egressWatch.set(new Date(Date.now() + EGRESS_WATCH_MS));
+    await this.#arm("egressWatch", Date.now() + EGRESS_WATCH_MS);
     return { operationId: receipt.operationId, accepted: receipt.accepted };
   }
 
@@ -1028,7 +1054,7 @@ export abstract class SandboxObjectBase<
         await this.#backupAll();
         await this.#harness.stop();
       }
-      await this.#idle.clear();
+      await this.#disarm("sandboxIdle");
       return { released: true };
     });
   }
@@ -1038,8 +1064,9 @@ export abstract class SandboxObjectBase<
     await this.#admit();
     const now = Date.now();
     await this.ctx.storage.put(LAST_USED_KEY, now);
-    await this.#idle.set(
-      new Date(now + (this.#cfg.idleStopMs ?? IDLE_STOP_MS))
+    await this.#arm(
+      "sandboxIdle",
+      now + (this.#cfg.idleStopMs ?? IDLE_STOP_MS)
     );
   }
 
@@ -1047,8 +1074,9 @@ export abstract class SandboxObjectBase<
   async #onIdle(): Promise<void> {
     const released = await this.release();
     if (!released.released) {
-      await this.#idle.set(
-        new Date(Date.now() + (this.#cfg.idleStopMs ?? IDLE_STOP_MS))
+      await this.#arm(
+        "sandboxIdle",
+        Date.now() + (this.#cfg.idleStopMs ?? IDLE_STOP_MS)
       );
     }
   }
@@ -1220,7 +1248,7 @@ export abstract class SandboxObjectBase<
       limitMs: timeoutMs,
       runtimeId: (await this.#harness.container()).runtimeId ?? ""
     } satisfies ArmedInstall);
-    await this.#installPoll.set(new Date(Date.now() + INSTALL_POLL_MS));
+    await this.#arm("installPoll", Date.now() + INSTALL_POLL_MS);
     return running;
   }
 
@@ -1299,7 +1327,7 @@ export abstract class SandboxObjectBase<
         );
         return;
       }
-      await this.#installPoll.set(new Date(Date.now() + INSTALL_POLL_MS));
+      await this.#arm("installPoll", Date.now() + INSTALL_POLL_MS);
       return;
     }
     const exitCode = Number(exit.trim());
