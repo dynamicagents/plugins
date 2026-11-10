@@ -110,7 +110,8 @@ the next one, and a host that moves the tools on its own says so where the model
 reads it every turn: the model remembers the switch's answer. A switch moves the
 installing agent's own tools, so a host passes `worktrees` to the parent's install
 and never to a sub-agent's. The host renders every answer; this plugin checks a
-branch's shape and passes the sentence through.
+branch's shape and passes the sentence through. `worktreeSwitch` in
+[`/worktrees`](../worktrees/) is one, over the worktrees that subpath keeps.
 
 ## Nothing is held for approval
 

@@ -1,7 +1,7 @@
 {
   "name": "@dynamicagents/plugins",
   "version": "0.19.0",
-  "description": "Optional, composable capabilities for a Dynamic Agent: browser rendering, a Linux container, git and pull requests on GitHub, a scratchpad, and Claude Code sessions. One subpath per plugin, so a bundle grows only with what it imports.",
+  "description": "Optional, composable capabilities for a Dynamic Agent: browser rendering, a Linux container, git and pull requests on GitHub, a scratchpad, Claude Code sessions, and a worktree of its own for each writing session. One subpath per plugin, so a bundle grows only with what it imports.",
   "keywords": [
     "ai-agents",
     "cloudflare-workers",
@@ -61,6 +61,10 @@
     "./sandbox/daemon": {
       "types": "./dist/sandbox/daemon/index.d.ts",
       "import": "./dist/sandbox/daemon/index.js"
+    },
+    "./worktrees": {
+      "types": "./dist/worktrees/index.d.ts",
+      "import": "./dist/worktrees/index.js"
     },
     "./package.json": "./package.json"
   },

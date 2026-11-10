@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  isBranchName,
   parseRepo,
   repoLocation,
   sameRepoUrl,
@@ -125,6 +126,54 @@ describe("branch names a push must not act on", () => {
   it("names the trunks a work branch must never be", () => {
     for (const trunk of ["main", "master", "trunk", "develop"]) {
       expect(PROTECTED_BRANCHES.has(trunk)).toBe(true);
+    }
+  });
+});
+
+describe("a branch a model may name", () => {
+  it("takes any name git takes that a push would act on", () => {
+    for (const name of [
+      "agent/vx78x",
+      "feature/artifacts",
+      "tiago/fix-1",
+      "a.b/c"
+    ]) {
+      expect(isBranchName(name), name).toBe(true);
+    }
+  });
+
+  /**
+   * git's rules and `UNSAFE_BRANCH`'s together, so nothing admitted here is
+   * refused later by the push.
+   */
+  it("refuses what git refuses, and what the push guard refuses", () => {
+    for (const other of [
+      "",
+      "HEAD",
+      "@",
+      "-f",
+      "+f",
+      "refs/heads/x",
+      "/main",
+      "main/",
+      "a//b",
+      "main.",
+      "a..b",
+      "a@{1}",
+      "a.lock",
+      "a.lock/b",
+      "a/.hidden",
+      "a b",
+      "a\nb",
+      "a:b",
+      "a^b",
+      "a~1",
+      "a?b",
+      "a*b",
+      "a[b",
+      "a\\b"
+    ]) {
+      expect(isBranchName(other), JSON.stringify(other)).toBe(false);
     }
   });
 });

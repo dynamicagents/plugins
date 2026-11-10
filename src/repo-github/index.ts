@@ -18,6 +18,13 @@ import { worktreesTools } from "./tools-worktrees.js";
 export { parseRepo } from "./url.js";
 
 /**
+ * The one rule for a branch a model names: git's, and the push guard's. A host
+ * checks a branch its own tool takes against it, so a name the push would
+ * refuse is refused before anything is spent on it.
+ */
+export { isBranchName } from "./url.js";
+
+/**
  * The hosted MCP server this plugin reads GitHub through, and the allowlist it
  * is held to. Exported so a deployment can state in its own docs what the
  * token is able to reach, and so a spec can assert the list has not grown.
@@ -347,7 +354,7 @@ export type RepoToolName = (typeof REPO_TOOL_NAMES)[number];
  *
  * The host renders every answer: which worktrees exist, where their checkouts
  * sit and what is safe to do in them are its facts, and a sentence is what the
- * model reads.
+ * model reads. `worktreeSwitch` in `../worktrees/switch.ts` is one.
  */
 export interface RepoWorktrees {
   /** Every worktree, with its branch and state. */

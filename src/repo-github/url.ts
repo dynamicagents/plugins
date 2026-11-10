@@ -44,6 +44,31 @@ export const UNSAFE_BRANCH =
   /[:^~?*[\\\x00-\x20\x7f]|^[+-]|^refs\/|\.\.|@\{|\.lock$|\/$/;
 
 /**
+ * Whether a model may name `branch` as a branch: git would take it, and
+ * {@link UNSAFE_BRANCH} would not refuse it.
+ *
+ * The one rule for a branch a model names, checked before anything is spent on
+ * it, so a name the push would refuse is refused before a clone rather than
+ * after. git's own rules add an empty segment, a segment starting with `.` and
+ * a trailing `.`; `@` is refused besides, because git accepts it but
+ * `checkout @` reads it as HEAD.
+ */
+export function isBranchName(branch: string): boolean {
+  return (
+    branch !== "HEAD" &&
+    branch !== "@" &&
+    !UNSAFE_BRANCH.test(branch) &&
+    !branch.endsWith(".") &&
+    branch
+      .split("/")
+      .every(
+        (part) =>
+          part !== "" && !part.startsWith(".") && !part.endsWith(".lock")
+      )
+  );
+}
+
+/**
  * Where a repository URL points, in a form that cannot be spoofed by a path.
  *
  * **https only**, with no exception for scp-like syntax (`git@host:owner/repo`):

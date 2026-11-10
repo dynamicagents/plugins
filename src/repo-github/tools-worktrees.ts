@@ -2,7 +2,7 @@ import { tool } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
 import type { RepoWorktrees } from "./index.js";
-import { UNSAFE_BRANCH } from "./url.js";
+import { isBranchName } from "./url.js";
 
 /**
  * Moving between the host's worktrees — not to be confused with
@@ -16,8 +16,7 @@ import { UNSAFE_BRANCH } from "./url.js";
 export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
   const refuse = (branch: string) =>
     `"${branch}" is not a plain branch name — pass it as the sub-agent's report named it`;
-  const unsafe = (branch: string) =>
-    branch === "" || UNSAFE_BRANCH.test(branch);
+  const unsafe = (branch: string) => !isBranchName(branch);
 
   return {
     repo_worktrees: tool({
@@ -44,7 +43,7 @@ export function worktreesTools(worktrees: RepoWorktrees): ToolSet {
           .string()
           .optional()
           .describe(
-            "The branch a sub-agent's report named, e.g. 'claude-coordinator/<task>/<n>'; omit to go back to your own checkout"
+            "The branch a sub-agent's report named, spelled as it named it; omit to go back to your own checkout"
           )
       }),
       execute: async ({ branch }) => {
