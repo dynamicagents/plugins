@@ -7,8 +7,9 @@ import type {
 } from "../worker.js";
 import type { PollResult } from "../../src/sandbox/index.js";
 
-// Cast, because this package generates no ambient `Env` (see
-// `scripts/verify-runtime-types.mjs`); the bindings are in `wrangler.jsonc`.
+// Cast, because this package generates no ambient `Env` (the devkit's
+// runtime-types checker, in `npm run types:check`, fails one); the bindings are
+// in `wrangler.jsonc`.
 const bindings = env as unknown as {
   TEST_SANDBOX: DurableObjectNamespace<TestSandboxDO>;
   TEST_SANDBOX_HTTPS: DurableObjectNamespace<TestSandboxHttpsDO>;
