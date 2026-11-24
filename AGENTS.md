@@ -32,8 +32,8 @@ changes a decision. Not what changed, not when, not what a previous version said
   how many there are.
 - **Cross-file references name a real path**, and a path in a comment is
   checkable — so `check` checks it, through `npm run verify:references`. That is
-  the devkit's checker, vendored into `.devkit/` from dev-agents'
-  `packages/devkit`, which is where what it reads is explained; this package
+  the checker from the `@dynamicagents/devkit` devDependency, whose README is
+  where what it reads is explained; this package
   scans what the `references` section of `devkit.config.mjs` says and allows
   what it lists, each entry with its reason. Both classes are covered now, a
   relative reference and one from the repository root, so a path in a README
