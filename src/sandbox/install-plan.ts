@@ -418,27 +418,6 @@ export async function installFingerprint(
   return await digestFiles(fs, dir, names, resolution.command);
 }
 
-/**
- * The same digest for a package root an install reached without being pointed
- * at it — a submodule a bootstrap installs, say — where there is no command to
- * fold in, and every lockfile the plan knows stands in for the one it would pick.
- *
- * For a caller restoring every root's tree at once from one snapshot, which has
- * to know none of them moved.
- */
-export async function rootFingerprint(
-  fs: InstallProbe,
-  dir: string,
-  plan: InstallPlan
-): Promise<string | null> {
-  return await digestFiles(
-    fs,
-    dir,
-    ["package.json", ...planLockfiles(plan), ...INSTALL_CONFIG_FILES],
-    ""
-  );
-}
-
 /** `prefix`, then every file of `names` present in `dir`; null when none is. */
 async function digestFiles(
   fs: InstallProbe,

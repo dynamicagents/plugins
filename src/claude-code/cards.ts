@@ -5,6 +5,7 @@ import {
   type EntrySection
 } from "@dynamicagents/core/artifacts";
 import type { ClaudeCodeEvent, ClaudeCodeResult } from "./events.js";
+import { str } from "./json.js";
 
 /**
  * A Claude Code session's stream as cards on its parent's transcript — the
@@ -34,14 +35,24 @@ const SUMMARY_MAX_CHARS = 120;
 type ToolResultEvent = Extract<ClaudeCodeEvent, { kind: "toolResult" }>;
 type InitEvent = Extract<ClaudeCodeEvent, { kind: "init" }>;
 
+/**
+ * A record to read fields off, empty when there is none.
+ *
+ * `{}` rather than `undefined` on purpose: every caller here indexes the result
+ * straight away and feeds each field through {@link str}, so an absent object
+ * and an object with absent fields have to render the same card. Returning
+ * `undefined` would put a `?.` on each of those reads to reach the same answer.
+ *
+ * `/claude-code`'s other coercion, `asRecord` in
+ * {@link file://./events.ts events.ts}, is this test with the opposite empty
+ * case, because its callers branch on the absence instead of indexing through
+ * it. The two are deliberately not one helper; neither is a wrapper of the
+ * other to be found later.
+ */
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
-}
-
-function str(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
 }
 
 /** The first line of `text`, clipped to a card's head. */
@@ -385,6 +396,20 @@ export function apiErrorCard(error: string, waitMs: number): Card {
   };
 }
 
+/**
+ * Elapsed time for a session's cards: seconds, then minutes and seconds, then
+ * hours and minutes.
+ *
+ * Deliberately a second renderer rather than a call to `/sandbox`'s
+ * {@link file://../sandbox/format.ts humanMs}, which this subpath is allowed to
+ * import. Two constraints hold them apart. A session's wall clock runs for
+ * hours and `humanMs` has no hours tier, so `resultCard` would read `90m00s`
+ * where the CLI itself says `1h 30m`. And `humanMs` pads its seconds because it
+ * renders a fixed limit as one value, which an elapsed time is not.
+ *
+ * So collapsing the two changes rendered output on one side or the other, and
+ * that is a product decision rather than a refactor.
+ */
 function duration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
