@@ -4,6 +4,15 @@
 how to test it. This file holds the conventions that are not about any one
 plugin.
 
+**Read this with the workspace's `AGENTS.md`.** This file is what is specific to
+plugins. The rules that span the train live one level up, in
+[`dev-agents`](https://github.com/dynamicagents/dev-agents/blob/main/AGENTS.md),
+the workspace these repositories are submodules of: where a change goes, how a
+release reaches npm, how a pull request and an issue are handled, and the house
+rules for prose and comments. Consult it as the general reference rather than
+assuming this file is all of it, because a session started inside this repository
+may never be shown it: each submodule is its own repository root.
+
 ---
 
 ## Comments

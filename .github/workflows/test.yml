@@ -7,9 +7,13 @@ on:
   push:
     branches:
       - main
+  # Every pull request, not only those into `main`. A stacked pull request, one
+  # branch based on another that is still open, targets its parent, and a
+  # `branches: [main]` filter reports "no checks" on it. Worse, the retarget
+  # GitHub performs when the parent merges fires `edited`, which is not in the
+  # default event list, so the filtered run never happens at all and the branch
+  # can reach `main` with its suite unrun.
   pull_request:
-    branches:
-      - main
 
 # Superseded PR runs are cancelled; main is not, because Release keys off the
 # run that Test completes there.

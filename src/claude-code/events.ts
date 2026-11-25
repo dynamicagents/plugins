@@ -6,6 +6,7 @@ import {
   toolCallCard,
   toolResultCard
 } from "./cards.js";
+import { str } from "./json.js";
 
 /**
  * `claude -p --output-format stream-json` on the wire, turned into things this
@@ -250,6 +251,20 @@ const EMPTY_USAGE: ClaudeCodeUsage = {
   cacheWrite: 0
 };
 
+/**
+ * A record to read fields off, or nothing when the value is not one.
+ *
+ * `undefined` rather than `{}` on purpose: the absence is the answer at most of
+ * these call sites. `readUsage` returns its empty total on it, `readAssistant`
+ * skips a block it cannot read, and `readRateLimit` reports no rate limit at
+ * all. An empty object would make each of those a second test against the
+ * fields inside.
+ *
+ * `/claude-code`'s other coercion, `record` in
+ * {@link file://./cards.ts cards.ts}, is this test with the opposite empty case,
+ * because its callers index the result rather than branching on it. The two are
+ * deliberately not one helper; that file carries the same note.
+ */
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -258,10 +273,6 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function num(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function str(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
 }
 
 function readUsage(raw: unknown): ClaudeCodeUsage {
