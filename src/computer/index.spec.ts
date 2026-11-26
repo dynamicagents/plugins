@@ -476,7 +476,7 @@ describe("edit", () => {
   it("refuses an empty old_string at the schema, before any of that can happen", () => {
     const { workspace } = stub();
     const tools = buildComputerTools(workspace, config);
-    const schema = tools.edit!.inputSchema as {
+    const schema = tools.edit!.inputSchema as unknown as {
       safeParse: (v: unknown) => { success: boolean };
     };
 
@@ -567,7 +567,7 @@ describe("grep", () => {
   it("clamps a context over the ceiling rather than refusing it", async () => {
     const { workspace, greps } = stub(seed);
     const tools = buildComputerTools(workspace, config);
-    const schema = tools.grep!.inputSchema as {
+    const schema = tools.grep!.inputSchema as unknown as {
       safeParse: (v: unknown) => { success: boolean };
     };
 
