@@ -153,15 +153,20 @@ it as an override and only the shape tests read from the file.
 Cloudflare Workers pool, as core's and starter's do, and on vitest 5 that pool
 crashes workerd mid-run, so the test file it was running goes unreported.
 
-**That crash is one this suite is measured clear of, not one it has a margin on.**
-On vitest 5.1.0 it loses no worker to it, over runs with the module cache cold,
-warm and disabled, while the same measurement has core's and starter's suites
-losing files to it. What held this package back on vitest 5 is a different failure
-and the fix is upstream: before `@cloudflare/vitest-plugin` 1.6.1 a spec using a
-`vi.mock` factory does not import under vitest 5.1, failing with
-`asyncLocalStorage.disable() is not implemented`, and the spec here that uses one is
-`src/browser/index.spec.ts`. From 1.6.1 the whole suite passes on vitest 5.1.0 with
-default options.
+**What this suite does under that crash is measured rather than assumed.** Run on
+the vitest 5 line against a copy of this repository, it lost no worker to the crash,
+with the module cache cold, warm and disabled, while core's and starter's suites
+lost files in the same run. What held this package back was a different failure,
+since fixed upstream: the spec here that uses a `vi.mock` factory,
+`src/browser/index.spec.ts`, did not import at all, failing with
+`asyncLocalStorage.disable() is not implemented`. That is
+[`cloudflare/workers-sdk#16668`](https://github.com/cloudflare/workers-sdk/issues/16668),
+fixed by [`#16699`](https://github.com/cloudflare/workers-sdk/pull/16699), which
+names the `@cloudflare/vitest-plugin` release that carries it; the runs and the
+versions they were taken on are in
+[`#124`](https://github.com/dynamicagents/plugins/issues/124). Read both as a record
+of those runs rather than a promise about a release nobody has run. What they settle
+is narrow and worth having: this suite is not the thing holding the pin.
 
 **The pin is still not this suite's to lift.** core's `AGENTS.md` is the home of
 that ceiling and of what to re-check before lifting it, and core's `vitest` peer
