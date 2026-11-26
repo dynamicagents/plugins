@@ -151,9 +151,19 @@ it as an override and only the shape tests read from the file.
 
 **This suite passing on the newest vitest is not the test.** It runs through the
 Cloudflare Workers pool, as core's and starter's do, and on vitest 5 that pool
-crashes workerd mid-run and the test file it was running goes unreported — this
-package's test Worker is simply the smallest module graph of the three, which is a
-margin nobody has measured rather than immunity. core's `AGENTS.md` is the home of
+crashes workerd mid-run, so the test file it was running goes unreported.
+
+**That crash is one this suite is measured clear of, not one it has a margin on.**
+On vitest 5.1.0 it loses no worker to it, over runs with the module cache cold,
+warm and disabled, while the same measurement has core's and starter's suites
+losing files to it. What held this package back on vitest 5 is a different failure
+and the fix is upstream: before `@cloudflare/vitest-plugin` 1.6.1 a spec using a
+`vi.mock` factory does not import under vitest 5.1, failing with
+`asyncLocalStorage.disable() is not implemented`, and the spec here that uses one is
+`src/browser/index.spec.ts`. From 1.6.1 the whole suite passes on vitest 5.1.0 with
+default options.
+
+**The pin is still not this suite's to lift.** core's `AGENTS.md` is the home of
 that ceiling and of what to re-check before lifting it, and core's `vitest` peer
 range bounds it for whatever release carries that range. Lift it here only in the
 round that lifts it there.
